@@ -42,7 +42,7 @@ def cmd_auth(args) -> int:
              + (f" ({summary['winky_key_source']})" if summary["winky_key"] else "")]
     if summary["winky_key"]:
         checked = winky.check_key()
-        lines.append(f"winky: key {checked['key']}; image model: {checked['image_model']}")
+        lines.append(f"winky: key {checked['key']} (Gemini review)")
     try:
         live = lumos.user()
         lines.append(f"lumos: logged in as {live.get('name')} ({live.get('user_id')})")

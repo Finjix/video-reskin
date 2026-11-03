@@ -5,7 +5,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 
 | Command | Does | Typical time |
 | --- | --- | --- |
-| `auth [--key K]` | stores the Winky key; checks key, image-model access and the Lumos login | seconds |
+| `auth [--key K]` | stores the Winky key; checks the key and the Lumos login | seconds |
 | `login [--timeout 300]` | Feishu QR login to Lumos (opens the QR image; refreshes it when it expires) | until scanned |
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |

@@ -31,8 +31,7 @@ Run `auth`. It shows the stored Winky key and whether the Lumos login works.
   about to open on their screen and that they should scan it with the Feishu app, then run `login`. It waits up to
   5 minutes and replaces an expired code by itself; it prints the image path (`qr: ...`) in case no window opened, so
   you can show that image. `login --check` only checks.
-- `winky: ... image model: not authorized` is fine: keyframes then go through the Lumos image-to-image API with the
-  same GPT Image model. Mention it in the final summary.
+- The Winky key is only for the Gemini review; keyframes (GPT Image) and videos (Seedance) run on the Lumos login.
 
 ## Talking to the user
 

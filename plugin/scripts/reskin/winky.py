@@ -1,4 +1,4 @@
-"""Winky (Lumos model gateway) with the user's API key: OpenAI image edits and Gemini generateContent."""
+"""Winky (Lumos model gateway) with the user's API key: Gemini generateContent for the review."""
 from __future__ import annotations
 
 import base64
@@ -9,7 +9,6 @@ from pathlib import Path
 from reskin import credentials, net
 
 BASE = "https://lumos.diandian.info/winky"
-IMAGE_MODEL = "gpt-image-2.5-sunburst"
 REVIEW_MODEL = "gemini-3.8-flash"
 
 
@@ -50,37 +49,13 @@ def _post(url: str, *, body: bytes, content_type: str, timeout: float) -> dict:
 
 
 def check_key() -> dict:
-    """Free checks: the key is accepted, and whether it may use the image model (an invalid size is never billed)."""
+    """Free check that the key is accepted."""
     headers = {"Authorization": "Bearer " + credentials.winky_key()}
     try:
         net.json_call("GET", BASE + "/openai/v1/models", headers=headers, attempts=2)
     except net.HttpError as error:
         raise _error(error) from None
-    try:
-        _post(BASE + "/openai/v1/images/generations", body=json.dumps({"model": IMAGE_MODEL, "prompt": "x", "size": "7x7"}).encode(),
-              content_type="application/json", timeout=60)
-        image = "allowed"
-    except PermissionDenied:
-        image = "not authorized (image keyframes fall back to the Lumos image-to-image page API)"
-    except RuntimeError:
-        image = "allowed"
-    return {"key": "accepted", "image_model": image}
-
-
-def edit_image(images: list[Path], prompt: str, *, size: str, quality: str = "high", model: str = IMAGE_MODEL,
-               timeout: float = 600) -> bytes:
-    """/v1/images/edits with one or more input images; returns PNG bytes."""
-    fields: list = [("model", model), ("prompt", prompt), ("size", size), ("quality", quality),
-                    ("output_format", "png"), ("n", "1")]
-    for path in images:
-        path = Path(path)
-        fields.append(("image[]", (path.name, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "image/png")))
-    body, content_type = net.multipart(fields)
-    value = _post(BASE + "/openai/v1/images/edits", body=body, content_type=content_type, timeout=timeout)
-    rows = value.get("data") or []
-    if not rows or not rows[0].get("b64_json"):
-        raise RuntimeError(f"image edit returned no image: {str(value)[:400]}")
-    return base64.b64decode(rows[0]["b64_json"])
+    return {"key": "accepted"}
 
 
 def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW_MODEL, system: str | None = None,

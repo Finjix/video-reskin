@@ -49,15 +49,9 @@ class SizeTests(unittest.TestCase):
         self.assertEqual(assemble.target_size(3840, 2160, "1080p"), (1920, 1080))
         self.assertEqual(assemble.target_size(1080, 1350, "1080p"), (1080, 1350))
 
-    def test_image_sizes_are_multiples_of_16(self):
-        for w, h in ((1080, 1920), (1920, 1080), (1080, 1350), (1000, 1000)):
-            width, height = (int(x) for x in images.size_for(w, h).split("x"))
-            self.assertEqual(width % 16, 0)
-            self.assertEqual(height % 16, 0)
-            self.assertAlmostEqual(width / height, w / h, delta=.02)
-            self.assertTrue(655_360 <= width * height <= 8_294_400)
-        self.assertEqual(images.size_for(1080, 1920), "1152x2048")
+    def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")
+        self.assertEqual(images.aspect_for(1080, 1920), "9:16")
 
 
 class TimelineTests(unittest.TestCase):
