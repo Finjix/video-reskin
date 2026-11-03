@@ -1,0 +1,6 @@
+interface:
+  display_name: "Video Reskin"
+  short_description: "Batch-restyle videos into realistic-material 1080p deliverables with a Gemini review loop"
+  default_prompt: "Use $video-reskin to restyle these videos into realistic materials."
+policy:
+  allow_implicit_invocation: true
