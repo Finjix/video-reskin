@@ -15,7 +15,7 @@ def aspect_for(width: int, height: int) -> str:
     return min(ASPECTS, key=lambda name: abs(ASPECTS[name] - ratio))
 
 
-def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "high",
+def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "auto",
          model: str = IMAGE_MODEL) -> dict:
     """Edit the first image (later images are references); writes `output` and returns the generation."""
     references = [lumos.upload(path, "image-to-image") for path in images]

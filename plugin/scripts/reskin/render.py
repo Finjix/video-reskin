@@ -20,7 +20,7 @@ from reskin.common import FFMPEG, PROMPTS, digest, log, read, run, sha, video_in
 from reskin.prompts import compose
 
 POLL_SECONDS = 15
-GENERATION_TIMEOUT = 75 * 60
+GENERATION_TIMEOUT = 30 * 60
 SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 
 
