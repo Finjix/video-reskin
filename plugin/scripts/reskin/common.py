@@ -39,7 +39,18 @@ def home() -> Path:
 
 
 def read(path: Path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except ValueError as error:       # JSONDecodeError and UnicodeDecodeError, e.g. a file a power cut zeroed
+        raise ValueError(f"{path} is unreadable ({error})") from None
+
+
+def _durable(temporary: Path, text: str) -> None:
+    """Write and flush to disk before the rename: without it a power cut can leave a renamed file of zero bytes."""
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def write(path: Path, value) -> Path:
@@ -56,7 +67,7 @@ def write_text(path: Path, text: str) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.partial")
-    temporary.write_text(text, encoding="utf-8")
+    _durable(temporary, text)
     os.replace(temporary, path)
     return path
 

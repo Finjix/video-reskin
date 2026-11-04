@@ -222,6 +222,29 @@ def cmd_assemble(args) -> int:
     return RULE_FAILURE if failed else 0
 
 
+def cmd_compare(args) -> int:
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    plan = load_plan(job)
+    runtime.ensure("media")
+    from reskin import assemble as ASSEMBLE
+    only = selection(args.only)
+    lines, failed = [], False
+    for source_id in plan["sources"]:
+        if only and source_id not in only:
+            continue
+        try:
+            made = ASSEMBLE.compare_source(job, state, source_id, layout=args.layout)
+        except ValueError as error:
+            failed = True
+            lines.append(f"{source_id}: no comparison: {error}")
+            continue
+        lines.append(f"{source_id}: {Path(made['output']).name}" + (" (unchanged)" if made["reused"] else
+                     f" {made['size'][0]}x{made['size'][1]} {made['duration']:.2f} s"))
+    show(lines)
+    return RULE_FAILURE if failed else 0
+
+
 def review_lines(result: dict, limit: int) -> list[str]:
     from reskin import review as REVIEW
     high = sum(1 for i in result["issues"] if i["severity"] == "high")
@@ -291,8 +314,10 @@ def cmd_redo(args) -> int:
                         if s["seam"] != "continuous")
             raise ValueError(f"{key} has no keyframe (it starts from the previous segment's result); if the shot's "
                              f"keyframe is wrong, redo {source_id}:{head} with --keyframe, else leave --keyframe out")
-        entry = RENDER.bump(job, key, args.reason, args.prompt)
-        lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})")
+        entry = RENDER.bump(job, key, args.reason, args.prompt, replace=args.replace_prompt)
+        lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})"
+                     + (f"; corrective sentences now: {entry['prompt']}" if entry.get("prompt") else
+                        "; no corrective sentences" if args.replace_prompt else ""))
     steps = f"keyframes --redo {' '.join(keys)}, render" if args.keyframe else "render"
     show(lines + [f"next: {steps}, assemble, review"])
     return 0
@@ -568,6 +593,10 @@ def main() -> None:
                         help="do not check segments before the next segment of their shot starts")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
     assemble.add_argument("--only", nargs="*", help="source IDs")
+    compare = command("compare", cmd_compare, help="the delivered video beside its original (<name>_对比.mp4)")
+    compare.add_argument("--only", nargs="*", help="source IDs")
+    compare.add_argument("--layout", choices=("left", "top"), default="left",
+                         help="original on the left (default) or on top")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
     review.add_argument("--only", nargs="*", help="source IDs")
     review.add_argument("--fps", type=float, default=None,
@@ -581,6 +610,8 @@ def main() -> None:
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")
     redo.add_argument("--keyframe", action="store_true", help="the keyframe itself is wrong: make it again too")
+    redo.add_argument("--replace-prompt", action="store_true",
+                      help="drop this segment's earlier corrective sentences first (one of them made things worse)")
     lint = command("lint", cmd_lint, help="Gemini lists what each source shows, checks the edits, drafts edits")
     lint.add_argument("--edits", type=Path, help="edits JSON to check")
     lint.add_argument("--only", nargs="*", help="source IDs")

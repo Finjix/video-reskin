@@ -20,6 +20,11 @@ description: Batch-restyle videos (by default into realistic materials with the 
   2 minutes. Run it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`, and never
   start a second `run`/`render` of the same job while one is running (it refuses: `another render of this job is
   still running`).
+- After a crash or reboot mid-batch: `status`, then `run` again. Generations already submitted are picked up on Lumos,
+  not paid again; finished results in `ai/` stay. An `error:` naming an unreadable file under `work/` is a cache:
+  delete that file and run the command again. Under `state/` or `config/`, report it instead of guessing.
+- Some consoles show Chinese output as garbled characters; the files and the prompts sent are fine. Read the job's
+  JSON files, not the console, before you conclude that text was corrupted.
 - Seedance is the cost: every segment and every redo is paid. A redo inside a shot also renders the rest of that shot
   again, so `run` checks each segment that has a successor before the successor starts (the segment check) and holds
   it when the check finds a flaw. `cost` shows what was sent and why.
@@ -45,7 +50,10 @@ Run `auth`. It shows the stored Winky key and whether the Lumos login works.
 
 Confirm once, at the start, in one message, and only what you cannot work out: the footage (files or folders), and
 the style if it is not the default realistic material look. By default every video loses its end card, game logos and
-bottom warning text (the user's standing request); keep HUD numbers, icons and buttons. Then work to the delivered
+bottom warning text (the user's standing request); keep HUD numbers, icons and buttons. When the user asks to see
+the result next to the original (对比, 并排, 左右对比), `compare` after the last `assemble` writes
+`<name>_写实_对比.mp4` beside the delivery (original left, restyled right; `--layout top` stacks them); never build it
+with FFmpeg yourself. Then work to the delivered
 batch without asking; an open question never stops production: take the default below and report it at the end.
 
 | Situation | Default |
@@ -55,19 +63,25 @@ batch without asking; an open question never stops production: take the default 
 | A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes Seedance draw garbled text there |
 | Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`整条的金枪鱼`, `绿色的纸币堆`) and leave out materials that are not on screen |
 | An object comes out in another colour than in the original (a yellow cable drawn red, a crane flickering) | name its colour in `materials` (`黄色的缆绳`), timed when the original changes it (`蓝色的金属吊机` until the upgrade, `红色的金属吊机` after) |
+| An object changes colour during a shot (an upgrade turns a blue crane red) | two timed `materials` items split at the change (`蓝色的机械抓斗吊臂` until 39, `红色的机械抓斗吊臂` from 39), and look at a preview after the change. A segment spanning the change can still keep the old colour: then `redo` it with a `--prompt` naming only the part that changes and the moment in seconds into the segment (see the next rows) |
 | Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too |
 | A coin counter, timer or other screen-fixed HUD with changing numbers | a `hud` box around it (from the still-overlay boxes in the catalog): it is copied back from the original frame by frame, so the digits are always right |
 | Screen-fixed, flat text or UI (captions, labels, banners, buttons) comes out garbled or changed | an `overlays` item for each (a `box` or `poly` hugging it): the models leave it out and the program burns the original's pixels (or the drawn `text`) back; `colors` for letters over a moving scene. UI standing in the scene (floor price tags, bubbles) and text with complex motion stay with the models |
 | Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
 | A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
+| Looking at previews | compare the colour of every prominent object with the original, in every preview, the late ones of each segment too: a whole yellowfin that came out pale in one preview was drawn silver-grey for the last 20 s of the video. Fixing it in the edits before rendering costs a few images; a redo costs 6-9 minutes and every later segment of the shot |
 | A preview shows a wrong object, colour or text | the edits are wrong for that moment (an untimed item, a missing colour, a confusable name): fix them, `plan`, `preview` again; previews cost a few images, a wrong prompt costs every segment |
 | `lint` suggests a change | it is Gemini's reading of the video: check it on the sheets (it once claimed a logo vanished at 22 s that stayed to 34 s); take what the sheets confirm |
 | A segment is held by the segment check | look at its stills (`review/gate/<id>-<Kxx>-p1.jpg`): confirmed -> `redo` it (with `--prompt`); a false alarm -> `accept --segment <key> --reason <why>`; then `run` again |
 | Screen-fixed text or UI comes out garbled after rendering | add an `overlays` (or `hud`) item covering it with a `box`/`poly` and no `colors`, `plan`, `assemble`: the segments are reused, nothing is rendered again |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
 | A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` (inside a shot this also renders the later segments of that shot again). This is the default |
+| Writing a corrective `--prompt` | name only the part that changes and what stays, e.g. `只有吊臂的金属立柱和横臂换成红色涂装；金枪鱼保持蓝白色鱼身，绝不变红`: a bare colour change (`吊臂由蓝色变为红色`) turned the tuna it held red too |
+| A corrective sentence made things worse | `redo --segment <key> --reason R --replace-prompt --prompt <new sentence>`: corrective sentences otherwise accumulate over attempts |
 | A confirmed flaw that is short (a few seconds) and local, inside a long segment, with later segments of the shot already done | consider `patch --segment <key> --at <start> <end> --reason R [--prompt P]`: only 4-8 s render again and the rest of the shot stays. Not for flaws spread over the segment, a wrong look or colour of the whole segment, fast camera motion or a cut at the patch's edges, or a flaw within 0.75 s of the segment's end. After `assemble`, both patch joins must be clean or slight; a visible join -> `patch --drop` and `redo` the segment |
 | A visible seam jump (seam sheet, measured or Gemini) | `redo` the segment after the seam; if it stays, `split_at` a still moment elsewhere |
+| A seam measured `visible`, but the seam sheet shows the same scene and the Gemini close-up calls it consistent | check the original at the seam (`frames`): an effect bursting there (flying bills, a flash) is counted as a jump. Dismiss it with that reason and report it; no redo |
+| `segment check failed (...); continuing unchecked` | the next segment renders anyway; after assembly look at that segment's frames yourself (`frames`) |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Issues remain after `review_rounds` (3) rounds | deliver; list each remaining issue with its time |
 
@@ -110,7 +124,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    moments: `frames --source <id> --at <t>`), `redo` the confirmed segments (or `patch` a short local flaw, see the
    table), and `run` again: only what changed renders, unchanged videos are not reviewed again. Up to `review_rounds`
    rounds. A video with a visible seam is not done.
-7. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
+7. If the user asked for a comparison, `compare` (after the last `assemble`).
+8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
    rounds and verdict, seam measurements; issues dismissed (and why) or still open (with times); redos, patches,
    accepted holds and keyframe redos; and the `cost` lines (seconds sent to Seedance by cause).
 

@@ -281,5 +281,35 @@ class RedoTests(unittest.TestCase):
             shutil.rmtree(job, ignore_errors=True)
 
 
+    def test_corrective_sentences_accumulate_unless_replaced(self):
+        job = tmp()
+        try:
+            render.bump(job, "S01:K02", "r1", "吊臂变为红色。")
+            render.bump(job, "S01:K02", "r2", "鱼保持金黄色。")
+            row = common.read(job / "config/redo.json")["S01:K02"]
+            self.assertEqual(row["prompt"].splitlines(), ["吊臂变为红色。", "鱼保持金黄色。"])
+            row = render.bump(job, "S01:K02", "r3", "只有吊臂的金属结构变红，鱼不变色。", replace=True)
+            self.assertEqual((row["attempt"], row["prompt"]), (4, "只有吊臂的金属结构变红，鱼不变色。"))
+            row = render.bump(job, "S01:K02", "r4", None, replace=True)
+            self.assertNotIn("prompt", row)
+        finally:
+            shutil.rmtree(job, ignore_errors=True)
+
+
+class DurableTests(unittest.TestCase):
+    def test_unreadable_json_names_the_file(self):
+        job = tmp()
+        try:
+            broken = job / "work/S01-K01.json"
+            broken.parent.mkdir(parents=True)
+            broken.write_bytes(bytes(117))      # what a power cut left behind: zero bytes
+            with self.assertRaises(ValueError) as caught:
+                common.read(broken)
+            self.assertIn("S01-K01.json", str(caught.exception))
+            common.write(broken, {"ok": 1})
+            self.assertEqual(common.read(broken), {"ok": 1})
+        finally:
+            shutil.rmtree(job, ignore_errors=True)
+
 if __name__ == "__main__":
     unittest.main()

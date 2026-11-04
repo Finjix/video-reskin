@@ -262,7 +262,11 @@ def work_clip(job: Path, source_id: str, line: dict, out_fps: float, size: tuple
     work = job / "work" / f"{source_id}-{line['id']}.mp4"
     stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size)}
     stamp_path = work.with_suffix(".json")
-    if not (work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
+    try:
+        current = work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp
+    except ValueError:                # a cache stamp a crash left unreadable: make the clip again
+        current = False
+    if not current:
         normalise(ai, frames, frames / out_fps, out_fps, size, work)
         write(stamp_path, stamp)
     return work
@@ -468,3 +472,43 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     write(job / "state/assembled" / f"{source_id}.json", result)
     log(f"{source_id}: assembled {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
     return result
+
+
+def compare_source(job: Path, state: dict, source_id: str, layout: str = "left") -> dict:
+    """The delivered video beside its original, on one clock, as a deliverable: `<delivered stem>_对比.mp4` in the
+    delivery folder. Original on the left (or top), restyled on the right (or bottom), each side at the original's
+    size (the restyle scaled up when the job renders smaller), with the delivered audio."""
+    record_path = job / "state/assembled" / f"{source_id}.json"
+    if not record_path.is_file():
+        raise ValueError(f"{source_id} is not assembled yet; run assemble first")
+    assembled = read(record_path)
+    source = next(r for r in state["sources"] if r["id"] == source_id)
+    result = Path(assembled["output"])
+    if not result.is_file():
+        raise ValueError(f"{result.name} is missing from the delivery folder; run assemble again")
+    output = result.with_name(result.stem + "_对比.mp4")
+    if output.is_file() and output.stat().st_mtime >= result.stat().st_mtime:
+        return {"output": str(output), "reused": True}
+    info = video_info(Path(source["path"]))
+    width, height = info["width"] // 2 * 2, info["height"] // 2 * 2
+    fps = assembled["fps"]
+    start, end = assembled["keep"]
+    stack = "hstack" if layout == "left" else "vstack"
+    graph = (f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps={fps},"
+             f"scale={width}:{height}:flags=bicubic,setsar=1[a];"
+             f"[1:v]setpts=PTS-STARTPTS,fps={fps},scale={width}:{height}:flags=lanczos,setsar=1[b];"
+             f"[a][b]{stack}=inputs=2:shortest=1,format=yuv420p[v]")
+    partial = output.with_name(output.stem + ".partial.mp4")
+    audio = ["-map", "1:a?", "-c:a", "copy"]
+    run([FFMPEG, "-v", "error", "-y", "-i", source["path"], "-i", result, "-filter_complex", graph, "-map", "[v]",
+         *audio, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+         "-movflags", "+faststart", "-shortest", partial])
+    try:
+        partial.replace(output)
+    except PermissionError:
+        raise ValueError(f"{output.name} is open in another program (a video player?); close it and run compare "
+                         f"again (the new version waits in {partial.name})") from None
+    made = video_info(output)
+    log(f"{source_id}: compared {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
+    return {"output": str(output), "reused": False, "size": [made["width"], made["height"]],
+            "duration": made["duration"]}

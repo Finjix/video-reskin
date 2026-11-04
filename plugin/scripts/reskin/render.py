@@ -301,14 +301,17 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
 _REDO_LOCK = threading.Lock()
 
 
-def bump(job: Path, key: str, reason: str, prompt: str | None = None) -> dict:
-    """Queue another attempt; corrective sentences accumulate, so a later redo keeps the earlier fixes."""
+def bump(job: Path, key: str, reason: str, prompt: str | None = None, replace: bool = False) -> dict:
+    """Queue another attempt; corrective sentences accumulate, so a later redo keeps the earlier fixes. `replace`
+    drops the earlier sentences first (one of them made things worse); with no `prompt` it only drops them."""
     with _REDO_LOCK:
         path = job / "config/redo.json"
         data = read(path) if path.is_file() else {}
         row = data.get(key, {"attempt": 1, "reasons": []})
         row["attempt"] += 1
         row["reasons"].append(reason)
+        if replace:
+            row.pop("prompt", None)
         if prompt and prompt.strip():
             sentences = [s for s in (row.get("prompt") or "").split("\n") if s]
             if prompt.strip() not in sentences:

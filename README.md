@@ -12,7 +12,7 @@ AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
 & "plugin/scripts/video_reskin.cmd" login
 ```
 
-`init` → `analyze` → `lint` → `plan` → `run`（关键帧和预览图，停下来看图）→ `run`（逐段检查的渲染；每个源渲完马上拼接、审片）→ 确认问题后 `redo` / `patch` / `accept` → 再 `run`。各步骤也可以单独执行（`keyframes`、`preview`、`render`、`assemble`、`review`），`cost` 查看花费。
+`init` → `analyze` → `lint` → `plan` → `run`（关键帧和预览图，停下来看图）→ `run`（逐段检查的渲染；每个源渲完马上拼接、审片）→ 确认问题后 `redo` / `patch` / `accept` → 再 `run`。各步骤也可以单独执行（`keyframes`、`preview`、`render`、`assemble`、`review`），`cost` 查看花费；用户要原片对比时，`compare` 生成左原片、右成片的 `<名称>_写实_对比.mp4`。
 
 1. **分析**（`analyze`）：识别镜头切换，找出尾板起点候选和静止叠加物（logo、警示语、HUD），生成联系表。AI 看图后写 edits 文件，内容包括保留区间、画面里的真实材质、要去除的元素、需要保留原样的 HUD 框、由程序烧录的文字/UI（`overlays`）和锚点帧。
 2. **分段**（`plan`）：Seedance 2.5 能一次编辑 4–30 秒，30 秒内画质保持稳定，所以分段尽量少、尽量长，优先在硬切处断开。超长镜头会平均切分，断点选在画面最静止的位置，并多渲染 0.5 秒作为重叠区。
@@ -38,6 +38,8 @@ AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
 - **渲染前抓提示词错误**：`lint` 让 Gemini 列出画面里的物体（颜色、时间）、logo 和警示语、屏幕文字、HUD，核对 edits 并生成草稿；`preview` 用视频提示词在每段里多出几张 GPT Image 预览图（只看，不当参考）。
 - **局部补丁**：一段里一两秒的局部问题，可以只重渲 4–8 秒（从该段自己的画面接上），进出两个接缝都测量；整段重做仍是默认。
 - **不重复付费**：提交只发一次，回复丢失时先按本次上传的 `media_id` 查历史；同一任务不允许两个渲染同时跑。
+- **纠正提示词**：`redo --prompt` 的纠正语句会随重做累加；只点名要变的部件和要保持的东西（颜色词会串到旁边的物体上），写错了用 `--replace-prompt` 替换。
+- **断电恢复**：JSON 状态先落盘再改名；`work/` 里读不出的缓存会自动重建；已提交的生成在重跑 `run` 时接着取，不重复付费。
 - **记账**：每次付费调用写入 `state/ledger.jsonl`（首次、redo、上游连带、自动重试、补丁……），`cost` 汇总。
 - **流水线**：最长的链先渲；每个源的段一齐就拼接、审片，不等整批；审片自动出每个问题的抽帧图和 Gemini 预判。
 

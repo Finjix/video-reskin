@@ -80,3 +80,25 @@ cross-fade blended two different pictures.
   calls (2 lint, 2 segment checks, review, 4 seam close-ups, triage).
 - One trial: whole-segment redo stays the default; patches are for short, local flaws in long segments whose shot
   continues.
+
+## 2026-11-04 (later): full GOF3D10057 run, 480p, 0-65.7 s, 3 chained segments of 20-23 s
+
+- Keyframes and 11 previews passed on the sheets; one late preview (50.65 s) already showed the yellowfin pale.
+  Nothing was changed, and the last segment drew it silver-grey from 45.6 s (redo with a colour sentence fixed it).
+  Previews are now checked object by object for colour, the late ones included.
+- K02 kept the grab arm blue after the 39.2 s upgrade although `materials` split blue/red at 39 s. The corrective
+  `机械抓斗吊臂由蓝色变为红色` turned the tuna the arm held red; naming only the arm's post and boom and that the
+  tuna stay blue/white fixed it. Corrective sentences accumulate, so `redo --replace-prompt` was added.
+- A power loss mid-render: the submitted K02 generation was picked up on the next `run` (not paid twice), but a
+  `work/` cache stamp was left as 117 zero bytes and `assemble` failed with a bare JSON error. JSON writes now fsync
+  before the rename, an unreadable work stamp rebuilds its clip, and read errors name the file.
+- `assemble` failed at 480p: the HUD crop (161 px) was odd, FFmpeg's yuv420p crop rounded it to 160 and alphamerge
+  refused the matte. Crops are even now (test_hud_matte).
+- K02's first segment check failed on a Gemini error and the run went on unchecked; the flaw it would have caught
+  cost K03 a re-render.
+- The 22.8 s seam measured `visible` (8.2 vs motion 7.1, local 39.8) in every round while the seam sheet, the stills
+  and Gemini's close-up showed the same scene: the original's cash stack bursts into flying bills at that moment.
+  Delivered with the note.
+- The user asked for the original beside the result; `compare` now makes `<name>_写实_对比.mp4` (2160x1920 here).
+- `cost`: Seedance 154.2 s (new 66.7, redo 67.0, upstream 20.6); GPT Image 13; Gemini 16. Wall time ~78 min, of
+  which ~48 min Seedance waits; the two avoidable redos took ~16 min.

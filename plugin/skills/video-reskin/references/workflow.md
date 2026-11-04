@@ -21,7 +21,8 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder; seam measurements and `sheets/<id>-seams.jpg` | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2), then checks every seam close up; measured seam jumps added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
-| `redo --segment S01:K02 --reason R [--prompt P] [--keyframe]` | sends confirmed segments back for another attempt | - |
+| `redo --segment S01:K02 --reason R [--prompt P] [--replace-prompt] [--keyframe]` | sends confirmed segments back for another attempt; corrective sentences accumulate over attempts, `--replace-prompt` drops the earlier ones first | - |
+| `compare [--only S01] [--layout left\|top]` | the delivered video beside its original (original left or top, each side at the original's size, delivered audio) → `<name>_写实_对比.mp4` in the delivery folder; only when the user asks for a comparison | ~20 s per minute of video |
 | `status` | progress per source and the next step | - |
 
 Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key).
@@ -122,7 +123,7 @@ so redoing a segment also renders the rest of its chain again. Edit the edits fi
 ## Outputs
 
 - Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, H.264, AAC, the source audio of the
-  kept range).
+  kept range); `<source name>_写实_对比.mp4` after `compare`.
 - `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.jpg`.
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, slightly shorter than the source clip: `assemble`
   stretches them back exactly).

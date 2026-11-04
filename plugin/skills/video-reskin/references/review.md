@@ -38,11 +38,22 @@ is a second opinion only. Decide:
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
   confirmed flaw, e.g. `鱼的形状和数量与原视频保持一致，不要变形`, `去掉右上角残留的logo文字`,
   `整体颜色与前一段保持一致，雪地为白色`.
+- Name only the part that changes and what must stay, with the moment in seconds into the segment (the segment's
+  start is in `reports/plan.md`). Colour words leak onto whatever is nearby: `机械抓斗吊臂由蓝色变为红色` turned the
+  tuna the arm was holding red; `本段约16秒处金色升级闪光过后，只有机械抓斗吊臂的金属立柱和横臂换成红色涂装；被抓起和河里的金枪鱼始终保持原本的蓝白色和银色鱼身，绝不变红。`
+  fixed it.
+- Corrective sentences accumulate over attempts. When one made things worse, `redo ... --replace-prompt --prompt
+  "<new sentence>"` drops the earlier ones (never edit `config/redo.json` by hand).
 - `--keyframe` when the keyframe already shows the flaw (wrong objects, logo kept, colour cast): run
   `keyframes --redo S01:K03` and check the sheet before rendering.
 - A seam jump: look at `sheets/<id>-seams.jpg` and the stills at the seam time, then redo the segment after the
   seam (it starts again from the previous result's frame; the later segments of that shot follow). If the same seam
   jumps again, move it to a stiller moment with `split_at` (plan again: the shot's segments render anew).
+- A seam measured `visible` while the seam sheet shows the same scene on both sides and the Gemini close-up calls it
+  consistent: check whether the original itself changes abruptly there (an effect bursting, a stack of bills flying
+  off, a flash). The measure counts that motion as a jump. Confirm it on `frames --source <id> --at <seam time>`;
+  if so, dismiss it with that reason (a redo renders the same moment again); before rendering, a `split_at` a
+  second away keeps the seam off such a moment.
 - Whole-segment redo is the default. A short (a few seconds), local flaw inside a long segment whose later
   segments are done can be patched instead (`patch --segment S01:K03 --at <start> <end> --reason ... [--prompt ...]`):
   only 4-8 s render again and the rest of the shot stays. Not for flaws spread over the segment, a wrong colour or
@@ -60,3 +71,7 @@ segment before it is measured, and Gemini compares the segment with its original
 burned overlays are not in yet). A visible seam, a high issue or two medium ones hold the segment; the rest of the
 shot waits, other shots go on. Confirm on `review/gate/<id>-<Kxx>-p<k>.jpg` like a review issue: `redo` (one segment
 renders again instead of the whole shot) or `accept --segment <key> --reason <why>`.
+
+- `segment check failed (...); continuing unchecked` (a Gemini error): the successor renders without the check; look
+  at that segment's frames (`frames` after assembly) before you trust the review alone: an unchecked segment in the
+  GOF3D10057 run kept a crane blue after its upgrade, and the shot's last segment had already rendered from it.
