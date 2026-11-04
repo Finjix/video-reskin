@@ -77,7 +77,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    segments of a shot start from the previous result instead). Look at every `sheets/<id>-keyframes.jpg`: same
    layout and objects as the original, realistic materials, no logo or warning text, no strong noise or fragmented
    look. Redo bad ones before rendering: a whole shot follows its keyframe.
-5. `render` edits every segment with Seedance 2.5 at 1080p on Lumos, chaining the segments of each shot.
+5. `render` edits every segment with Seedance 2.5 on Lumos at the job resolution (480p by default while developing), chaining the segments of each shot.
 6. `assemble` retimes each segment to its source duration, matches colours, switches between segments at their
    best-matching frame, copies the `hud` back from the original, joins everything with the source audio and writes
    `<name>_写实.mp4` into the delivery folder. It measures every seam (`clean`, `slight`, `visible`) and draws

@@ -10,17 +10,20 @@ ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.
            "4:5": 4 / 5, "5:4": 5 / 4}
 
 
-def aspect_for(width: int, height: int) -> str:
+VIDEO_ASPECTS = {k: ASPECTS[k] for k in ("9:16", "16:9", "3:4", "4:3", "1:1")} | {"21:9": 21 / 9}
+
+
+def aspect_for(width: int, height: int, aspects: dict[str, float] = ASPECTS) -> str:
     ratio = width / height
-    return min(ASPECTS, key=lambda name: abs(ASPECTS[name] - ratio))
+    return min(aspects, key=lambda name: abs(aspects[name] - ratio))
 
 
-def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "auto",
+def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "max",
          model: str = IMAGE_MODEL) -> dict:
     """Edit the first image (later images are references); writes `output` and returns the generation."""
     references = [lumos.upload(path, "image-to-image") for path in images]
     started = lumos.submit_image_to_image(references, prompt, model=model, aspect_ratio=aspect_for(width, height),
                                           quality=quality)
-    finished = lumos.wait(started["generation_id"], timeout=1200, poll=5)
+    finished = lumos.wait(started["generation_id"], timeout=600, poll=5)
     net.download(lumos.result_urls(finished)[0], Path(output))
     return {"backend": "lumos", "model": model, "generation_id": started["generation_id"]}

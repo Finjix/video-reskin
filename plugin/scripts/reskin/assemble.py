@@ -16,7 +16,7 @@ JUMP_LIMIT = 10.0       # grey levels at the join beyond the picture's own motio
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
-    short = 1080 if resolution == "1080p" else 720
+    short = {"480p": 480, "720p": 720, "1080p": 1080}[resolution]
     if width >= height:
         return round(short * width / height / 2) * 2, short
     return short, round(short * height / width / 2) * 2

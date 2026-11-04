@@ -11,7 +11,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot one after another, each from the previous result | 5-10 min per segment, 4 shots at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at the job resolution (480p by default while developing; 720p or 1080p for delivery) → `ai/`; segments of one shot one after another, each from the previous result | 5-10 min per segment, 4 shots at a time |
 | `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder; seam measurements and `sheets/<id>-seams.jpg` | ~1 min per video |
 | `review [--only S01]` | Gemini compares original and result, then checks every seam close up; measured seam jumps added → `reports/review/<id>-r<n>.md/json` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
@@ -27,7 +27,7 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
  "style": "realistic",
- "options": {"resolution": "1080p", "max_segment_seconds": 30, "fps": 30, "review_rounds": 3}}
+ "options": {"resolution": "480p", "max_segment_seconds": 30, "fps": 30, "review_rounds": 3}}
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).

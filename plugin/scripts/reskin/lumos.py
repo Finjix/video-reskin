@@ -99,15 +99,15 @@ def upload(path: Path, generation_type: str) -> dict:
 
 
 def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = "1080p",
-                      model: str = VIDEO_MODEL) -> dict:
+                      aspect_ratio: str = "adaptive", model: str = VIDEO_MODEL) -> dict:
     body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
-            "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": "adaptive",
+            "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": aspect_ratio,
             "output_format": "mp4", "sample_count": 1, "model": model}
     return call("POST", "/generations/video-to-video", body, timeout=120)
 
 
 def submit_image_to_image(images: list[dict], prompt: str, *, model: str, aspect_ratio: str,
-                          resolution: str = "1K", quality: str = "auto") -> dict:
+                          resolution: str = "2K", quality: str = "max") -> dict:
     body = {"reference_images": images, "prompt": prompt, "aspect_ratio": aspect_ratio, "resolution": resolution,
             "quality": quality, "output_format": "png", "background": "opaque", "output_compression": 100,
             "sample_count": 1, "model": model}
