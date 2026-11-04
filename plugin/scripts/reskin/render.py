@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from reskin import credentials, images, lumos, net
+from reskin import credentials, lumos, net
 from reskin.common import FFMPEG, PROMPTS, digest, log, read, run, sha, video_info, write
 from reskin.prompts import compose
 
@@ -93,14 +93,13 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     prompt = compose(style, "video", plan_row, extra=extra, span=span)
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference,
             "prompt": prompt, "model": lumos.VIDEO_MODEL, "resolution": state["options"]["resolution"],
-            "aspect_ratio": images.aspect_for(plan_row["width"], plan_row["height"], images.VIDEO_ASPECTS),
             "attempt": redo.get("attempt", 1)}
 
 
 def core(inputs: dict) -> str:
-    """What makes a finished segment current: its reference, frames, model and attempt. A prompt (or aspect ratio) change alone applies
+    """What makes a finished segment current: its reference, frames, model and attempt. A prompt change alone applies
     to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly)."""
-    return digest({k: v for k, v in inputs.items() if k not in ("prompt", "aspect_ratio")})
+    return digest({k: v for k, v in inputs.items() if k != "prompt"})
 
 
 def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict,
@@ -125,8 +124,7 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
         started = time.monotonic()
         while True:
             try:
-                submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"],
-                                                     aspect_ratio=inputs["aspect_ratio"])
+                submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"])
                 break
             except (RuntimeError, net.HttpError) as error:
                 if time.monotonic() - started > SUBMIT_PATIENCE or isinstance(error, credentials.MissingCredential):

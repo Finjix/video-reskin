@@ -10,12 +10,14 @@ ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.
            "4:5": 4 / 5, "5:4": 5 / 4}
 
 
-VIDEO_ASPECTS = {k: ASPECTS[k] for k in ("9:16", "16:9", "3:4", "4:3", "1:1")} | {"21:9": 21 / 9}
+ASPECT_TOLERANCE = .01      # relative; a source further than this from every preset gets "adaptive"
 
 
 def aspect_for(width: int, height: int, aspects: dict[str, float] = ASPECTS) -> str:
+    """The preset matching the source ratio, or "adaptive" when none is within ASPECT_TOLERANCE."""
     ratio = width / height
-    return min(aspects, key=lambda name: abs(aspects[name] - ratio))
+    name = min(aspects, key=lambda name: abs(aspects[name] - ratio))
+    return name if abs(aspects[name] / ratio - 1) <= ASPECT_TOLERANCE else "adaptive"
 
 
 def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "max",

@@ -48,7 +48,7 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     if options["resolution"] not in ("480p", "720p", "1080p"):
         raise ValueError("options.resolution must be 480p (default while developing), 720p or 1080p")
     if not 4 <= float(options["max_segment_seconds"]) <= 30:
-        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 2-30 s clips)")
+        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 4-30 s clips)")
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent

@@ -52,6 +52,8 @@ class SizeTests(unittest.TestCase):
     def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")
         self.assertEqual(images.aspect_for(1080, 1920), "9:16")
+        self.assertEqual(images.aspect_for(1080, 2400), "adaptive")
+        self.assertEqual(images.aspect_for(1080, 1350), "4:5")
 
 
 class TimelineTests(unittest.TestCase):

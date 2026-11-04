@@ -10,7 +10,7 @@ from pathlib import Path
 from reskin.common import read, write, write_text
 from reskin.prompts import describe
 
-MIN_SECONDS = 3.0         # Seedance needs at least 2 s; shorter pieces are merged into a neighbour
+MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
 OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more; assemble joins inside it
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
              "hud"}

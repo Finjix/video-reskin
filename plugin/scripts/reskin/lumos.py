@@ -99,9 +99,10 @@ def upload(path: Path, generation_type: str) -> dict:
 
 
 def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = "1080p",
-                      aspect_ratio: str = "adaptive", model: str = VIDEO_MODEL) -> dict:
+                      model: str = VIDEO_MODEL) -> dict:
+    # In video_edit mode Seedance takes the output ratio and length from the input clip, so the ratio stays adaptive.
     body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
-            "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": aspect_ratio,
+            "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": "adaptive",
             "output_format": "mp4", "sample_count": 1, "model": model}
     return call("POST", "/generations/video-to-video", body, timeout=120)
 
