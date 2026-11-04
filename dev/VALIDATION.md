@@ -33,3 +33,28 @@ Findings that changed the plugin:
 
 `dev/test_bootstrap.py` (cold start in a Unicode temp path, JSON stdin, offline reuse) and `dev/run_tests.py`
 (19 tests) pass.
+
+## 2026-11-03 (later): seam consistency, HUD digits, stronger review (GOF3D10057 only)
+
+The user found the scene changing at the 11 s seam of GOF3D10057 (cable grey then yellow, other rocks and deck
+texture) with a visible dissolve. Cause: every segment was imagined anew from its own keyframe, and the 0.5 s
+cross-fade blended two different pictures.
+
+- Seedance 2.5 `video_edit` accepts 20 and 30 s clips (19.71 / 29.71 s back, timing linear within 15 ms, look stable
+  to the end): segments now run up to 30 s, split evenly, so 65.7 s needs 3 segments and 2 seams instead of 6 and 5.
+- Segments of one shot are chained: the next starts from the previous result's frame at its first moment. The
+  seam frames then match (measured grey jump 4.5-5 against 19-25 for the independent version).
+- The switch happens at the best-matching overlap frame with a 4-frame blend instead of a 0.5 s dissolve.
+- Seam QC: whole-frame jump plus the largest colour change of one of 60 regions (`local`); clean seams 2.5-7.9,
+  a fish turning yellow to silver 16.8, the old independent seams 46-78. Gemini also checks every seam close up
+  (3 s at 10 fps). On the old video the review now reports the 11 s seam three ways; on the chained one both seams
+  pass all three.
+- HUD: the coin counter is copied back from the original through a matte of its still pixels (icon, panel and the
+  digits they enclose); digits now match the original frame by frame (AI had drawn 300/121 for 229/95).
+- Prompts now say to keep every object's own colour (the cable had turned red, the crane flickered blue/purple);
+  colours that change in the original are named as timed `materials`. A redo with a corrective sentence fixed the
+  yellowfin tuna drawn silver; chained segments after it re-rendered on their own.
+- Final round 3: pass; two Gemini findings dismissed after stills showed the original does the same.
+- Rendering one 65.7 s video as a chain takes about 14 min (3 × 4.5-5 min, one after another).
+- `assemble` refuses clearly when the delivered video is open in a player; `review` refuses to judge a video older
+  than its segments.

@@ -177,11 +177,18 @@ def cmd_assemble(args) -> int:
             failed = True
             lines.append(f"{source_id}: not assembled: {error}")
             continue
-        colour = "; ".join(f"{c['before']} diff {c['raw_difference']} -> {c['residual']}" for c in result["colour"])
         lines.append(f"{source_id}: {Path(result['output']).name} {result['size'][0]}x{result['size'][1]} "
-                     f"{result['duration']:.2f} s" + (f", seam colours: {colour}" if colour else "")
+                     f"{result['duration']:.2f} s"
+                     + (f", HUD from the original: {len(result['hud'])}" if result["hud"] else "")
                      + (f", problems: {'; '.join(result['problems'])}" if result["problems"] else ""))
-    show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else "review")])
+        for seam in result["seams"]:
+            lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s: " + (
+                f"{seam['jump']} (jump {seam['mismatch']} vs motion {seam['motion']}, local {seam.get('local', 0)})" if seam.get("jump")
+                else "hard cut"))
+        if result.get("seam_sheet"):
+            lines.append(f"  seam sheet: {result['seam_sheet']}")
+    show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else
+                              "look at the seam sheet (a visible jump: redo the segment after it), then review")])
     return RULE_FAILURE if failed else 0
 
 
@@ -200,7 +207,12 @@ def cmd_review(args) -> int:
             lines.append(f"{source_id}: not assembled yet")
             failed = True
             continue
-        result = REVIEW.review_source(job, state, source_id, row, fps=args.fps)
+        try:
+            result = REVIEW.review_source(job, state, source_id, row, fps=args.fps)
+        except ValueError as error:
+            lines.append(f"{source_id}: not reviewed: {error}")
+            failed = True
+            continue
         high = sum(1 for i in result["issues"] if i["severity"] == "high")
         lines.append(f"{source_id} round {result['round']}: {result['verdict']}, {len(result['issues'])} issues "
                      f"({high} high): {result['summary']}")
@@ -255,7 +267,8 @@ def cmd_status(args) -> int:
         step = "plan --edits <edits.json>"
     for source_id, row in plan["sources"].items():
         keys = [s["id"] for s in row["segments"]]
-        frames_ready = sum(1 for k in ["anchor", *keys] if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
+        needed = ["anchor", *(s["id"] for s in row["segments"] if s["seam"] != "continuous")]
+        frames_ready = sum(1 for k in needed if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
         rendered = 0
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
@@ -264,10 +277,10 @@ def cmd_status(args) -> int:
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
-        lines.append(f"{source_id}: keyframes {frames_ready}/{len(keys) + 1}, segments {rendered}/{len(keys)}, "
+        lines.append(f"{source_id}: keyframes {frames_ready}/{len(needed)}, segments {rendered}/{len(keys)}, "
                      f"assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
-            if frames_ready < len(keys) + 1:
+            if frames_ready < len(needed):
                 step = "keyframes"
             elif rendered < len(keys):
                 step = "render"

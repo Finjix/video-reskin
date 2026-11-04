@@ -10,7 +10,7 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-DEFAULTS = {"style": "realistic", "resolution": "1080p", "max_segment_seconds": 12.0, "fps": 30,
+DEFAULTS = {"style": "realistic", "resolution": "1080p", "max_segment_seconds": 30.0, "fps": 30,
             "remove_end_card": True, "review_rounds": 3}
 
 
@@ -47,8 +47,8 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
                          "label, goal, anchor, keyframe and video prompts)")
     if options["resolution"] not in ("720p", "1080p"):
         raise ValueError("options.resolution must be 1080p (default) or 720p")
-    if not 4 <= float(options["max_segment_seconds"]) <= 15:
-        raise ValueError("options.max_segment_seconds must be between 4 and 15")
+    if not 4 <= float(options["max_segment_seconds"]) <= 30:
+        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 2-30 s clips)")
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent

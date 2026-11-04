@@ -10,10 +10,10 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `keyframes [--only K] [--redo K]` | anchor + segment keyframes (GPT Image) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/` | 3-8 min per segment, 4 at a time |
-| `assemble [--only S01]` | retime, colour-match, cross-fade, join with the source audio → delivery folder | ~1 min per video |
-| `review [--only S01]` | Gemini compares original and result → `reports/review/<id>-r<n>.md/json` | ~1 min per video |
+| `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot one after another, each from the previous result | 5-10 min per segment, 4 shots at a time |
+| `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder; seam measurements and `sheets/<id>-seams.jpg` | ~1 min per video |
+| `review [--only S01]` | Gemini compares original and result, then checks every seam close up; measured seam jumps added → `reports/review/<id>-r<n>.md/json` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--keyframe]` | sends confirmed segments back for another attempt | - |
 | `status` | progress per source and the next step | - |
@@ -27,14 +27,14 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
  "style": "realistic",
- "options": {"resolution": "1080p", "max_segment_seconds": 12, "fps": 30, "review_rounds": 3}}
+ "options": {"resolution": "1080p", "max_segment_seconds": 30, "fps": 30, "review_rounds": 3}}
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
 - `style`: a preset name from `assets/prompts.json` (`realistic`: 写实版材质，风格不变) or an object with `label`,
   `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look.
-- `options.max_segment_seconds`: 4-15 (default 12; Seedance edits clips of 2-15 s). `fps`: output frame rate
-  (default 30, never above the source).
+- `options.max_segment_seconds`: 4-30 (default 30, Seedance 2.5 edits clips of 2-30 s and keeps their look over the
+  whole clip; fewer, longer segments mean fewer seams). `fps`: output frame rate (default 30, never above the source).
 
 ## Catalog (`analyze`)
 
@@ -55,6 +55,7 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
                         {"what": "蓝色皮卡车和柏油路面", "start": 56, "end": 65.7}],
           "remove": [{"what": "右上角的游戏logo「WHITEOUT SURVIVAL」", "start": 0, "end": 36},
                      {"what": "左下角的游戏logo「WHITEOUT SURVIVAL」", "start": 35, "end": 65.7}],
+          "hud": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "左上角金币计数"}],
           "anchor": 36.5},
   "S02": {"keep": [0, 61.0], "style_from": "S01"}}}
 ```
@@ -67,7 +68,8 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   items on screen during its keyframe or segment; the preset's generic list is the default. Never list a material
   the video does not show or one another object could turn into: a list naming `三文鱼` turned stacks of whole tuna
   and of green cash into salmon steaks, and an untimed `蓝色皮卡车` (trucks arrive near the end) put a truck into
-  the opening seconds.
+  the opening seconds. Name the colour of prominent objects (`黄色的缆绳`, `黄色的黄鳍金枪鱼`): "realistic" otherwise
+  tempts the models to recolour them, and a chained segment may then drift (a red crane flickering blue).
 - `remove`: on-screen elements to delete, in Chinese, each naming what it shows (`游戏logo「…」`,
   `画面底部的白色小字警示语`); merged with `defaults.remove`. An item is text, or `{"what": text, "start": s,
   "end": s}` when the element is on screen only for part of the source: a prompt only names the items on screen
@@ -75,6 +77,11 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   draw garbled text in its place. Never list HUD counters, prices, labels or buttons.
 - `anchor`: the source time whose frame sets the look (default: a lively moment of the longest shot). Pick a frame
   that shows the main scene sharply, without transitions or pop-ups.
+- `hud`: screen-fixed UI whose numbers change (coin counters, timers, scores): `{"box": [x0, y0, x1, y1],
+  "start": s, "end": s, "what": text}` with the box in fractions of the frame, a little larger than the element (the
+  catalog's still-overlay boxes are a good start). Seedance redraws such digits wrongly; `assemble` copies the pixels
+  that stay still inside the box (icon, panel and the digits they enclose) back from the original, frame by frame.
+  Only screen-fixed elements: price tags or labels that move with the scene stay restyled.
 - `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
 - `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment.
@@ -83,9 +90,11 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
 ## Plan (`config/plan.json`, `reports/plan.md`)
 
 Each source lists its segments `K01...` with `frames` (source frames it delivers), `render_frames` (what is sent
-to Seedance: the delivered frames plus 0.5 s before a seam inside a shot, for the cross-fade), `seam` before it
-(`start`, `cut`: a camera cut hides the join, `continuous`: inside a shot) and `inner_cuts` (camera cuts inside the
-segment). Edit the edits file, not the plan.
+to Seedance: the delivered frames plus 0.5 s before a seam inside a shot, where both versions overlap), `seam` before
+it (`start`, `cut`: a camera cut hides the join, `continuous`: inside a shot) and `inner_cuts` (camera cuts inside
+the segment). A shot longer than the limit is split into equal pieces at still moments. The segments of one shot form
+a chain: the first starts from its keyframe, each later one from the previous result's frame at its first moment,
+so redoing a segment also renders the rest of its chain again. Edit the edits file, not the plan.
 
 ## Outputs
 
@@ -94,6 +103,8 @@ segment). Edit the edits file, not the plan.
 - `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.jpg`.
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, slightly shorter than the source clip: `assemble`
   stretches them back exactly).
-- `temp/state/assembled/<id>.json`: seam times (`seams`), colour corrections (`colour`: raw difference and residual
-  per seam inside a shot, 0-255 scale), segment times in the delivered video.
+- `temp/state/assembled/<id>.json`: seams (`time` of the switch, `mismatch`: mean grey difference of the two versions
+  there, `motion`: the picture's own change per frame, `local`: the largest colour change of one of 60 regions beyond
+  its own motion, so one object changing colour counts; `jump`: clean, slight or visible), colour corrections, HUD
+  mattes, segment times in the delivered video. `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

@@ -1,5 +1,6 @@
 """Put the restyled segments back on the source's clock: retime, scale to 1080p, match colours across seams inside a
-shot, cross-fade their overlaps, join, and lay the source's own audio under it."""
+shot, switch between segments at their best-matching frame, copy the screen-fixed HUD back from the original, and
+lay the source's own audio under it. Every seam is measured and shown on a sheet."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,6 +11,8 @@ from reskin.common import FFMPEG, log, read, run, video_info, write
 
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
+BLEND_FRAMES = 4        # a seam inside a shot switches over this many frames, at the best-matching moment
+JUMP_LIMIT = 10.0       # grey levels at the join beyond the picture's own motion that a viewer sees as a jump
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
@@ -30,6 +33,17 @@ def timeline(row: dict, out_fps: float) -> list[dict]:
         rows.append({"id": seg["id"], "seam": seg["seam"], "out": [position(a), position(b)],
                      "body": [position(seg["frames"][0]), position(seg["frames"][1])]})
     return rows
+
+
+def runs_of(lines: list[dict]) -> list[list[int]]:
+    """Indices of segments joined by seams inside a shot; a hard cut starts a new run."""
+    runs: list[list[int]] = []
+    for index, line in enumerate(lines):
+        if index and line["seam"] == "continuous":
+            runs[-1].append(index)
+        else:
+            runs.append([index])
+    return runs
 
 
 def normalise(ai: Path, frames: int, seconds: float, out_fps: float, size: tuple[int, int], output: Path) -> Path:
@@ -98,17 +112,13 @@ def solve_run(boundaries: list[dict], count: int) -> list[tuple[np.ndarray, np.n
     return [(gains[k], offsets[k]) for k in range(count)]
 
 
-def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple[list[tuple], list[dict]]:
-    """Gain/offset per clip so the colours meet across every seam inside a shot (hard cuts may change the look)."""
+def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple[list[tuple], list[dict], dict]:
+    """Gain/offset per clip so the colours meet across every seam inside a shot (hard cuts may change the look).
+
+    Also returns the overlap frames of every such seam (both versions of the same moments) for choosing the join."""
     corrections: list[tuple] = [(np.ones(3), np.zeros(3)) for _ in clips]
-    runs: list[list[int]] = []
-    for index, line in enumerate(lines):
-        if index and line["seam"] == "continuous":
-            runs[-1].append(index)
-        else:
-            runs.append([index])
-    seams = []
-    for members in runs:
+    seams, overlaps = [], {}
+    for members in runs_of(lines):
         if len(members) < 2:
             continue
         boundaries = []
@@ -116,8 +126,11 @@ def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple
             line, prev_line = lines[index], lines[index - 1]
             count = max(2, line["body"][0] - line["out"][0])
             prev_count = prev_line["out"][1] - prev_line["out"][0]
-            mean_b, std_b = stats(frames_rgb(clips[index - 1], prev_count - count, count, out_fps))
-            mean_a, std_a = stats(frames_rgb(clips[index], 0, count, out_fps))
+            before = frames_rgb(clips[index - 1], prev_count - count, count, out_fps)
+            after = frames_rgb(clips[index], 0, count, out_fps)
+            overlaps[index] = (before, after)
+            mean_b, std_b = stats(before)
+            mean_a, std_a = stats(after)
             boundaries.append({"index": position, "id": line["id"], "mean_before": mean_b, "std_before": std_b,
                                "mean_after": mean_a, "std_after": std_a})
         solved = solve_run(boundaries, len(members))
@@ -131,10 +144,108 @@ def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple
                           "raw_difference": round(float(np.abs(seam["mean_after"] - seam["mean_before"]).mean()), 2),
                           "residual": round(float(np.abs(after - before).mean()), 2),
                           "gain": [round(float(g), 3) for g in ga], "offset": [round(float(o), 2) for o in oa]})
-    return corrections, seams
+    return corrections, seams, overlaps
+
+
+def choose_join(before: np.ndarray, after: np.ndarray, correction_before: tuple, correction_after: tuple,
+                ignore: list[list[float]] | None = None) -> dict:
+    """The overlap frame where both versions look most alike (after colour matching), and how alike they are.
+
+    `mismatch` is the mean grey difference there (0-255); `motion` the picture's own change from frame to frame,
+    so a mismatch well above the motion is a visible jump."""
+    def grey(frames, correction):
+        gain, offset = correction
+        return np.clip(frames * gain + offset, 0, 255).mean(axis=3)
+    a, b = grey(before, correction_before), grey(after, correction_after)
+    count = min(len(a), len(b))
+    half = BLEND_FRAMES // 2
+    differences = np.abs(a[:count] - b[:count]).mean(axis=(1, 2))
+    lo = min(half, count - 1)
+    hi = max(lo + 1, count - half)
+    best = lo + int(np.argmin(differences[lo:hi]))
+    steps = np.abs(np.diff(a[:count], axis=0)).mean(axis=(1, 2)) if count > 1 else np.zeros(1)
+    return {"frame": best, "mismatch": round(float(differences[best]), 2), "motion": round(float(np.median(steps)), 2),
+            "worst_in_overlap": round(float(differences.max()), 2),
+            "local": local_jump(before[:count], after[:count], best, correction_before, correction_after, ignore)}
+
+
+def local_jump(before: np.ndarray, after: np.ndarray, frame: int, correction_before: tuple,
+               correction_after: tuple, ignore: list[list[float]] | None = None, rows: int = 10,
+               columns: int = 6) -> float:
+    """The largest colour change of one region of the picture at the switch, beyond that region's own motion: a
+    fish that turns from yellow to silver barely moves the whole-frame figure but stands out here."""
+    a = np.clip(before * correction_before[0] + correction_before[1], 0, 255)
+    b = np.clip(after * correction_after[0] + correction_after[1], 0, 255)
+    height, width = a.shape[1:3]
+    if height < rows or width < columns:
+        return 0.0
+    by, bx = height // rows, width // columns
+    a, b = a[:, : by * rows, : bx * columns], b[:, : by * rows, : bx * columns]
+    blocks = np.abs(a[frame] - b[frame]).reshape(rows, by, columns, bx, 3).mean(axis=(1, 3, 4))
+    if len(a) > 1:
+        steps = np.abs(np.diff(a, axis=0)).reshape(len(a) - 1, rows, by, columns, bx, 3).mean(axis=(2, 4, 5))
+        motion = np.median(steps, axis=0)
+    else:
+        motion = np.zeros_like(blocks)
+    excess = blocks - 1.5 * motion
+    # Regions the HUD copy covers do not count: their pixels come from the original anyway.
+    for box in ignore or []:
+        for r in range(rows):
+            for c in range(columns):
+                cy, cx = (r + .5) / rows, (c + .5) / columns
+                if box[0] <= cx <= box[2] and box[1] <= cy <= box[3]:
+                    excess[r, c] = 0.0
+    return round(float(excess.max()), 2)
+
+
+LOCAL_LIMIT = 30.0      # colour levels one region may jump beyond its own motion before a viewer sees it at once
+
+
+def jump_verdict(join: dict) -> str:
+    excess = join["mismatch"] - 1.5 * join["motion"]
+    local = join.get("local", 0.0)
+    if excess > JUMP_LIMIT or local > LOCAL_LIMIT:
+        return "visible"
+    return "slight" if excess > JUMP_LIMIT / 2 or local > LOCAL_LIMIT / 2 else "clean"
+
+
+def seam_sheet(job: Path, source_id: str, clips: list[Path], lines: list[dict], joins: dict,
+               trims: list[list[int]], out_fps: float) -> Path | None:
+    """Per seam: the last frame before the switch and the first after it, side by side, with the measured jump."""
+    from PIL import Image, ImageDraw
+    from reskin.analyze import font
+    if len(lines) < 2:
+        return None
+    half = BLEND_FRAMES // 2
+    rows = []
+    for index in range(1, len(lines)):
+        if index in joins:
+            prev_frame, next_frame = trims[index - 1][1] - half - 1, trims[index][0] + half
+        else:
+            prev_frame, next_frame = trims[index - 1][1] - 1, trims[index][0]
+        a = frames_rgb(clips[index - 1], prev_frame, 1, out_fps, width=360)[0]
+        b = frames_rgb(clips[index], next_frame, 1, out_fps, width=360)[0]
+        rows.append((lines[index], joins.get(index), a.astype(np.uint8), b.astype(np.uint8)))
+    height, width = rows[0][2].shape[:2]
+    label = font(18)
+    canvas = Image.new("RGB", (2 * width + 10, len(rows) * (height + 30)), "white")
+    draw = ImageDraw.Draw(canvas)
+    for number, (line, join, a, b) in enumerate(rows):
+        y = number * (height + 30)
+        canvas.paste(Image.fromarray(a), (0, y + 28))
+        canvas.paste(Image.fromarray(b), (width + 10, y + 28))
+        when = (line["body"][0] - lines[0]["out"][0]) / out_fps
+        text = (f"{line['id']} ~{when:.2f} s inside a shot: jump {join['mismatch']} vs motion {join['motion']}, local {join['local']} "
+                f"({jump_verdict(join)})" if join else f"{line['id']} at {when:.2f} s: hard cut")
+        draw.text((4, y + 4), text, fill="black", font=label)
+    out = job / "sheets" / f"{source_id}-seams.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out, quality=88)
+    return out
 
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
+    from reskin import hud as HUD
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
@@ -148,42 +259,41 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         if not ai.is_file() or record.get("status") != "done":
             raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
         frames = line["out"][1] - line["out"][0]
-        seconds = frames / out_fps
         work = job / "work" / f"{source_id}-{line['id']}.mp4"
         stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size)}
         stamp_path = work.with_suffix(".json")
         if not (work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
-            normalise(ai, frames, seconds, out_fps, size, work)
+            normalise(ai, frames, frames / out_fps, out_fps, size, work)
             write(stamp_path, stamp)
         clips.append(work)
-    corrections, seams = match_colours(clips, lines, out_fps)
-    # One filter graph: corrected clips, cross-faded inside shots, joined at cuts, with the source audio.
+    corrections, colour, overlaps = match_colours(clips, lines, out_fps)
+    # Where each clip is cut: a seam inside a shot switches at its best-matching overlap frame with a short blend
+    # (both versions there show the same moment); hard cuts join end to end.
+    half = BLEND_FRAMES // 2
+    trims = [[0, line["out"][1] - line["out"][0]] for line in lines]
+    joins = {}
+    for index, (before, after) in overlaps.items():
+        join = choose_join(before, after, corrections[index - 1], corrections[index],
+                           [item["box"] for item in row.get("hud") or []])
+        overlap = lines[index]["body"][0] - lines[index]["out"][0]
+        trims[index - 1][1] -= overlap - join["frame"] - half
+        trims[index][0] = join["frame"] - half
+        joins[index] = join
     inputs, graph = [], []
     for index, (clip, (gain, offset)) in enumerate(zip(clips, corrections)):
         inputs += ["-i", clip]
-        chain = f"[{index}:v]setpts=PTS-STARTPTS"
+        chain = f"[{index}:v]trim=start_frame={trims[index][0]}:end_frame={trims[index][1]},setpts=PTS-STARTPTS"
         if not (np.allclose(gain, 1) and np.allclose(offset, 0)):
             chain += f",format=rgb24,{lut(gain, offset)},format=yuv420p"
         graph.append(chain + f"[c{index}]")
-    runs: list[list[int]] = []
-    for index, line in enumerate(lines):
-        if index and line["seam"] == "continuous":
-            runs[-1].append(index)
-        else:
-            runs.append([index])
     labels = []
-    for number, members in enumerate(runs):
+    blend = BLEND_FRAMES / out_fps
+    for members in runs_of(lines):
         label = f"c{members[0]}"
-        length = (lines[members[0]]["out"][1] - lines[members[0]]["out"][0]) / out_fps
+        length = (trims[members[0]][1] - trims[members[0]][0]) / out_fps
         for index in members[1:]:
-            overlap = (lines[index]["body"][0] - lines[index]["out"][0]) / out_fps
-            clip_length = (lines[index]["out"][1] - lines[index]["out"][0]) / out_fps
-            if overlap > 0:
-                graph.append(f"[{label}][c{index}]xfade=transition=fade:duration={overlap:.6f}:offset={length - overlap:.6f}[x{index}]")
-                length = length + clip_length - overlap
-            else:
-                graph.append(f"[{label}][c{index}]concat=n=2:v=1:a=0[x{index}]")
-                length += clip_length
+            graph.append(f"[{label}][c{index}]xfade=transition=fade:duration={blend:.6f}:offset={length - blend:.6f}[x{index}]")
+            length += (trims[index][1] - trims[index][0]) / out_fps - blend
             label = f"x{index}"
         labels.append(label)
     total = lines[-1]["out"][1] - lines[0]["out"][0]
@@ -192,18 +302,37 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         final = "joined"
     else:
         final = labels[0]
-    graph.append(f"[{final}]trim=end_frame={total},setpts=PTS-STARTPTS[vout]")
+    graph.append(f"[{final}]trim=end_frame={total},setpts=PTS-STARTPTS[v0]")
     keep_start, keep_end = row["keep"]
+    source_index = len(clips)
+    inputs += ["-i", source["path"]]
+    # Screen-fixed HUD comes back from the original, frame by frame, through a matte of its still pixels.
+    huds = [HUD.matte(Path(source["path"]), row["keep"], item, size, job / "work" / f"{source_id}-hud{n}.png")
+            for n, item in enumerate(row.get("hud") or [], 1)]
+    current = "v0"
+    if huds:
+        graph.append(f"[{source_index}:v]trim=start={keep_start:.6f}:end={keep_end:.6f},setpts=PTS-STARTPTS,"
+                     f"fps={out_fps},scale={size[0]}:{size[1]}:flags=bicubic,format=yuv420p,split={len(huds)}"
+                     + "".join(f"[o{n}]" for n in range(len(huds))))
+        for n, item in enumerate(huds):
+            mask_index = source_index + 1 + n
+            inputs += ["-loop", "1", "-framerate", str(out_fps), "-t", f"{total / out_fps + 1:.3f}", "-i", item["mask"]]
+            start, end = item["start"] - keep_start, item["end"] - keep_start
+            graph.append(f"[o{n}]crop={item['w']}:{item['h']}:{item['x']}:{item['y']}[h{n}]")
+            graph.append(f"[{mask_index}:v]format=gray[m{n}]")
+            graph.append(f"[h{n}][m{n}]alphamerge[ha{n}]")
+            graph.append(f"[{current}][ha{n}]overlay=x={item['x']}:y={item['y']}:eof_action=pass:"
+                         f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[hv{n}]")
+            current = f"hv{n}"
+    graph.append(f"[{current}]format=yuv420p[vout]")
     audio = []
     if info["audio"]:
-        index = len(clips)
-        inputs += ["-i", source["path"]]
         fade = []
         if keep_end < info["duration"] - .1:
             fade.append(f"afade=t=out:st={max(0.0, keep_end - keep_start - .35):.3f}:d=0.35")
         if keep_start > .05:
             fade.append("afade=t=in:st=0:d=0.15")
-        graph.append(f"[{index}:a]atrim=start={keep_start:.6f}:end={keep_end:.6f},asetpts=PTS-STARTPTS"
+        graph.append(f"[{source_index}:a]atrim=start={keep_start:.6f}:end={keep_end:.6f},asetpts=PTS-STARTPTS"
                      + "".join("," + f for f in fade) + "[aout]")
         audio = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
     delivery = Path(state["delivery_dir"])
@@ -213,8 +342,12 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     partial = output.with_name(output.stem + ".partial.mp4")
     run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
          "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-profile:v", "high", "-pix_fmt", "yuv420p",
-         "-r", str(out_fps), "-movflags", "+faststart", "-shortest", partial])
-    partial.replace(output)
+         "-r", str(out_fps), "-frames:v", str(total), "-movflags", "+faststart", partial])
+    try:
+        partial.replace(output)
+    except PermissionError:
+        raise ValueError(f"{output.name} is open in another program (a video player?); close it and run assemble "
+                         f"again (the new version waits in {partial.name})") from None
     made = video_info(output)
     expected = total / out_fps
     problems = []
@@ -222,11 +355,20 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         problems.append(f"duration {made['duration']:.3f} s, expected {expected:.3f} s")
     if (made["width"], made["height"]) != size:
         problems.append(f"size {made['width']}x{made['height']}, expected {size[0]}x{size[1]}")
-    seam_times = [{"segment": line["id"], "seam": line["seam"],
-                   "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)} for line in lines[1:]]
+    seam_times = []
+    for index, line in enumerate(lines[1:], 1):
+        entry = {"segment": line["id"], "seam": line["seam"],
+                 "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)}
+        if index in joins:
+            join = joins[index]
+            entry.update(join, time=round((line["out"][0] - lines[0]["out"][0] + join["frame"]) / out_fps, 3),
+                         jump=jump_verdict(join))
+        seam_times.append(entry)
+    sheet = seam_sheet(job, source_id, clips, lines, joins, trims, out_fps)
     result = {"source": source_id, "output": str(output), "duration": round(made["duration"], 3),
-              "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": seams,
-              "problems": problems, "keep": row["keep"],
+              "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
+              "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
+              "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)

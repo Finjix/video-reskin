@@ -11,8 +11,9 @@ from reskin.common import read, write, write_text
 from reskin.prompts import describe
 
 MIN_SECONDS = 3.0         # Seedance needs at least 2 s; shorter pieces are merged into a neighbour
-OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more, cross-faded in assemble
-EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds"}
+OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more; assemble joins inside it
+EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
+             "hud"}
 
 
 def items_problem(items, name: str) -> str | None:
@@ -29,6 +30,23 @@ def items_problem(items, name: str) -> str | None:
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds}}"
+    return None
+
+
+def hud_problem(items) -> str | None:
+    """`hud`: screen-fixed UI (counters, timers) copied back from the original: [{"box": [x0, y0, x1, y1] as
+    fractions of the frame, "start": s, "end": s, "what": text}]."""
+    if not isinstance(items, list):
+        return "hud must be a list"
+    for item in items:
+        box = item.get("box") if isinstance(item, dict) else None
+        if (not isinstance(box, list) or len(box) != 4 or not all(isinstance(v, (int, float)) for v in box)
+                or not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
+                or (box[2] - box[0]) * (box[3] - box[1]) > .15
+                or not set(item) <= {"box", "start", "end", "what"}
+                or not all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))):
+            return (f"hud item {item!r} must be {{\"box\": [x0, y0, x1, y1] (fractions, at most 15% of the frame), "
+                    "\"start\": s, \"end\": s, \"what\": text}")
     return None
 
 
@@ -64,6 +82,8 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: {items_problem(row['materials'], 'materials')}")
         if "remove" in row and items_problem(row["remove"], "remove"):
             problems.append(f"{source_id}: {items_problem(row['remove'], 'remove')}")
+        if "hud" in row and hud_problem(row["hud"]):
+            problems.append(f"{source_id}: {hud_problem(row['hud'])}")
         if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
@@ -98,7 +118,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             remove.append(item)
     return {"keep": [float(keep[0]), float(keep[1])], "materials": row.get("materials") or style["default_materials"],
             "remove": remove, "anchor": row.get("anchor"), "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
-            "style_from": row.get("style_from"), "split_at": row.get("split_at") or [],
+            "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
 
 
@@ -107,10 +127,12 @@ def _stillest(motion: list[float], lo: int, hi: int, fps: float) -> int:
     if hi - lo < 2 or not motion:
         return (lo + hi) // 2
     half = max(1, int(fps / 4))
-    best, frame = None, (lo + hi) // 2
+    centre = (lo + hi) // 2
+    best, frame = None, centre
     for i in range(lo, hi):
         window = motion[max(0, i - half): i + half + 1]
-        score = sum(window) / len(window)
+        # equal stillness: prefer the middle of the range, which keeps split pieces even
+        score = sum(window) / len(window) + .05 * abs(i - centre) / fps
         if best is None or score < best:
             best, frame = score, i
     return frame
@@ -138,12 +160,15 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
         if options:
             end, following = options[-1], "cut"
         else:
-            if remaining < limit + minimum:      # two pieces left: split near the middle, both within limits
-                lo = max(position + minimum, last - (maximum - overlap), position + remaining // 2 - window)
-                hi = min(position + limit, last - minimum, position + remaining // 2 + window)
-            else:
-                lo, hi = position + limit - window, position + limit
-            end, following = (_stillest(motion, lo, hi, fps) if lo < hi else hi), "continuous"
+            # Split this shot (up to its next cut) into equal pieces, each at a still moment within the limits;
+            # fewer, longer pieces mean fewer seams.
+            stretch = next((c for c in cuts if c > position + limit), last) - position
+            body = maximum - overlap
+            pieces = 1 + -(-(stretch - limit) // body)
+            target = position + stretch // pieces
+            lo = max(position + minimum, position + stretch - (pieces - 1) * body, target - window)
+            hi = min(position + limit, last - minimum, target + window)
+            end, following = (_stillest(motion, lo, hi, fps) if lo < hi else max(lo, min(hi, target))), "continuous"
         spans.append((position, end, seam))
         position, seam = end, following
     segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b]}
@@ -185,7 +210,7 @@ def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_s
             continue
         motion_path = job / "catalog/motion" / f"{row['id']}.json"
         motion = read(motion_path) if motion_path.is_file() else []
-        limit = min(15.0, settings["max_segment_seconds"] or max_seconds)
+        limit = min(30.0, settings["max_segment_seconds"] or max_seconds)
         segments = segment(row, settings["keep"], limit, motion, settings["split_at"])
         anchor = settings["anchor"] if settings["anchor"] is not None else auto_anchor(row, settings["keep"], motion)
         plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
