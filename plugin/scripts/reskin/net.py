@@ -15,6 +15,10 @@ USER_AGENT = "video-reskin/0.0.1"
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
+class NetworkError(RuntimeError):
+    """No answer from the server (refused, reset, timed out): a POST may or may not have taken effect."""
+
+
 class HttpError(RuntimeError):
     def __init__(self, status: int, body: str, url: str):
         super().__init__(f"HTTP {status} from {url.split('?')[0]}: {body[:600]}")
@@ -60,7 +64,7 @@ def request(method: str, url: str, *, body: bytes | None = None, headers: dict |
             if attempt + 1 < attempts:
                 time.sleep(delay); delay *= 2
                 continue
-            raise RuntimeError(f"network error contacting {url.split('?')[0]}: {error}") from None
+            raise NetworkError(f"network error contacting {url.split('?')[0]}: {error}") from None
     raise AssertionError("unreachable")
 
 

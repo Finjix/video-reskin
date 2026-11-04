@@ -84,7 +84,8 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
         return {"key": task["key"], "reused": True, "output": str(output), **known,
                 "prompt_changed": known.get("prompt") != prompt}
     log(f"{task['key']}: restyling frame {task['frame']} ({'anchor' if task['kind'] == 'anchor' else 'segment start'})")
-    made = images.edit(references, prompt, output, width=row["width"], height=row["height"])
+    made = images.edit(references, prompt, output, width=row["width"], height=row["height"], job=job,
+                       key=task["key"], purpose=task["kind"])
     with Image.open(output) as image:
         converted = image.convert("RGB") if image.format != "PNG" else None
     if converted is not None:

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from reskin.common import FFMPEG, log, read, run, video_info, write
+from reskin import patch as PATCH
+from reskin.common import FFMPEG, digest, log, read, run, video_info, write
 
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
@@ -244,28 +245,89 @@ def seam_sheet(job: Path, source_id: str, clips: list[Path], lines: list[dict], 
     return out
 
 
+def output_spec(state: dict, row: dict) -> tuple[float, tuple[int, int]]:
+    """Output frame rate and size of a source's delivery (and of its normalised work clips)."""
+    return (min(float(state["options"]["fps"]), round(row["fps"], 3)),
+            target_size(row["width"], row["height"], state["options"]["resolution"]))
+
+
+def work_clip(job: Path, source_id: str, line: dict, out_fps: float, size: tuple[int, int]) -> Path:
+    """The segment's Seedance result on the source clock (retimed, output size), made once per generation."""
+    ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
+    record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
+    record = read(record_path) if record_path.is_file() else {}
+    if not ai.is_file() or record.get("status") != "done":
+        raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
+    frames = line["out"][1] - line["out"][0]
+    work = job / "work" / f"{source_id}-{line['id']}.mp4"
+    stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size)}
+    stamp_path = work.with_suffix(".json")
+    if not (work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
+        normalise(ai, frames, frames / out_fps, out_fps, size, work)
+        write(stamp_path, stamp)
+    return work
+
+
+def ignore_boxes(row: dict) -> list[list[float]]:
+    """Regions whose pixels come from the original anyway (HUD, burned overlays): seam measures skip them."""
+    from reskin import overlay as OVERLAY
+    return ([item["box"] for item in row.get("hud") or []]
+            + [list(OVERLAY.region(item)) for item in row.get("overlays") or []])
+
+
+def measure_seam(before_clip: Path, after_clip: Path, before_line: dict, after_line: dict, out_fps: float,
+                 ignore: list[list[float]] | None = None) -> dict:
+    """One seam inside a shot measured on its own (colours matched for this pair only): the join `assemble` would
+    pick, how far the two versions differ there, and the verdict (clean, slight, visible)."""
+    count = max(2, after_line["body"][0] - after_line["out"][0])
+    prev_count = before_line["out"][1] - before_line["out"][0]
+    before = frames_rgb(before_clip, prev_count - count, count, out_fps)
+    after = frames_rgb(after_clip, 0, count, out_fps)
+    mean_b, std_b = stats(before)
+    mean_a, std_a = stats(after)
+    solved = solve_run([{"index": 1, "id": after_line["id"], "mean_before": mean_b, "std_before": std_b,
+                         "mean_after": mean_a, "std_after": std_a}], 2)
+    join = choose_join(before, after, solved[0], solved[1], ignore)
+    return {**join, "jump": jump_verdict(join)}
+
+
+def inputs_digest(job: Path, state: dict, source_id: str, row: dict) -> str:
+    """What the delivered video is made of: the generations, the plan row and the output options."""
+    generations = []
+    for seg in row["segments"]:
+        record_path = job / "state/render" / f"{source_id}-{seg['id']}.json"
+        generations.append(read(record_path).get("generation_id") if record_path.is_file() else None)
+        for entry in PATCH.active(job, f"{source_id}:{seg['id']}"):
+            patch_path = PATCH.state_path(job, f"{source_id}:{seg['id']}", entry["id"])
+            if patch_path.is_file() and read(patch_path).get("status") == "done":
+                generations.append(read(patch_path)["generation_id"])
+    return digest({"generations": generations, "row": row, "fps": state["options"]["fps"],
+                   "resolution": state["options"]["resolution"]})
+
+
+def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
+    """The last assembled result when nothing it is made of has changed since (and the file is still there)."""
+    record_path = job / "state/assembled" / f"{source_id}.json"
+    if not record_path.is_file():
+        return None
+    record = read(record_path)
+    if record.get("inputs") == inputs_digest(job, state, source_id, row) and Path(record["output"]).is_file():
+        return record
+    return None
+
+
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
     from reskin import hud as HUD, overlay as OVERLAY
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
-    out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
-    size = target_size(row["width"], row["height"], state["options"]["resolution"])
+    out_fps, size = output_spec(state, row)
     lines = timeline(row, out_fps)
-    clips = []
+    clips, patches = [], []
     for line in lines:
-        ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
-        record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
-        record = read(record_path) if record_path.is_file() else {}
-        if not ai.is_file() or record.get("status") != "done":
-            raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
-        frames = line["out"][1] - line["out"][0]
-        work = job / "work" / f"{source_id}-{line['id']}.mp4"
-        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size)}
-        stamp_path = work.with_suffix(".json")
-        if not (work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
-            normalise(ai, frames, frames / out_fps, out_fps, size, work)
-            write(stamp_path, stamp)
-        clips.append(work)
+        clip, measured = PATCH.apply(job, source_id, row, line, work_clip(job, source_id, line, out_fps, size),
+                                     out_fps, size, ignore_boxes(row))
+        clips.append(clip)
+        patches += measured
     corrections, colour, overlaps = match_colours(clips, lines, out_fps)
     # Where each clip is cut: a seam inside a shot switches at its best-matching overlap frame with a short blend
     # (both versions there show the same moment); hard cuts join end to end.
@@ -273,9 +335,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     trims = [[0, line["out"][1] - line["out"][0]] for line in lines]
     joins = {}
     for index, (before, after) in overlaps.items():
-        join = choose_join(before, after, corrections[index - 1], corrections[index],
-                           [item["box"] for item in row.get("hud") or []]
-                           + [list(OVERLAY.region(item)) for item in row.get("overlays") or []])
+        join = choose_join(before, after, corrections[index - 1], corrections[index], ignore_boxes(row))
         overlap = lines[index]["body"][0] - lines[index]["out"][0]
         trims[index - 1][1] -= overlap - join["frame"] - half
         trims[index][0] = join["frame"] - half
@@ -384,12 +444,25 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
             entry.update(join, time=round((line["out"][0] - lines[0]["out"][0] + join["frame"]) / out_fps, 3),
                          jump=jump_verdict(join))
         seam_times.append(entry)
+    # The joins into and out of local patches are seams too (measured, reviewed and close-up checked like them).
+    for patch in patches:
+        for side in ("in", "out"):
+            join = patch[side]
+            seam_times.append({"segment": f"{patch['segment']}:{patch['patch']}:{side}", "seam": "continuous",
+                               "patch": True, "time": round(join["frame"] / out_fps, 3),
+                               **{k: join[k] for k in ("mismatch", "motion", "local", "jump")}})
+    seam_times.sort(key=lambda entry: entry["time"])
     sheet = seam_sheet(job, source_id, clips, lines, joins, trims, out_fps)
-    result = {"source": source_id, "output": str(output), "duration": round(made["duration"], 3),
+    result = {"source": source_id, "inputs": inputs_digest(job, state, source_id, row), "output": str(output),
+              "duration": round(made["duration"], 3),
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
               "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
               "overlays": OVERLAY.summary(burned),
+              "patches": [{"key": f"{source_id}:{p['segment']}:{p['patch']}", "reason": p["reason"],
+                           "start": round(p["start_frame"] / out_fps, 3), "end": round(p["end_frame"] / out_fps, 3),
+                           "in": p["in"]["jump"], "out": p["out"]["jump"],
+                           "kept": p["in"]["jump"] != "visible" and p["out"]["jump"] != "visible"} for p in patches],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)

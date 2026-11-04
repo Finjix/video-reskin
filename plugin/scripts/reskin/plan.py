@@ -1,7 +1,8 @@
 """The agent's edits (kept range, materials, what to remove, anchor frame) and the segment plan built from them.
 
-Seedance edits clips of 2-15 s, so each kept range is cut into segments: at camera cuts where possible (a hard cut
-hides the seam), otherwise inside a shot at its stillest moment, with a short overlap that `assemble` cross-fades.
+Seedance edits clips of 4-30 s, so each kept range is cut into as few segments as possible: at camera cuts where
+possible (a hard cut hides the seam), otherwise inside a shot at its stillest moment, with a 0.5 s overlap in which
+`assemble` switches at the best-matching frame.
 """
 from __future__ import annotations
 

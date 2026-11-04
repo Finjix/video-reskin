@@ -58,3 +58,25 @@ cross-fade blended two different pictures.
 - Rendering one 65.7 s video as a chain takes about 14 min (3 × 4.5-5 min, one after another).
 - `assemble` refuses clearly when the delivered video is open in a player; `review` refuses to judge a video older
   than its segments.
+
+## 2026-11-04: spend controls on GOF3D10057 (480p, 0-34 s, 3 chained segments of 11-12 s)
+
+- `lint` listed the logos, the HUD counter, the end card (66.2 s) and the objects with colours and times; its edits
+  check gave useful corrections (cash stack from ~17 s, the customer queue missing) and one wrong one (it claimed the
+  top-right logo fades at 22 s; the sheet shows it until 34 s), so its output stays a hint.
+- Previews: one of four showed the yellow cable drawn dark grey; `黄色的缆绳和黄色的吊架横杆` was added before any
+  video was rendered.
+- Segment check: K01 was held (Gemini: the yellowfin tuna turns dark and boat-shaped at 1.8-2.4 s, confirmed on the
+  stills; a second finding was not visible and dismissed) before K02 and K03 were rendered. Without the check the
+  final review would have sent back K01 and, through the chain, K02 and K03 (35 s instead of 12.4 s).
+- Local patch: `patch --segment S01:K01 --at 1.75 2.5` rendered 0.27-4.27 s (4.0 s) from K01's own frame. The tuna is
+  a yellow fish again at 2.12 s. Joins: in 5.29 vs motion 1.20, local 9.8 (clean); out 6.89 vs 1.31, local 22.6
+  (slight, the emoji bubble popping in there); for comparison the chained seams of this video measured 5.16 / local
+  11.7 (clean) and 4.89 / local 21.3 (slight). The Gemini close-up called both joins consistent, and the stills
+  around them show no change of rocks, water or deck. K02 and K03 rendered from K01's unpatched end, unaffected.
+- `run` assembled and reviewed as soon as the source's segments and patch were done: round 1 pass (0 high; two low
+  measured seams, one medium continuity finding that the triage marked as also in the original).
+- `cost`: Seedance 39.0 s at 480p (new 35.0 s, patch 4.0 s); GPT Image 6 (anchor, keyframe, 4 previews); Gemini 10
+  calls (2 lint, 2 segment checks, review, 4 seam close-ups, triage).
+- One trial: whole-segment redo stays the default; patches are for short, local flaws in long segments whose shot
+  continues.

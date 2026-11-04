@@ -144,18 +144,48 @@ def cmd_keyframes(args) -> int:
     return RULE_FAILURE if failed else 0
 
 
+def render_lines(job: Path, results: list[dict]) -> tuple[list[str], bool]:
+    """The render summary: ready / reused / held / waiting / failed segments and patches, with the gate stills."""
+    segments = [r for r in results if r.get("key", "").count(":") == 1]
+    patches = [r for r in results if r.get("key", "").count(":") == 2]
+    failed = [r for r in results if r.get("error") and not r.get("waiting")]
+    held = [r for r in segments if r.get("held")]
+    waiting = [r for r in segments if r.get("waiting")]
+    ready = [r for r in segments if not r.get("error") and not r.get("waiting")]
+    lines = [f"segments: {len(ready)} ready ({sum(1 for r in ready if r.get('reused'))} reused), {len(held)} held by "
+             f"the segment check, {len(waiting)} waiting behind them, {len(failed)} failed"
+             + (f"; patches: {sum(1 for r in patches if not r.get('error'))} ready" if patches else "")]
+    for r in held:
+        gate = r["gate"]
+        lines.append(f"  {r['key']} held: {'; '.join(gate.get('reasons') or [])}")
+        for issue in gate.get("issues") or []:
+            lines.append(f"    #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s: "
+                         f"{issue['description']}")
+        lines += [f"    stills: {sheet}" for sheet in gate.get("sheets") or []]
+    lines += [f"  {r['key']}: {r.get('error') or r.get('note')}" for r in failed + waiting]
+    steps = []
+    if failed:
+        steps.append("fix the failures and render again (finished segments are kept)")
+    if held:
+        steps.append("look at each held segment's stills: a confirmed flaw -> redo it (with --prompt); a false alarm "
+                     "-> accept --segment <key> --reason <why>; then render again")
+    if not steps:
+        steps.append("assemble")
+    lines.append("next: " + "; ".join(steps))
+    return lines, bool(failed)
+
+
 def cmd_render(args) -> int:
     job = args.job_dir.resolve()
     state = JOB.load(job)
     plan = load_plan(job)
     runtime.ensure("media")
     from reskin import render as RENDER
-    results = RENDER.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers)
-    failed = [r for r in results if r.get("error")]
-    lines = [f"segments: {sum(1 for r in results if not r.get('error'))} ready "
-             f"({sum(1 for r in results if r.get('reused'))} reused), {len(failed)} failed"]
-    lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append("next: " + ("fix the failures and run render again (finished segments are kept)" if failed else "assemble"))
+    from reskin.common import job_lock
+    with job_lock(job, "render"):
+        results = RENDER.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers,
+                                 gate=not args.no_gate)
+    lines, failed = render_lines(job, results)
     show(lines)
     return RULE_FAILURE if failed else 0
 
@@ -192,6 +222,21 @@ def cmd_assemble(args) -> int:
     return RULE_FAILURE if failed else 0
 
 
+def review_lines(result: dict, limit: int) -> list[str]:
+    from reskin import review as REVIEW
+    high = sum(1 for i in result["issues"] if i["severity"] == "high")
+    lines = [f"{result['source']} round {result['round']} of {limit}: {result['verdict']}, {len(result['issues'])} issues "
+             f"({high} high): {result['summary']}"]
+    lines += [f"  {REVIEW.describe_issue(issue)}" for issue in result["issues"]]
+    lines += [f"  stills: {sheet}" for sheet in result.get("sheets") or []]
+    return lines
+
+
+REVIEW_NEXT = ("next: confirm each issue on its stills (upper row original, lower row restyled; the triage hint is "
+               "Gemini's, not a verdict); send confirmed ones back with redo (or, for a short local flaw in a long "
+               "segment, patch), then render, assemble and review again")
+
+
 def cmd_review(args) -> int:
     job = args.job_dir.resolve()
     state = JOB.load(job)
@@ -213,15 +258,8 @@ def cmd_review(args) -> int:
             lines.append(f"{source_id}: not reviewed: {error}")
             failed = True
             continue
-        high = sum(1 for i in result["issues"] if i["severity"] == "high")
-        lines.append(f"{source_id} round {result['round']}: {result['verdict']}, {len(result['issues'])} issues "
-                     f"({high} high): {result['summary']}")
-        for issue in result["issues"]:
-            lines.append(f"  #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
-                         f"-> {', '.join(issue['segments'])}: {issue['description']}")
-    show(lines + [f"reports: {job / 'reports/review'}",
-                  "next: confirm each issue with frames --source <id> --at <seconds>; send confirmed ones back with "
-                  "redo, then (keyframes,) render, assemble and review again"])
+        lines += review_lines(result, int(state["options"].get("review_rounds", 3)))
+    show(lines + [f"reports: {job / 'reports/review'}", REVIEW_NEXT])
     return RULE_FAILURE if failed else 0
 
 
@@ -247,11 +285,193 @@ def cmd_redo(args) -> int:
         row = plan["sources"].get(source_id)
         if not row or segment_id not in {s["id"] for s in row["segments"]}:
             raise ValueError(f"unknown segment {key}; segments look like S01:K02 (see reports/plan.md)")
+        seg = next(s for s in row["segments"] if s["id"] == segment_id)
+        if args.keyframe and seg["seam"] == "continuous":
+            head = next(s["id"] for s in reversed(row["segments"][:row["segments"].index(seg) + 1])
+                        if s["seam"] != "continuous")
+            raise ValueError(f"{key} has no keyframe (it starts from the previous segment's result); if the shot's "
+                             f"keyframe is wrong, redo {source_id}:{head} with --keyframe, else leave --keyframe out")
         entry = RENDER.bump(job, key, args.reason, args.prompt)
         lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})")
     steps = f"keyframes --redo {' '.join(keys)}, render" if args.keyframe else "render"
     show(lines + [f"next: {steps}, assemble, review"])
     return 0
+
+
+def cmd_lint(args) -> int:
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    catalog_path = job / "catalog/catalog.json"
+    if not catalog_path.is_file():
+        raise FileNotFoundError("no catalog yet: run analyze first")
+    runtime.ensure("media")
+    from reskin import lint as LINT
+    from reskin import plan as PLAN
+    catalog = read(catalog_path)
+    edits = PLAN.check_edits(read(args.edits), state, catalog) if args.edits else None
+    results = LINT.run_all(job, state, catalog, edits, selection(args.only))
+    lines = []
+    for source_id, facts in results:
+        if "error" in facts:
+            lines.append(f"{source_id}: not checked: {facts['error']}")
+            continue
+        problems = [c for c in facts.get("edits_check") or [] if c.get("verdict") != "ok"]
+        lines.append(f"{source_id}: {len(facts.get('objects') or [])} objects, {len(facts.get('logos') or [])} logos/warnings, "
+                     f"{len(facts.get('screen_text') or [])} screen texts, {len(facts.get('hud') or [])} HUD, end card from "
+                     f"{facts.get('end_card_start')} s; sheet {facts.get('sheet')}")
+        if edits is not None:
+            lines.append("  edits: " + ("no problems found" if not problems else f"{len(problems)} to look at"))
+            lines += [f"  - [{c['verdict']}] {c['field']}: {c['what']} -> {c['suggestion']}" for c in problems]
+    show(lines + [f"lint: {job / 'catalog/lint.md'}; draft edits: {job / 'config/edits.draft.json'}",
+                  "next: check the draft against the catalog and lint sheets (Gemini boxes and times are approximate), "
+                  "write the edits file, lint --edits <file> if you changed much, then plan --edits <file>"])
+    return 0
+
+
+def cmd_preview(args) -> int:
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    plan = load_plan(job)
+    runtime.ensure("media")
+    from reskin import preview as PREVIEW
+    results = PREVIEW.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers)
+    failed = [r for r in results if r.get("error")]
+    made = [r for r in results if not r.get("error") and not r.get("reused")]
+    lines = [f"previews: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"]
+    lines += [f"  {r['key']}: {r['error']}" for r in failed]
+    lines.append(f"sheets: {job / 'sheets'} (<id>-preview.jpg: original | preview with the video prompt's texts)")
+    lines.append("next: wrong objects, colours or text on a preview mean the edits are wrong: fix them, plan, "
+                 "preview again; then render")
+    show(lines)
+    return RULE_FAILURE if failed else 0
+
+
+def cmd_accept(args) -> int:
+    from reskin import gate as GATE
+    job = args.job_dir.resolve()
+    JOB.load(job)
+    lines = []
+    for key in sorted(selection(args.segment) or []):
+        GATE.accept(job, key, args.reason)
+        lines.append(f"{key}: accepted ({args.reason}); the rest of its shot renders on the next render")
+    show(lines + ["next: render"])
+    return 0
+
+
+def cmd_patch(args) -> int:
+    from reskin import patch as PATCH
+    job = args.job_dir.resolve()
+    JOB.load(job)
+    if args.drop:
+        dropped = [key for key in selection(args.drop) or [] if PATCH.drop(job, key)]
+        show([f"{key}: dropped" for key in dropped] or ["nothing dropped"])
+        return 0
+    if not (args.segment and args.at and args.reason):
+        raise ValueError("patch needs --segment S01:K02 --at <start> [<end>] --reason <what is wrong> (or --drop KEY)")
+    plan = load_plan(job)
+    times = args.at if len(args.at) > 1 else [args.at[0], args.at[0]]
+    entry = PATCH.add(job, plan, args.segment, times[0], times[-1], args.reason, args.prompt)
+    show([f"{args.segment}:{entry['id']}: renders {entry['start']:.2f}-{entry['end']:.2f} s ({entry['seconds']:.1f} s) "
+          f"again from the segment's own frame; the rest of the segment and its shot stay",
+          "next: render (only the patch runs), assemble (both joins are measured: a visible one means drop the patch "
+          "and redo the segment), review"])
+    return 0
+
+
+def cmd_cost(args) -> int:
+    from reskin import ledger
+    job = args.job_dir.resolve()
+    JOB.load(job)
+    value = ledger.summary(job)
+    if args.json:
+        print(json.dumps(value, ensure_ascii=False))
+    else:
+        show(ledger.markdown(value))
+    return 0
+
+
+def cmd_run(args) -> int:
+    """keyframes (+ previews) -> render with segment checks -> assemble and review each source as soon as its
+    segments are done; stops wherever the agent has to look or decide."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    plan = load_plan(job)
+    runtime.ensure("media")
+    from reskin import assemble as ASSEMBLE, keyframes as KEYFRAMES, render as RENDER, review as REVIEW
+    from reskin.common import job_lock, log
+    style = JOB.style(state)
+    only = selection(args.only)
+    made = []
+    results = KEYFRAMES.run_all(job, state, plan, style, only, set())
+    failed = [r for r in results if r.get("error")]
+    made += [r["key"] for r in results if not r.get("error") and not r.get("reused")]
+    if not args.no_preview and not failed:
+        from reskin import preview as PREVIEW
+        previews = PREVIEW.run_all(job, state, plan, style, only)
+        failed += [r for r in previews if r.get("error")]
+        made += [r["key"] for r in previews if not r.get("error") and not r.get("reused")]
+    if failed:
+        show([f"  {r['key']}: {r['error']}" for r in failed] + ["next: fix the failures and run again"])
+        return RULE_FAILURE
+    if made:
+        show([f"new keyframes and previews: {', '.join(made)}",
+              f"sheets: {job / 'sheets'} (<id>-keyframes.jpg, <id>-preview.jpg)",
+              "next: look at every new sheet; fix the edits or keyframes --redo <key> where needed; then run again "
+              "(it renders once nothing new needs looking at)"])
+        return 0
+    limit = int(state["options"].get("review_rounds", 3))
+    reports: dict[str, list[str]] = {}
+    lock = threading.Lock()
+
+    def follow_up(source_id: str):
+        row = plan["sources"][source_id]
+        lines = []
+        try:
+            assembled = ASSEMBLE.current(job, state, source_id, row)
+            if assembled is None:
+                assembled = ASSEMBLE.assemble_source(job, state, source_id, row, style)
+            visible = [s for s in assembled["seams"] if s.get("jump") == "visible"]
+            lines.append(f"{source_id}: {Path(assembled['output']).name}, seams: "
+                         + (", ".join(f"{s['segment']} {s.get('jump', 'cut')}" for s in assembled["seams"]) or "none")
+                         + (f"; seam sheet {assembled['seam_sheet']}" if assembled.get("seam_sheet") else ""))
+            for patch in assembled.get("patches") or []:
+                lines.append(f"  patch {patch['key']} {patch['start']:.2f}-{patch['end']:.2f} s: joins {patch['in']} / "
+                             f"{patch['out']}" + ("" if patch["kept"] else " -> visible: drop it and redo the segment"))
+            last = REVIEW.last_round(job, source_id)
+            if last and last.get("assembled") == assembled.get("inputs"):
+                lines.append(f"  unchanged since review round {last['round']}:")
+                lines += ["  " + line for line in review_lines(last, limit)]
+            else:
+                lines += ["  " + line for line in review_lines(REVIEW.review_source(job, state, source_id, row), limit)]
+            if visible:
+                lines.append(f"  visible seams: {', '.join(s['segment'] for s in visible)} (not done until fixed)")
+        except Exception as error:
+            lines.append(f"{source_id}: follow-up failed: {type(error).__name__}: {error}")
+        with lock:
+            reports[source_id] = lines
+    pool = ThreadPoolExecutor(2)
+    futures = []
+
+    def done(source_id, chain_results):
+        if any(r.get("error") or r.get("held") or r.get("waiting") for r in chain_results):
+            log(f"{source_id}: not complete (held or failed segments); no assembly yet")
+            return
+        log(f"{source_id}: all segments ready; assembling and reviewing while the rest renders")
+        futures.append(pool.submit(follow_up, source_id))
+    with job_lock(job, "render"):
+        results = RENDER.run_all(job, state, plan, style, only, workers=args.workers, gate=not args.no_gate,
+                                 on_source_done=done)
+    pool.shutdown(wait=True)
+    lines, failed = render_lines(job, results)
+    lines = lines[:-1]
+    for source_id in plan["sources"]:
+        lines += reports.get(source_id, [])
+    lines.append(REVIEW_NEXT + "; held segments: look at their stills first (accept or redo); run again afterwards "
+                 "(only what changed renders, unchanged videos are not reviewed again)")
+    show(lines)
+    return RULE_FAILURE if failed else 0
 
 
 def cmd_status(args) -> int:
@@ -269,16 +489,21 @@ def cmd_status(args) -> int:
         keys = [s["id"] for s in row["segments"]]
         needed = ["anchor", *(s["id"] for s in row["segments"] if s["seam"] != "continuous")]
         frames_ready = sum(1 for k in needed if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
-        rendered = 0
+        rendered, held = 0, []
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
-            rendered += record.is_file() and read(record).get("status") == "done"
+            value = read(record) if record.is_file() else {}
+            rendered += value.get("status") == "done"
+            gate = value.get("gate") or {}
+            if gate.get("held") and not gate.get("accepted") and gate.get("generation_id") == value.get("generation_id"):
+                held.append(k)
         assembled = (job / "state/assembled" / f"{source_id}.json").is_file()
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
-        lines.append(f"{source_id}: keyframes {frames_ready}/{len(needed)}, segments {rendered}/{len(keys)}, "
-                     f"assembled: {'yes' if assembled else 'no'}, {last}")
+        lines.append(f"{source_id}: keyframes {frames_ready}/{len(needed)}, segments {rendered}/{len(keys)}"
+                     + (f" (held: {', '.join(held)})" if held else "")
+                     + f", assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
             if frames_ready < len(needed):
                 step = "keyframes"
@@ -288,6 +513,8 @@ def cmd_status(args) -> int:
                 step = "assemble"
             elif not rounds:
                 step = "review"
+    from reskin import ledger
+    lines += ledger.markdown(ledger.summary(job))
     show(lines + [f"next: {step or 'confirm review issues, redo what is broken, or deliver'}"])
     return 0
 
@@ -337,11 +564,14 @@ def main() -> None:
     render = command("render", cmd_render, help="Seedance 2.5 video edit of every segment on Lumos")
     render.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
+    render.add_argument("--no-gate", action="store_true",
+                        help="do not check segments before the next segment of their shot starts")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
     assemble.add_argument("--only", nargs="*", help="source IDs")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
     review.add_argument("--only", nargs="*", help="source IDs")
-    review.add_argument("--fps", type=float, default=2.0, help="frames per second Gemini samples")
+    review.add_argument("--fps", type=float, default=None,
+                        help="frames per second Gemini samples (default 4 up to 75 s, else 2)")
     frames = command("frames", cmd_frames, help="stills of original and restyled around given times")
     frames.add_argument("--source", required=True)
     frames.add_argument("--at", type=float, nargs="+", required=True, help="seconds in the delivered video")
@@ -351,6 +581,28 @@ def main() -> None:
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")
     redo.add_argument("--keyframe", action="store_true", help="the keyframe itself is wrong: make it again too")
+    lint = command("lint", cmd_lint, help="Gemini lists what each source shows, checks the edits, drafts edits")
+    lint.add_argument("--edits", type=Path, help="edits JSON to check")
+    lint.add_argument("--only", nargs="*", help="source IDs")
+    preview = command("preview", cmd_preview, help="GPT Image previews across every segment (looked at, not used)")
+    preview.add_argument("--only", nargs="*", help="source IDs")
+    preview.add_argument("--workers", type=int, default=3)
+    run_cmd = command("run", cmd_run, help="keyframes, previews, render with checks, assemble and review per source")
+    run_cmd.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
+    run_cmd.add_argument("--workers", type=int, default=4, help="generations in flight at once")
+    run_cmd.add_argument("--no-gate", action="store_true", help="no segment checks")
+    run_cmd.add_argument("--no-preview", action="store_true", help="no preview stills")
+    accept = command("accept", cmd_accept, help="let a segment held by the segment check through")
+    accept.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
+    accept.add_argument("--reason", required=True, help="why the reported flaw is not one (as seen on the stills)")
+    patch = command("patch", cmd_patch, help="render a short stretch inside a finished segment again")
+    patch.add_argument("--segment", help="key like S01:K02")
+    patch.add_argument("--at", type=float, nargs="+", help="start [end] of the flaw, seconds in the delivered video")
+    patch.add_argument("--reason", help="what is wrong, as confirmed on the stills")
+    patch.add_argument("--prompt", help="one corrective sentence for the patch")
+    patch.add_argument("--drop", nargs="+", help="patch keys like S01:K02:P1 to remove")
+    cost = command("cost", cmd_cost, help="what was sent to Seedance, GPT Image and Gemini, and why")
+    cost.add_argument("--json", action="store_true")
     command("status", cmd_status, help="progress per source and the next step")
     inspection = command("runtime", cmd_runtime, job=False, help="inspect or prefetch the private runtime")
     inspection.add_argument("--feature", choices=("base", "media", "login"), default="base")
@@ -364,7 +616,7 @@ def main() -> None:
     except runtime.RuntimeFailure as error:
         print(f"runtime error: {error}", file=sys.stderr, flush=True)
         code = 3
-    except (ValueError, FileExistsError, FileNotFoundError) as error:
+    except (ValueError, FileExistsError, FileNotFoundError) as error:      # includes common.Busy
         print(f"error: {error}", file=sys.stderr, flush=True)
         code = RULE_FAILURE
     except (OSError, ImportError) as error:

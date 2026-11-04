@@ -2,11 +2,14 @@
 
 Segments inside one camera shot form a chain: the first starts from its styled keyframe, every later one from the
 previous result's own frame at the moment it begins, so the look carries across the seam instead of being
-re-imagined. A chain renders one segment after another; separate chains (other shots, other sources) in parallel.
+re-imagined. A chain renders one segment after another; separate chains (other shots, other sources) in parallel,
+the longest first.
 
 Every segment's inputs (frames, reference picture, attempt) are hashed; a re-run reuses finished segments, resumes
 generations still running on Lumos, and renders only what changed or was sent back with `redo` (which also renders
-the rest of that chain again, since each segment starts from the one before).
+the rest of that chain again, since each segment starts from the one before). That is why each segment with a
+successor is checked (`gate`) before the next one starts: a flaw held there costs one segment, not the chain.
+Every submission goes into the spend ledger with its cause.
 """
 from __future__ import annotations
 
@@ -15,13 +18,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from reskin import credentials, lumos, net
+from reskin import ledger, lumos
 from reskin.common import FFMPEG, PROMPTS, digest, log, read, run, sha, video_info, write
 from reskin.prompts import compose
 
 POLL_SECONDS = 15
 GENERATION_TIMEOUT = 30 * 60
-SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 
 
 def state_path(job: Path, key: str) -> Path:
@@ -99,7 +101,34 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
 def core(inputs: dict) -> str:
     """What makes a finished segment current: its reference, frames, model and attempt. A prompt change alone applies
     to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly)."""
-    return digest({k: v for k, v in inputs.items() if k != "prompt"})
+    return digest(core_inputs(inputs))
+
+
+def core_inputs(inputs: dict) -> dict:
+    return {k: v for k, v in inputs.items() if k != "prompt"}
+
+
+def cause_of(record: dict, inputs: dict, redo: dict) -> str:
+    """Why a segment is sent to Seedance now (see ledger.CAUSES): what differs from its last render."""
+    if not record:
+        return "new"
+    if record.get("digest") == core(inputs):
+        return "unusable"           # the same inputs again: the last result was rejected or the generation failed
+    old = record.get("inputs")
+    if not old:
+        return "redo" if inputs["attempt"] != record.get("attempt", 1) else "plan"
+    if old.get("attempt") != inputs["attempt"]:
+        reasons = redo.get("reasons") or []
+        return "auto-retry" if reasons and str(reasons[-1]).startswith("automatic retry") else "redo"
+    if old.get("chain") != inputs.get("chain"):
+        return "upstream"
+    if old.get("keyframe") != inputs.get("keyframe"):
+        return "keyframe"
+    if old.get("resolution") != inputs["resolution"]:
+        return "resolution"
+    if old.get("model") != inputs["model"]:
+        return "model"
+    return "plan"
 
 
 def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict,
@@ -116,26 +145,22 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     source = Path(next(r for r in state["sources"] if r["id"] == source_id)["path"])
     clip = job / "segments" / f"{source_id}-{seg['id']}.mp4"
     if not resume:
+        cause = cause_of(record, inputs, redo_log(job).get(key, {}))
         cut_clip(source, seg["render_frames"], plan_row["fps"], plan_row["width"], plan_row["height"], clip)
         video = lumos.upload(clip, "video-to-video")
         picture = (chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"]) if "chain" in inputs
                    else job / "keyframes" / f"{source_id}-{seg['id']}.png")
         pictures = [lumos.upload(picture, "video-to-video")]
-        started = time.monotonic()
-        while True:
-            try:
-                submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"])
-                break
-            except (RuntimeError, net.HttpError) as error:
-                if time.monotonic() - started > SUBMIT_PATIENCE or isinstance(error, credentials.MissingCredential):
-                    raise
-                log(f"{key}: submission refused ({error}); retrying in 60 s")
-                time.sleep(60)
-        record = {"digest": want, "generation_id": submitted["generation_id"], "status": "submitted",
-                  "attempt": inputs["attempt"], "prompt": inputs["prompt"], "reference": picture.name,
-                  "submitted_at": time.strftime("%H:%M:%S")}
+        submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"],
+                                            log=lambda text: log(f"{key}: {text}"))
+        record = {"digest": want, "inputs": core_inputs(inputs), "generation_id": submitted["generation_id"],
+                  "status": "submitted", "attempt": inputs["attempt"], "prompt": inputs["prompt"],
+                  "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
         write(record_path, record)
-        log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, from {picture.name})")
+        ledger.add(job, kind="video", event="submit", key=key, seconds=seg["seconds"],
+                   resolution=inputs["resolution"], cause=cause, attempt=inputs["attempt"],
+                   generation_id=submitted["generation_id"], model=inputs["model"])
+        log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, {cause}, from {picture.name})")
 
     def on_poll(value):
         status = value.get("status")
@@ -147,7 +172,9 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     except lumos.GenerationFailed as error:
         record.update(status="failed", error=str(error))
         write(record_path, record)
+        ledger.add(job, kind="video", event="failed", key=key, generation_id=record["generation_id"])
         raise
+    from reskin import net
     net.download(lumos.result_urls(finished)[0], output, timeout=300)
     info = video_info(output)
     expected = seg["seconds"]
@@ -159,20 +186,40 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     record.update(status="done" if not problems else "rejected", output=str(output), problems=problems,
                   ai={k: info[k] for k in ("width", "height", "fps", "duration", "frames")},
                   finished_at=time.strftime("%H:%M:%S"))
+    record.pop("gate", None)
     write(record_path, record)
+    ledger.add(job, kind="video", event="done" if not problems else "rejected", key=key,
+               generation_id=record["generation_id"])
     if problems:
         raise RuntimeError(f"{key}: Seedance result unusable: {'; '.join(problems)}")
     log(f"{key}: done ({info['width']}x{info['height']}, {info['duration']:.2f} s)")
     return {**record, "key": key, "reused": False}
 
 
-def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None = None, workers: int = 4) -> list[dict]:
+def plan_order(plan: dict, only: set[str] | None = None) -> list[tuple[str, dict, list[dict]]]:
+    """Chains to render, the longest first, so the batch is not left waiting on one long chain started last."""
     groups = [(sid, row, members) for sid, row in plan["sources"].items() for members in chains(row)
               if not only or sid in only or any(f"{sid}:{seg['id']}" in only for seg in members)]
+    return sorted(groups, key=lambda group: -sum(seg["seconds"] for seg in group[2]))
+
+
+def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None = None, workers: int = 4,
+            gate: bool = True, on_source_done=None) -> list[dict]:
+    """Render every selected chain. With `gate`, each segment that has a successor is checked before the successor
+    starts; a held segment stops its chain (`held`, the rest `waiting`). `on_source_done(source_id, results)` is
+    called as soon as every chain of a source has finished, so its assembly and review need not wait for the batch."""
+    from reskin import gate as GATE
+    groups = plan_order(plan, only)
     todo = [(sid, row, seg) for sid, row, members in groups for seg in members]
-    log(f"rendering {len(todo)} segments in {len(groups)} chains, {workers} chains at a time "
-        "(segments of one chain follow each other; each takes a few minutes on Lumos)")
+    log(f"rendering {len(todo)} segments in {len(groups)} chains, {workers} chains at a time, longest first "
+        "(segments of one chain follow each other; each takes a few minutes on Lumos)"
+        + ("; every segment with a successor is checked before it" if gate else ""))
     done = threading.Event()
+    remaining = {}
+    for sid, _, _ in groups:
+        remaining[sid] = remaining.get(sid, 0) + 1
+    collected: dict[str, list[dict]] = {}
+    lock = threading.Lock()
 
     def heartbeat(started=time.monotonic()):
         while not done.wait(120):
@@ -196,15 +243,54 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
 
     def chain(group):
+        from reskin import patch as PATCH
         sid, row, members = group
         results, previous, prev_seg = [], None, None
-        for seg in members:
-            if previous is not None and previous.get("error"):
-                results.append({"key": f"{sid}:{seg['id']}", "error": f"waits for {previous['key']}"})
+        # Local patches change nothing the rest of the chain starts from: each segment's patches render alongside the
+        # chain as soon as that segment is final.
+        patching = ThreadPoolExecutor(2)
+        patches = []
+        for position, seg in enumerate(members):
+            key = f"{sid}:{seg['id']}"
+            if previous is not None and (previous.get("error") or previous.get("held") or previous.get("waiting")):
+                blocker = previous.get("blocker") or previous["key"]
+                why = "held by the segment check" if previous.get("held") or previous.get("waiting") else "failed"
+                results.append({"key": key, "waiting": True, "blocker": blocker,
+                                "error" if previous.get("error") else "note": f"waits for {blocker} ({why})"})
+                previous = results[-1]
                 continue
-            previous, prev_seg = one(sid, row, seg, previous, prev_seg), seg
-            results.append(previous)
+            result = one(sid, row, seg, previous, prev_seg)
+            if gate and not result.get("error") and position + 1 < len(members):
+                index = next(i for i, s in enumerate(row["segments"]) if s["id"] == seg["id"])
+                try:
+                    verdict = GATE.check(job, state, row, sid, index)
+                    result["gate"] = verdict
+                    result["held"] = GATE.holds(verdict)
+                except Exception as error:      # a failed check never blocks production; say so
+                    log(f"{key}: segment check failed ({type(error).__name__}: {error}); continuing unchecked")
+                    result["gate_error"] = f"{type(error).__name__}: {error}"
+            previous, prev_seg = result, seg
+            results.append(result)
+            if result.get("generation_id") and not result.get("error"):
+                patches.append(patching.submit(PATCH.render_all, job, state, row, sid, seg, style))
+        patching.shutdown(wait=True)
+        for future in patches:
+            results += future.result()
+        finish(sid, results)
         return results
+
+    def finish(sid, results):
+        if on_source_done is None:
+            return
+        with lock:
+            collected.setdefault(sid, []).extend(results)
+            remaining[sid] -= 1
+            complete = remaining[sid] == 0
+        if complete:
+            try:
+                on_source_done(sid, collected[sid])
+            except Exception as error:
+                log(f"{sid}: follow-up after rendering failed: {type(error).__name__}: {error}")
     try:
         with ThreadPoolExecutor(max(1, workers)) as executor:
             return [result for results in executor.map(chain, groups) for result in results]

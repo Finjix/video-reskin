@@ -129,3 +129,45 @@ def log(message: str) -> None:
 def timestamp(seconds: float) -> str:
     minutes, rest = divmod(max(0.0, seconds), 60)
     return f"{int(minutes)}:{rest:05.2f}"
+
+
+class Busy(ValueError):
+    """Another process holds the job lock (a second `render` would submit the same segments again)."""
+
+
+class job_lock:
+    """Non-blocking per-job lock on a file in `state/`; the OS releases it when the process ends, even on a crash."""
+
+    def __init__(self, job: Path, name: str):
+        self.path = Path(job) / "state" / f"{name}.lock"
+        self.name = name
+        self.stream = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.stream = self.path.open("a+b")
+        try:
+            self.stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.stream.close()
+            raise Busy(f"another {self.name} of this job is still running; wait for it to finish (its finished "
+                       "segments are kept), never start a second one") from None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self.stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.stream, fcntl.LOCK_UN)
+        finally:
+            self.stream.close()

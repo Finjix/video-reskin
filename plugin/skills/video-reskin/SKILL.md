@@ -15,9 +15,14 @@ description: Batch-restyle videos (by default into realistic materials with the 
   fix it and run the same command again. `credential error:` names the key or login to provide. `runtime error:` /
   `service error:` name a network, disk or Lumos problem: fix the cause and run the same command again. Every command
   can be re-run and redoes only what changed; `render` also resumes generations still running on Lumos.
-- `render` takes 5-10 minutes per segment (Seedance renders 1080p on Lumos). Segments of one shot render one after
-  another (each starts from the previous result), separate shots and sources 4 at a time; it prints a heartbeat every
-  2 minutes. Run it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`.
+- `run` (and `render`) takes 5-10 minutes per segment on Lumos. Segments of one shot render one after another (each
+  starts from the previous result), separate shots and sources 4 at a time, longest first; it prints a heartbeat every
+  2 minutes. Run it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`, and never
+  start a second `run`/`render` of the same job while one is running (it refuses: `another render of this job is
+  still running`).
+- Seedance is the cost: every segment and every redo is paid. A redo inside a shot also renders the rest of that shot
+  again, so `run` checks each segment that has a successor before the successor starts (the segment check) and holds
+  it when the check finds a flaw. `cost` shows what was sent and why.
 - The scripts do all media work, segmentation, colour matching and calls to the models. Your part is editorial:
   where each video stops, what is on screen, what to remove, judging keyframes, and confirming review findings on
   stills. Never write scripts that call Lumos, Winky or FFmpeg yourself.
@@ -55,8 +60,13 @@ batch without asking; an open question never stops production: take the default 
 | Screen-fixed, flat text or UI (captions, labels, banners, buttons) comes out garbled or changed | an `overlays` item for each (a `box` or `poly` hugging it): the models leave it out and the program burns the original's pixels (or the drawn `text`) back; `colors` for letters over a moving scene. UI standing in the scene (floor price tags, bubbles) and text with complex motion stay with the models |
 | Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
 | A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
+| A preview shows a wrong object, colour or text | the edits are wrong for that moment (an untimed item, a missing colour, a confusable name): fix them, `plan`, `preview` again; previews cost a few images, a wrong prompt costs every segment |
+| `lint` suggests a change | it is Gemini's reading of the video: check it on the sheets (it once claimed a logo vanished at 22 s that stayed to 34 s); take what the sheets confirm |
+| A segment is held by the segment check | look at its stills (`review/gate/<id>-<Kxx>-p1.jpg`): confirmed -> `redo` it (with `--prompt`); a false alarm -> `accept --segment <key> --reason <why>`; then `run` again |
+| Screen-fixed text or UI comes out garbled after rendering | add an `overlays` (or `hud`) item covering it with a `box`/`poly` and no `colors`, `plan`, `assemble`: the segments are reused, nothing is rendered again |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
-| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` (inside a shot this also renders the later segments of that shot again) |
+| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` (inside a shot this also renders the later segments of that shot again). This is the default |
+| A confirmed flaw that is short (a few seconds) and local, inside a long segment, with later segments of the shot already done | consider `patch --segment <key> --at <start> <end> --reason R [--prompt P]`: only 4-8 s render again and the rest of the shot stays. Not for flaws spread over the segment, a wrong look or colour of the whole segment, fast camera motion or a cut at the patch's edges, or a flaw within 0.75 s of the segment's end. After `assemble`, both patch joins must be clean or slight; a visible join -> `patch --drop` and `redo` the segment |
 | A visible seam jump (seam sheet, measured or Gemini) | `redo` the segment after the seam; if it stays, `split_at` a still moment elsewhere |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Issues remain after `review_rounds` (3) rounds | deliver; list each remaining issue with its time |
@@ -69,29 +79,40 @@ it and stop; see Credentials). Say what you tried and the minimum you need.
 Commands and file formats: [workflow](references/workflow.md). Review loop: [review](references/review.md).
 
 1. `init --work-order -` (JSON on stdin) creates `<output_root>/视频换风格_YYYYMMDD_HHMMSS/temp`, the job dir.
-2. `analyze` finds cuts, the end-card candidate and still overlays. Read `catalog/catalog.md` and look at every
-   `catalog/<id>.jpg` and `catalog/<id>-end.jpg`.
-3. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world
+2. `analyze` finds cuts, the end-card candidate and still overlays; `lint` then has Gemini list what each source
+   shows (objects with colours and times, logos and warning lines, screen-fixed text, HUD, end card) and drafts
+   `config/edits.draft.json`. Read `catalog/catalog.md` and `catalog/lint.md`, look at every `catalog/<id>.jpg`,
+   `catalog/<id>-end.jpg` and `catalog/<id>-lint.jpg`.
+3. Write the edits file (start from the draft; keep only what the sheets confirm): per source the kept range (`keep`, ending before the end card), the real-world
    `materials` of what is on screen, what to `remove` (only logos and warning lines you actually saw on that source's
    sheets, timed when they come and go; HUD stays), `hud` boxes for screen-fixed counters, `overlays` for screen-fixed flat text and UI the models garble, and an `anchor` time when
-   the automatic one would be a poor frame. `plan --edits <file>` cuts every kept range into as few segments as
+   the automatic one would be a poor frame. `lint --edits <file>` checks the edits against the video (untimed or
+   absent items, colours, missing logos); `plan --edits <file>` cuts every kept range into as few segments as
    Seedance allows (at most 30 s each, at camera cuts where possible) and writes `reports/plan.md`.
-4. `keyframes` restyles one anchor frame per source and the first frame of every shot's first segment after it (later
-   segments of a shot start from the previous result instead). Look at every `sheets/<id>-keyframes.jpg`: same
-   layout and objects as the original, realistic materials, no logo or warning text, no strong noise or fragmented
-   look. Redo bad ones before rendering: a whole shot follows its keyframe.
-5. `render` edits every segment with Seedance 2.5 on Lumos at the job resolution (480p by default while developing), chaining the segments of each shot.
-6. `assemble` retimes each segment to its source duration, matches colours, switches between segments at their
-   best-matching frame, copies the `hud` back from the original, burns in the `overlays`, joins everything with the source audio and writes
-   `<name>_写实.mp4` into the delivery folder. It measures every seam (`clean`, `slight`, `visible`) and draws
-   `sheets/<id>-seams.jpg` (the frames before and after each switch): look at it.
-7. `review` has Gemini compare each video with its original (穿帮, bugs, 拼接色差, leftover logos/text), then look at
-   every seam close up, and adds the measured seam jumps. Confirm every reported issue on stills
-   (`frames --source <id> --at <t>`), `redo` the confirmed segments, then (`keyframes` if a keyframe was redone,)
-   `render`, `assemble`, `review` again, up to `review_rounds` rounds. A video with a visible seam is not done.
-8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
-   rounds and verdict, seam measurements; issues dismissed (and why) or still open (with times); redos and keyframe
-   redos.
+4. `run` makes the keyframes (one anchor per source, the first frame of every shot) and previews (the same prompt on
+   frames across every segment), then stops. Look at every `sheets/<id>-keyframes.jpg` and `sheets/<id>-preview.jpg`:
+   same layout and objects as the original, the right colours, realistic materials, no logo or warning text, no
+   strong noise or fragmented look. Fix the edits or redo keyframes before rendering: a whole shot follows its keyframe
+   and every segment uses the same texts as the previews.
+5. `run` again renders every segment with Seedance 2.5 on Lumos at the job resolution (480p by default while
+   developing), chaining the segments of each shot, and checks each segment that has a successor before the
+   successor starts. As soon as all segments of a source are done it assembles and reviews that source while the
+   rest renders:
+   - `assemble` retimes each segment to its source duration, matches colours, switches between segments at their
+     best-matching frame, splices in patches, copies the `hud` back from the original, burns in the `overlays`, joins
+     everything with the source audio and writes `<name>_写实.mp4` into the delivery folder. It measures every seam
+     (`clean`, `slight`, `visible`) and draws `sheets/<id>-seams.jpg`: look at it.
+   - `review` has Gemini compare the video with its original (穿帮, bugs, 拼接色差, leftover logos/text), look at every
+     seam close up, adds the measured seam jumps, draws the stills of every issue (`review/issues/<id>-r<n>-p<k>.jpg`)
+     and lets Gemini triage them (a hint, not a verdict).
+   (`keyframes`, `preview`, `render`, `assemble`, `review` also run one by one.)
+6. Held segments first: look at their stills, `redo` or `accept`. Then confirm every review issue on its stills (more
+   moments: `frames --source <id> --at <t>`), `redo` the confirmed segments (or `patch` a short local flaw, see the
+   table), and `run` again: only what changed renders, unchanged videos are not reviewed again. Up to `review_rounds`
+   rounds. A video with a visible seam is not done.
+7. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
+   rounds and verdict, seam measurements; issues dismissed (and why) or still open (with times); redos, patches,
+   accepted holds and keyframe redos; and the `cost` lines (seconds sent to Seedance by cause).
 
 ## Rules
 
@@ -101,7 +122,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    original; only the materials change, plus the removals. The restyled scene never changes at a seam. Never ask
    for added objects, text or effects.
 3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
-4. **Confirm before redoing.** Gemini can be wrong: look at the stills of every issue before `redo`; redo only
-   confirmed segments, never the whole video for a local flaw.
+4. **Confirm before redoing.** Gemini can be wrong: look at the stills of every issue (and of every held segment)
+   before `redo`, `patch` or `accept`; redo only confirmed segments, never the whole video for a local flaw.
 5. **Delivery folder.** It holds only the finished `.mp4` files and `temp/`. Everything else (edits drafts, stills,
    logs) lives in `temp/`; revisions reuse the same folder.

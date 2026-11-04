@@ -9,11 +9,17 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `login [--timeout 300]` | Feishu QR login to Lumos (opens the QR image; refreshes it when it expires) | until scanned |
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
+| `lint [--edits <json>] [--only S01]` | Gemini lists objects (colours, times), logos and warning lines, screen-fixed text, HUD and the end card; checks the edits; drafts `config/edits.draft.json` → `catalog/lint.md`, `catalog/<id>-lint.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at the job resolution (480p by default while developing; 720p or 1080p for delivery) → `ai/`; segments of one shot one after another, each from the previous result | 5-10 min per segment, 4 shots at a time |
+| `preview [--only S01]` | GPT Image previews of frames across every segment with the texts the video prompt uses there (looked at, never used as references) → `sheets/<id>-preview.jpg` | ~1 min per image, 3 at a time |
+| `render [--only K] [--workers 4] [--no-gate]` | Seedance 2.5 video edit of every segment and patch at the job resolution (480p by default while developing; 720p or 1080p for delivery) → `ai/`; segments of one shot one after another, each from the previous result, longest shots first; each segment with a successor is checked first (seam measure + Gemini) and held when flawed | 5-10 min per segment, 4 shots at a time |
+| `run [--only K] [--no-gate] [--no-preview]` | keyframes and previews (stops when any are new, to be looked at); then render with checks, and assemble and review each source as soon as its segments are done (unchanged videos are not reviewed again) | as render |
+| `accept --segment S01:K02 --reason R` | lets a held segment through (the check was wrong, as seen on its stills) | - |
+| `patch --segment S01:K02 --at T1 [T2] --reason R [--prompt P]` / `patch --drop S01:K02:P1` | queues a local patch: 4-8 s of a finished segment render again from its own frame, the rest stays | - |
+| `cost [--json]` | Seedance seconds by cause (new, redo, upstream, auto-retry, patch, plan, keyframe, unusable), resolution and source; GPT Image and Gemini calls | - |
 | `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder; seam measurements and `sheets/<id>-seams.jpg` | ~1 min per video |
-| `review [--only S01]` | Gemini compares original and result, then checks every seam close up; measured seam jumps added → `reports/review/<id>-r<n>.md/json` | 1-2 min per video |
+| `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2), then checks every seam close up; measured seam jumps added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--keyframe]` | sends confirmed segments back for another attempt | - |
 | `status` | progress per source and the next step | - |
@@ -124,4 +130,18 @@ so redoing a segment also renders the rest of its chain again. Edit the edits fi
   there, `motion`: the picture's own change per frame, `local`: the largest colour change of one of 60 regions beyond
   its own motion, so one object changing colour counts; `jump`: clean, slight or visible), colour corrections, HUD
   mattes, overlays (frames they cover), segment times in the delivered video. `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
-- `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.
+- `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments, description and triage
+  hint; `temp/review/issues/<id>-r<n>-p<k>.jpg`: the stills of every issue (upper row original, lower row restyled).
+- `temp/review/gate/<id>-<Kxx>-p<k>.jpg`: stills of a held segment's findings; the verdict is in
+  `state/render/<id>-<Kxx>.json` (`gate`).
+- `temp/state/ledger.jsonl`: one line per paid call (Seedance segment or patch, GPT Image keyframe or preview, Gemini
+  check) with its cause; `cost` sums it.
+
+## Patches (`patch`)
+
+A patch renders the flaw plus 0.5 s on both sides (at least 4 s, at most 8 s, kept 0.25 s from the segment's edges
+and clear of the next segment's overlap) from the segment's own frame at its first moment, with the segment's video
+prompt, the chain sentence, the segment's redo sentences and the patch's `--prompt`. `assemble` switches into the
+patch and back at the best-matching overlap frames (colours matched to the segment) and measures both joins like
+seams (`S01:K02:P1:in`, `:out` in the seams list and the review). A patch belongs to the segment render it was made
+for: when the segment renders again, its patches are dropped.
