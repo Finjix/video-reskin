@@ -49,9 +49,11 @@ def matte(source: Path, keep: list[float], item: dict, size: tuple[int, int], ou
     width, height = size
     x0, y0 = int(item["box"][0] * width), int(item["box"][1] * height)
     x1, y1 = int(round(item["box"][2] * width)), int(round(item["box"][3] * height))
-    cx0, cy0 = max(0, x0 - MARGIN), max(0, y0 - MARGIN)
+    # Even origin and size: the crop runs on yuv420p frames, where FFmpeg rounds odd crops down and the matte
+    # would no longer match (alphamerge: "Input frame sizes do not match").
+    cx0, cy0 = max(0, x0 - MARGIN) // 2 * 2, max(0, y0 - MARGIN) // 2 * 2
     cx1, cy1 = min(width, x1 + MARGIN), min(height, y1 + MARGIN)
-    cw, ch = cx1 - cx0, cy1 - cy0
+    cw, ch = (cx1 - cx0) // 2 * 2, (cy1 - cy0) // 2 * 2
     start = max(keep[0], item.get("start", keep[0]))
     end = min(keep[1], item.get("end", keep[1]))
     raw = run([FFMPEG, "-v", "error", "-ss", f"{start:.3f}", "-t", f"{max(.5, end - start):.3f}", "-i", source, "-vf",
