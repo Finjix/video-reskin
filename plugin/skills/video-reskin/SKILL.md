@@ -28,10 +28,12 @@ description: Batch-restyle videos (by default into realistic materials with the 
 Run `auth`. It shows the stored Winky key and whether the Lumos login works.
 - No Winky key: ask the user for theirs (Lumos → Winky → API Keys → 创建密钥), then `auth --key <key>`. The key is
   stored encrypted for this Windows user; never write it into job files, reports or replies.
-- Not logged in to Lumos (or `credential error: ... run login`, also mid-batch): tell the user that a Feishu QR code is
-  about to open on their screen and that they should scan it with the Feishu app, then run `login`. It waits up to
-  5 minutes and replaces an expired code by itself; it prints the image path (`qr: ...`) in case no window opened, so
-  you can show that image. `login --check` only checks.
+- Not logged in to Lumos (or `credential error: ... run login`, also mid-batch): start `login` in the background
+  (never wait on it in the foreground). As soon as it prints `qr: <path>`, send that image to the user, tell them to
+  scan it with the Feishu app and then reply to confirm (e.g. "已扫码" / "继续"), and **end your turn right there** — do not poll, sleep or wait for
+  the scan. The background `login` keeps waiting (up to 5 minutes, refreshing an expired code) and stores the login
+  when scanned. When the user replies, run `login --check`; if it is not logged in (e.g. the code timed out), start
+  `login` again and send the new QR the same way. Then continue where you left off.
 - The Winky key is only for the Gemini review; keyframes (GPT Image) and videos (Seedance) run on the Lumos login.
 
 ## Talking to the user
@@ -58,8 +60,8 @@ batch without asking; an open question never stops production: take the default 
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Issues remain after `review_rounds` (3) rounds | deliver; list each remaining issue with its time |
 
-Stop to ask only when nothing can continue: footage missing or unreadable, no key, or the user does not scan the QR
-code. Say what you tried and the minimum you need.
+Stop to ask only when nothing can continue: footage missing or unreadable, no key, or a Lumos QR code to scan (send
+it and stop; see Credentials). Say what you tried and the minimum you need.
 
 ## Workflow
 
