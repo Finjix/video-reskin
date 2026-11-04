@@ -158,6 +158,11 @@ def render_lines(job: Path, results: list[dict]) -> tuple[list[str], bool]:
     for r in held:
         gate = r["gate"]
         lines.append(f"  {r['key']} held: {'; '.join(gate.get('reasons') or [])}")
+        if gate.get("realism"):
+            from reskin import review as REVIEW
+            lines.append(f"    realism (5 = real footage): {REVIEW.realism_line(gate['realism'])}")
+        if gate.get("identity_sheets"):
+            lines.append(f"    identity close-ups (beside the shot's keyframes): {', '.join(gate['identity_sheets'])}")
         for issue in gate.get("issues") or []:
             lines.append(f"    #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s: "
                          f"{issue['description']}")
@@ -229,12 +234,15 @@ def cmd_compare(args) -> int:
     runtime.ensure("media")
     from reskin import assemble as ASSEMBLE
     only = selection(args.only)
+    if args.with_videos and len([s for s in plan["sources"] if not only or s in only]) != 1:
+        raise ValueError("--with compares one source with earlier versions of it: pick it with --only S01")
     lines, failed = [], False
     for source_id in plan["sources"]:
         if only and source_id not in only:
             continue
         try:
-            made = ASSEMBLE.compare_source(job, state, source_id, layout=args.layout)
+            made = ASSEMBLE.compare_source(job, state, source_id, layout=args.layout, extras=args.with_videos,
+                                           labels=args.labels)
         except ValueError as error:
             failed = True
             lines.append(f"{source_id}: no comparison: {error}")
@@ -245,13 +253,31 @@ def cmd_compare(args) -> int:
     return RULE_FAILURE if failed else 0
 
 
+def identity_lines(checks: list[dict]) -> list[str]:
+    """The preview identity check: which previews draw a recurring character or object differently."""
+    lines = []
+    for check in checks:
+        if check.get("skipped"):
+            lines.append(f"{check['key']}: skipped ({check['skipped']})")
+            continue
+        issues = check.get("issues") or []
+        lines.append(f"{check['key']}: {len(issues)} changes across the previews; sheet {check['sheet']}")
+        lines += [f"  [{i['severity']}] {i['start']:.1f}-{i['end']:.1f} s: {i['description']}" for i in issues]
+    return lines
+
+
 def review_lines(result: dict, limit: int) -> list[str]:
     from reskin import review as REVIEW
     high = sum(1 for i in result["issues"] if i["severity"] == "high")
     lines = [f"{result['source']} round {result['round']} of {limit}: {result['verdict']}, {len(result['issues'])} issues "
              f"({high} high): {result['summary']}"]
+    if result.get("realism"):
+        lines.append(f"  realism (5 = real footage): {REVIEW.realism_line(result['realism'])}")
     lines += [f"  {REVIEW.describe_issue(issue)}" for issue in result["issues"]]
     lines += [f"  stills: {sheet}" for sheet in result.get("sheets") or []]
+    if result.get("identity_sheets"):
+        lines.append(f"  identity close-ups (whole video beside the styled keyframes): "
+                     f"{', '.join(result['identity_sheets'])}")
     return lines
 
 
@@ -359,14 +385,22 @@ def cmd_preview(args) -> int:
     plan = load_plan(job)
     runtime.ensure("media")
     from reskin import preview as PREVIEW
-    results = PREVIEW.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers)
+    if args.at and len([s for s in plan["sources"] if not args.only or s in {k.partition(":")[0] for k in args.only}]) != 1:
+        raise ValueError("--at takes times of one source: pick it with --only S01")
+    results = PREVIEW.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers,
+                              at=args.at, redo=args.redo)
+    checks = [r for r in results if r.get("kind") == "identity"]
+    results = [r for r in results if r.get("kind") != "identity"]
     failed = [r for r in results if r.get("error")]
     made = [r for r in results if not r.get("error") and not r.get("reused")]
     lines = [f"previews: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-preview.jpg: original | preview with the video prompt's texts)")
+    lines.append(f"sheets: {job / 'sheets'} (<id>-preview.jpg: original | preview with the video prompt's texts and the "
+                 f"segment's corrective sentences" + ("; <id>-preview-at.jpg: the --at times" if args.at else "") + ")")
+    lines += identity_lines(checks)
     lines.append("next: wrong objects, colours or text on a preview mean the edits are wrong: fix them, plan, "
-                 "preview again; then render")
+                 "preview again; a preview that alone drew a character differently: preview --at T --redo; then "
+                 "render")
     show(lines)
     return RULE_FAILURE if failed else 0
 
@@ -432,9 +466,13 @@ def cmd_run(args) -> int:
     results = KEYFRAMES.run_all(job, state, plan, style, only, set())
     failed = [r for r in results if r.get("error")]
     made += [r["key"] for r in results if not r.get("error") and not r.get("reused")]
-    if not args.no_preview and not failed:
+    checks = []
+    if not failed:
+        # --no-preview still makes the previews Seedance takes as references (midframes).
         from reskin import preview as PREVIEW
-        previews = PREVIEW.run_all(job, state, plan, style, only)
+        previews = PREVIEW.run_all(job, state, plan, style, only, midframes_only=args.no_preview)
+        checks = [r for r in previews if r.get("kind") == "identity"]
+        previews = [r for r in previews if r.get("kind") != "identity"]
         failed += [r for r in previews if r.get("error")]
         made += [r["key"] for r in previews if not r.get("error") and not r.get("reused")]
     if failed:
@@ -442,7 +480,8 @@ def cmd_run(args) -> int:
         return RULE_FAILURE
     if made:
         show([f"new keyframes and previews: {', '.join(made)}",
-              f"sheets: {job / 'sheets'} (<id>-keyframes.jpg, <id>-preview.jpg)",
+              f"sheets: {job / 'sheets'} (<id>-keyframes.jpg, <id>-preview.jpg, <id>-preview-identity-subjects.jpg)",
+              *identity_lines(checks),
               "next: look at every new sheet; fix the edits or keyframes --redo <key> where needed; then run again "
               "(it renders once nothing new needs looking at)"])
         return 0
@@ -595,6 +634,11 @@ def main() -> None:
     assemble.add_argument("--only", nargs="*", help="source IDs")
     compare = command("compare", cmd_compare, help="the delivered video beside its original (<name>_对比.mp4)")
     compare.add_argument("--only", nargs="*", help="source IDs")
+    compare.add_argument("--with", dest="with_videos", nargs="+", metavar="VIDEO",
+                         help="earlier versions on the delivered clock (e.g. a previous delivery), placed between the "
+                              "original and the result; use with --only for one source")
+    compare.add_argument("--labels", nargs="+", metavar="TEXT",
+                         help="one caption per column: original, each --with video, result (e.g. 原版 旧写实版 新写实版)")
     compare.add_argument("--layout", choices=("left", "top"), default="left",
                          help="original on the left (default) or on top")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
@@ -616,13 +660,18 @@ def main() -> None:
     lint.add_argument("--edits", type=Path, help="edits JSON to check")
     lint.add_argument("--only", nargs="*", help="source IDs")
     preview = command("preview", cmd_preview, help="GPT Image previews across every segment (looked at, not used)")
-    preview.add_argument("--only", nargs="*", help="source IDs")
-    preview.add_argument("--workers", type=int, default=3)
+    preview.add_argument("--only", nargs="*", help="source IDs or segments like S01:K02")
+    preview.add_argument("--at", nargs="+", type=float, metavar="T",
+                         help="source times to preview instead (one source; e.g. the moment of a flaw after redo)")
+    preview.add_argument("--redo", action="store_true",
+                         help="make the chosen previews again even when current (with --at: those times)")
+    preview.add_argument("--workers", type=int, default=6)
     run_cmd = command("run", cmd_run, help="keyframes, previews, render with checks, assemble and review per source")
     run_cmd.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     run_cmd.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     run_cmd.add_argument("--no-gate", action="store_true", help="no segment checks")
-    run_cmd.add_argument("--no-preview", action="store_true", help="no preview stills")
+    run_cmd.add_argument("--no-preview", action="store_true",
+                         help="no preview stills, except the midframes Seedance takes as references")
     accept = command("accept", cmd_accept, help="let a segment held by the segment check through")
     accept.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     accept.add_argument("--reason", required=True, help="why the reported flaw is not one (as seen on the stills)")

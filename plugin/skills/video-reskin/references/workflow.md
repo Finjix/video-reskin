@@ -12,17 +12,17 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `lint [--edits <json>] [--only S01]` | Gemini lists objects (colours, times), logos and warning lines, screen-fixed text, HUD and the end card; checks the edits; drafts `config/edits.draft.json` → `catalog/lint.md`, `catalog/<id>-lint.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
-| `preview [--only S01]` | GPT Image previews of frames across every segment with the texts the video prompt uses there (looked at, never used as references) → `sheets/<id>-preview.jpg` | ~1 min per image, 3 at a time |
+| `preview [--only S01\|S01:K02] [--at T...] [--redo]` | GPT Image previews of frames across every segment with the texts the video prompt uses there and the segment's corrective sentences (looked at; the `midframes` among them also go to Seedance) → `sheets/<id>-preview.jpg`; `--at`: these times instead → `sheets/<id>-preview-at.jpg`; `--redo`: make them again even when current; new previews get the identity check (`sheets/<id>-preview-identity-subjects.jpg`) | ~2 min per image, 6 at a time |
 | `render [--only K] [--workers 4] [--no-gate]` | Seedance 2.5 video edit of every segment and patch at the job resolution (480p by default while developing; 720p or 1080p for delivery) → `ai/`; segments of one shot one after another, each from the previous result, longest shots first; each segment with a successor is checked first (seam measure + Gemini) and held when flawed | 5-10 min per segment, 4 shots at a time |
-| `run [--only K] [--no-gate] [--no-preview]` | keyframes and previews (stops when any are new, to be looked at); then render with checks, and assemble and review each source as soon as its segments are done (unchanged videos are not reviewed again) | as render |
+| `run [--only K] [--no-gate] [--no-preview]` | keyframes and previews (stops when any are new, to be looked at; `--no-preview` still makes the midframes); then render with checks, and assemble and review each source as soon as its segments are done (unchanged videos are not reviewed again) | as render |
 | `accept --segment S01:K02 --reason R` | lets a held segment through (the check was wrong, as seen on its stills) | - |
 | `patch --segment S01:K02 --at T1 [T2] --reason R [--prompt P]` / `patch --drop S01:K02:P1` | queues a local patch: 4-8 s of a finished segment render again from its own frame, the rest stays | - |
 | `cost [--json]` | Seedance seconds by cause (new, redo, upstream, auto-retry, patch, plan, keyframe, unusable), resolution and source; GPT Image and Gemini calls | - |
 | `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder; seam measurements and `sheets/<id>-seams.jpg` | ~1 min per video |
-| `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2), then checks every seam close up; measured seam jumps added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
+| `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2) and rates its realism, checks that every recurring character and object keeps its keyframe look (close-ups → `review/<id>-identity-r<n>-subjects.jpg`), then checks every seam close up; measured seam jumps added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--replace-prompt] [--keyframe]` | sends confirmed segments back for another attempt; corrective sentences accumulate over attempts, `--replace-prompt` drops the earlier ones first | - |
-| `compare [--only S01] [--layout left\|top]` | the delivered video beside its original (original left or top, each side at the original's size, delivered audio) → `<name>_写实_对比.mp4` in the delivery folder; only when the user asks for a comparison | ~20 s per minute of video |
+| `compare [--only S01] [--layout left\|top] [--with <video>...] [--labels <text>...]` | the delivered video beside its original (original left or top, each side at the original's size, delivered audio) → `<name>_写实_对比.mp4` in the delivery folder; `--with` puts earlier versions on the delivered clock (a previous delivery) between the two, `--labels` captions each column (original, each `--with`, result); only when the user asks for a comparison | ~20 s per minute of video, more with `--with` |
 | `status` | progress per source and the next step | - |
 
 Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key).
@@ -39,7 +39,10 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
 - `style`: a preset name from `assets/prompts.json` (`realistic`: 写实版材质，风格不变) or an object with `label`,
-  `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look.
+  `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look (optional:
+  `look`, `rebuild` and `style_ref`, the texts the `{look}`, `{rebuild}` and `{style_ref}` placeholders take).
+  `realistic` keeps layout, positions, counts, motion and colours and rebuilds each object's appearance as its
+  real-world counterpart (`rebuild`).
 - `options.max_segment_seconds`: 4-30 (default 30, Seedance 2.5 edits clips of 4-30 s and keeps their look over the
   whole clip; fewer, longer segments mean fewer seams). `fps`: output frame rate (default 30, never above the source).
 
@@ -106,6 +109,19 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   - Only screen-fixed, flat elements. UI standing in the scene (floor price tags, bubbles over characters, signs in
     perspective) and text with complex motion (zooms, bounces, 3D) stay with the models: a pasted copy does not
     keep up with the moving scene. Never add text or UI the original does not show.
+- `style_ref`: a texture reference for the anchor keyframe (the look the user points at): an image path, or
+  `{"path": <image or video>, "at": <seconds, for a video>, "box": [x0, y0, x1, y1]}` (fractions; crop away logos,
+  warning lines and objects that could be copied). It goes along as the anchor's second picture, with a sentence to
+  learn only its realism, texture, light and colour grading, never its content; stored as
+  `keyframes/<id>-styleref.png`. Keyframes and segments follow the anchor; Seedance never gets it.
+- `midframes`: preview times (source seconds) whose previews go to Seedance as extra reference pictures for the
+  segment that contains them, so the realism of that moment holds (a list, or `"auto"`: the regular preview moments
+  of every segment). At most 3 per segment, at least 2 s after its first rendered frame; each comes with a sentence
+  naming its second in the segment and telling the model not to draw its objects before the original shows them.
+  For segments that drift back to the game look later on (toy trucks arriving, a crowd, flat snow), never for the
+  first seconds (the keyframe or chain covers them). Adding or moving midframes renders the segment again (cost
+  cause `keyframe`); the previews they use must be right, so look at them (`(Seedance reference)` on the sheet).
+  Patches do not get them.
 - `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
 - `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment.

@@ -36,6 +36,15 @@ class PromptTests(unittest.TestCase):
         self.assertIn("积雪地面、蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
         self.assertIn("积雪地面", prompts.compose(style, "video", {"materials": "积雪地面"}, span=(0, 1)))
 
+    def test_rebuild_and_style_reference(self):
+        style = read(PROMPTS)["presets"]["realistic"]
+        row = {"materials": "x", "remove": []}
+        for kind in ("anchor", "keyframe", "video"):
+            text = prompts.compose(style, kind, row)
+            self.assertIn("大幅重构", text)
+            self.assertNotIn("质感参考", text)
+        self.assertIn("图2是写实质感参考", prompts.compose(style, "anchor", row, style_ref=True))
+
     def test_no_removal_clause_when_empty(self):
         style = read(PROMPTS)["presets"]["realistic"]
         text = prompts.compose(style, "anchor", {"materials": "x", "remove": []})

@@ -83,8 +83,8 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     if seg["seam"] == "continuous":
         if previous is None or not previous.get("generation_id"):
             raise ValueError(f"{key}: the segment before it in this shot is not rendered yet")
-        # Chained: the only reference is the previous result itself (Seedance copies objects from any picture it
-        # gets, so nothing else goes along).
+        # Chained: the reference is the previous result itself (Seedance copies objects from any picture it gets,
+        # so nothing else goes along, except the segment's own midframes: the same scene at later moments).
         reference = {"chain": previous["generation_id"]}
         extra = " ".join(part for part in (read(PROMPTS)["chain"], extra) if part)
     else:
@@ -92,10 +92,31 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
         if not keyframe.is_file():
             raise ValueError(f"{key}: keyframe {keyframe.name} is missing; run keyframes first")
         reference = {"keyframe": sha(keyframe)}
+    mids = midframe_moments(job, plan_row, source_id, seg)
+    if mids:
+        sentence = read(PROMPTS)["midframe"]
+        notes = [sentence.format(n=n, t=f"{t - span[0]:.0f}") for n, t in enumerate(mids, 2)]
+        corrections = redo.get("prompt", "")
+        base = extra[: len(extra) - len(corrections)].strip() if corrections and extra.endswith(corrections) else extra
+        extra = " ".join(part for part in (base, *notes, corrections) if part)
     prompt = compose(style, "video", plan_row, extra=extra, span=span)
+    # Midframes count by their times: a preview made again (after an edits change) applies to new and redone renders.
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference,
+            **({"midframes": mids} if mids else {}),
             "prompt": prompt, "model": lumos.VIDEO_MODEL, "resolution": state["options"]["resolution"],
             "attempt": redo.get("attempt", 1)}
+
+
+def midframe_moments(job: Path, plan_row: dict, source_id: str, seg: dict) -> list[float]:
+    """Preview times inside the segment that go along as extra reference pictures (edits `midframes`): the look each
+    moment should have, so what comes into view later keeps the realism of the first frame."""
+    from reskin import preview as PREVIEW
+    mids = PREVIEW.midframes(plan_row, seg)
+    for t in mids:
+        if not PREVIEW.image_path(job, source_id, t).is_file():
+            raise ValueError(f"{source_id}:{seg['id']}: the midframe preview at {t:.2f} s is missing; run preview "
+                             "(or run) first")
+    return mids
 
 
 def core(inputs: dict) -> str:
@@ -122,7 +143,7 @@ def cause_of(record: dict, inputs: dict, redo: dict) -> str:
         return "auto-retry" if reasons and str(reasons[-1]).startswith("automatic retry") else "redo"
     if old.get("chain") != inputs.get("chain"):
         return "upstream"
-    if old.get("keyframe") != inputs.get("keyframe"):
+    if old.get("keyframe") != inputs.get("keyframe") or old.get("midframes") != inputs.get("midframes"):
         return "keyframe"
     if old.get("resolution") != inputs["resolution"]:
         return "resolution"
@@ -150,17 +171,21 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
         video = lumos.upload(clip, "video-to-video")
         picture = (chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"]) if "chain" in inputs
                    else job / "keyframes" / f"{source_id}-{seg['id']}.png")
-        pictures = [lumos.upload(picture, "video-to-video")]
+        from reskin import preview as PREVIEW
+        extras = [PREVIEW.image_path(job, source_id, t) for t in inputs.get("midframes") or []]
+        pictures = [lumos.upload(p, "video-to-video") for p in [picture, *extras]]
         submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"],
                                             log=lambda text: log(f"{key}: {text}"))
         record = {"digest": want, "inputs": core_inputs(inputs), "generation_id": submitted["generation_id"],
                   "status": "submitted", "attempt": inputs["attempt"], "prompt": inputs["prompt"],
-                  "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
+                  "reference": picture.name, "midframe_images": {p.name: sha(p) for p in extras},
+                  "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
         write(record_path, record)
         ledger.add(job, kind="video", event="submit", key=key, seconds=seg["seconds"],
                    resolution=inputs["resolution"], cause=cause, attempt=inputs["attempt"],
                    generation_id=submitted["generation_id"], model=inputs["model"])
-        log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, {cause}, from {picture.name})")
+        log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, {cause}, from {picture.name}"
+            + (f" + {len(extras)} midframes" if extras else "") + ")")
 
     def on_poll(value):
         status = value.get("status")

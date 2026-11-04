@@ -15,7 +15,9 @@ from reskin.prompts import describe
 MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
 OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more; assemble joins inside it
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "hud", "overlays"}
+             "hud", "overlays", "style_ref", "midframes"}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def items_problem(items, name: str) -> str | None:
@@ -52,6 +54,28 @@ def hud_problem(items) -> str | None:
     return None
 
 
+def style_ref_problem(value) -> str | None:
+    """`style_ref`: a texture reference for the anchor keyframe only: an image path, or {"path": image or video,
+    "at": seconds (videos), "box": [x0, y0, x1, y1] (fractions; crop away its logos and text)}."""
+    if isinstance(value, str):
+        value = {"path": value}
+    if not isinstance(value, dict) or not isinstance(value.get("path"), str) or not set(value) <= {"path", "at", "box"}:
+        return 'style_ref must be a path or {"path": file, "at": seconds, "box": [x0, y0, x1, y1]}'
+    path = Path(value["path"])
+    if not path.is_file():
+        return f"style_ref file not found: {path}"
+    suffix = path.suffix.lower()
+    if suffix not in VIDEO_SUFFIXES | IMAGE_SUFFIXES:
+        return f"style_ref must be an image or a video, not {suffix or 'a file without extension'}"
+    if suffix in VIDEO_SUFFIXES and not (isinstance(value.get("at"), (int, float)) and value["at"] >= 0):
+        return "style_ref of a video needs \"at\": the time in seconds of the frame to use"
+    box = value.get("box")
+    if box is not None and (not isinstance(box, list) or len(box) != 4 or not all(isinstance(v, (int, float)) for v in box)
+                            or not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)):
+        return "style_ref box must be [x0, y0, x1, y1] fractions of the frame"
+    return None
+
+
 def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     """Validate the edits file against the catalog; returns it normalised."""
     if not isinstance(value, dict) or not isinstance(value.get("sources", {}), dict):
@@ -63,6 +87,8 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
         problems.append(f"defaults: unknown key {key}")
     if "remove" in defaults and items_problem(defaults["remove"], "remove"):
         problems.append(f"defaults: {items_problem(defaults['remove'], 'remove')}")
+    if defaults.get("style_ref") is not None and style_ref_problem(defaults["style_ref"]):
+        problems.append(f"defaults: {style_ref_problem(defaults['style_ref'])}")
     out = {"defaults": defaults, "sources": {}}
     for source_id, row in (value.get("sources") or {}).items():
         if source_id not in known:
@@ -92,6 +118,12 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
             problems.append(f"{source_id}: style_from must name another source")
+        mids = row.get("midframes")
+        if mids is not None and mids != "auto" and not (
+                isinstance(mids, list) and all(isinstance(t, (int, float)) and 0 <= t < duration for t in mids)):
+            problems.append(f"{source_id}: midframes must be \"auto\" or a list of source times in seconds")
+        if row.get("style_ref") is not None and style_ref_problem(row["style_ref"]):
+            problems.append(f"{source_id}: {style_ref_problem(row['style_ref'])}")
         if "split_at" in row and not (isinstance(row["split_at"], list) and all(isinstance(x, (int, float)) for x in row["split_at"])):
             problems.append(f"{source_id}: split_at must be a list of times in seconds")
         out["sources"][source_id] = row
@@ -124,6 +156,8 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             "remove": remove, "anchor": row.get("anchor"), "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
             "overlays": row.get("overlays") or [],
+            "style_ref": ({"path": row["style_ref"]} if isinstance(row.get("style_ref"), str) else row.get("style_ref")),
+            "midframes": row.get("midframes"),
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
 
 
@@ -237,6 +271,12 @@ def markdown(plan: dict, catalog: dict) -> str:
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
         if row["extra"]:
             lines.append(f"extra: {row['extra']}")
+        if row.get("midframes"):
+            lines.append(f"midframes (previews sent to Seedance as realism references): {row['midframes']}")
+        if row.get("style_ref"):
+            ref = row["style_ref"]
+            lines.append(f"style reference (anchor only): {ref['path']}" + (f" at {ref['at']:g} s" if "at" in ref else "")
+                         + (f", box {ref['box']}" if ref.get("box") else ""))
         for seg in row["segments"]:
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
             lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['seconds']:.2f} s), "

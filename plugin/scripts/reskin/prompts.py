@@ -39,14 +39,17 @@ def burned_items(row: dict) -> list:
     return [item for item in row.get("overlays") or [] if item.get("ai", "remove") == "remove"]
 
 
-def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None) -> str:
+def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
+            style_ref: bool = False) -> str:
     """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
-    source time the text is for (a frame: start == end)."""
+    source time the text is for (a frame: start == end). `style_ref`: the anchor gets a texture reference picture as
+    its second image (the style's `style_ref` sentence says how to use it)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = "、".join(on_screen(row.get("materials"), span)) or style["default_materials"]
     removal = remove_clause(on_screen(row.get("remove"), span), on_screen(burned_items(row), span))
-    text = style[kind].format(materials=materials, remove=removal,
-                              look=style.get("look", ""), extra=wishes)
+    text = style[kind].format(materials=materials, remove=removal, look=style.get("look", ""),
+                              rebuild=style.get("rebuild", ""), extra=wishes,
+                              style_ref=style.get("style_ref", "") if style_ref else "")
     return " ".join(text.split())
 
 

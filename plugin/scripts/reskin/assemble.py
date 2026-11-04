@@ -474,10 +474,29 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     return result
 
 
-def compare_source(job: Path, state: dict, source_id: str, layout: str = "left") -> dict:
+def _label(text: str, width: int, output: Path) -> Path:
+    """A caption strip for one column of a comparison: white text on a dark translucent band."""
+    from PIL import Image, ImageDraw
+    from reskin.overlay import _font
+    size = max(18, width // 18)
+    font = _font("bold", size)
+    band = Image.new("RGBA", (width, round(size * 1.8)), (0, 0, 0, 150))
+    draw = ImageDraw.Draw(band)
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    draw.text(((width - (right - left)) / 2 - left, (band.height - (bottom - top)) / 2 - top), text,
+              fill=(255, 255, 255, 255), font=font)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    band.save(output)
+    return output
+
+
+def compare_source(job: Path, state: dict, source_id: str, layout: str = "left",
+                   extras: list[Path] | None = None, labels: list[str] | None = None) -> dict:
     """The delivered video beside its original, on one clock, as a deliverable: `<delivered stem>_对比.mp4` in the
     delivery folder. Original on the left (or top), restyled on the right (or bottom), each side at the original's
-    size (the restyle scaled up when the job renders smaller), with the delivered audio."""
+    size (the restyle scaled up when the job renders smaller), with the delivered audio. `extras`: earlier versions
+    on the delivered clock (e.g. a previous delivery), placed between the original and this result; `labels`: one
+    caption per column (original, extras..., result) drawn at its top."""
     record_path = job / "state/assembled" / f"{source_id}.json"
     if not record_path.is_file():
         raise ValueError(f"{source_id} is not assembled yet; run assemble first")
@@ -486,21 +505,43 @@ def compare_source(job: Path, state: dict, source_id: str, layout: str = "left")
     result = Path(assembled["output"])
     if not result.is_file():
         raise ValueError(f"{result.name} is missing from the delivery folder; run assemble again")
+    extras = [Path(p) for p in extras or []]
+    for path in extras:
+        if not path.is_file():
+            raise ValueError(f"comparison video not found: {path}")
+    columns = 2 + len(extras)
+    if labels and len(labels) != columns:
+        raise ValueError(f"{len(labels)} labels for {columns} columns (original, {len(extras)} extra, result)")
     output = result.with_name(result.stem + "_对比.mp4")
-    if output.is_file() and output.stat().st_mtime >= result.stat().st_mtime:
+    wanted = digest({"result": [result.stat().st_size, result.stat().st_mtime],
+                     "extras": [[str(p), p.stat().st_size, p.stat().st_mtime] for p in extras],
+                     "labels": labels or [], "layout": layout})
+    marker = job / "state/compare" / f"{source_id}.json"
+    if output.is_file() and marker.is_file() and read(marker).get("digest") == wanted:
         return {"output": str(output), "reused": True}
     info = video_info(Path(source["path"]))
     width, height = info["width"] // 2 * 2, info["height"] // 2 * 2
     fps = assembled["fps"]
     start, end = assembled["keep"]
     stack = "hstack" if layout == "left" else "vstack"
-    graph = (f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps={fps},"
-             f"scale={width}:{height}:flags=bicubic,setsar=1[a];"
-             f"[1:v]setpts=PTS-STARTPTS,fps={fps},scale={width}:{height}:flags=lanczos,setsar=1[b];"
-             f"[a][b]{stack}=inputs=2:shortest=1,format=yuv420p[v]")
+    inputs = [source["path"], *extras, result]
+    parts = [f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps={fps},"
+             f"scale={width}:{height}:flags=bicubic,setsar=1[c0]"]
+    for i in range(1, columns):
+        parts.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},scale={width}:{height}:flags=lanczos,setsar=1[c{i}]")
+    names = [f"c{i}" for i in range(columns)]
+    if labels:
+        for i, text in enumerate(labels):
+            inputs.append(_label(text, width, job / "work/compare" / f"{source_id}-label{i}.png"))
+            parts.append(f"[c{i}][{columns + i}:v]overlay=0:0[l{i}]")
+        names = [f"l{i}" for i in range(columns)]
+    parts.append("".join(f"[{n}]" for n in names) + f"{stack}=inputs={columns}:shortest=1,format=yuv420p[v]")
     partial = output.with_name(output.stem + ".partial.mp4")
-    audio = ["-map", "1:a?", "-c:a", "copy"]
-    run([FFMPEG, "-v", "error", "-y", "-i", source["path"], "-i", result, "-filter_complex", graph, "-map", "[v]",
+    audio = ["-map", f"{columns - 1}:a?", "-c:a", "copy"]
+    command = [FFMPEG, "-v", "error", "-y"]
+    for path in inputs:
+        command += ["-i", path]
+    run([*command, "-filter_complex", ";".join(parts), "-map", "[v]",
          *audio, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
          "-movflags", "+faststart", "-shortest", partial])
     try:
@@ -508,6 +549,7 @@ def compare_source(job: Path, state: dict, source_id: str, layout: str = "left")
     except PermissionError:
         raise ValueError(f"{output.name} is open in another program (a video player?); close it and run compare "
                          f"again (the new version waits in {partial.name})") from None
+    write(marker, {"digest": wanted, "output": str(output)})
     made = video_info(output)
     log(f"{source_id}: compared {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
     return {"output": str(output), "reused": False, "size": [made["width"], made["height"]],

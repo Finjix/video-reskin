@@ -84,5 +84,8 @@ def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW
 
 def inline(path: Path, mime: str | None = None) -> dict:
     data = Path(path).read_bytes()
-    return {"inlineData": {"mimeType": mime or mimetypes.guess_type(str(path))[0] or "application/octet-stream",
-                           "data": base64.b64encode(data).decode()}}
+    return inline_bytes(data, mime or mimetypes.guess_type(str(path))[0] or "application/octet-stream")
+
+
+def inline_bytes(data: bytes, mime: str) -> dict:
+    return {"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}}

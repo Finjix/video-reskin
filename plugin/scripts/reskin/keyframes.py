@@ -21,6 +21,36 @@ def grab(path: Path, frame: int, fps: float, output: Path) -> Path:
     return output
 
 
+def style_reference(job: Path, source_id: str, ref: dict) -> Path:
+    """The edits' `style_ref` as a PNG beside the keyframes: the frame at `at` of a video (or the image), cropped to
+    `box`, at most 1536 px on the long side. Rewritten only when it would change, so the anchor's inputs stay put."""
+    output = job / "keyframes" / f"{source_id}-styleref.png"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    path = Path(ref["path"])
+    raw = output.with_name(output.stem + "-raw.png")
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        with Image.open(path) as image:
+            picture = image.convert("RGB")
+    else:
+        run([FFMPEG, "-v", "error", "-y", "-ss", f"{float(ref['at']):.3f}", "-i", path, "-frames:v", "1", raw])
+        with Image.open(raw) as image:
+            picture = image.convert("RGB")
+        raw.unlink(missing_ok=True)
+    if ref.get("box"):
+        x0, y0, x1, y1 = ref["box"]
+        w, h = picture.size
+        picture = picture.crop((round(x0 * w), round(y0 * h), round(x1 * w), round(y1 * h)))
+    scale = min(1.0, 1536 / max(picture.size))
+    if scale < 1:
+        picture = picture.resize((round(picture.width * scale), round(picture.height * scale)), Image.LANCZOS)
+    if output.is_file():
+        with Image.open(output) as old:
+            if old.size == picture.size and old.convert("RGB").tobytes() == picture.tobytes():
+                return output
+    picture.save(output, "PNG")
+    return output
+
+
 def _record(job: Path, key: str) -> dict:
     path = job / "state/keyframes.json"
     data = read(path) if path.is_file() else {}
@@ -68,6 +98,9 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
     if task["kind"] == "anchor" and row.get("style_from"):
         references.append(folder / f"{row['style_from']}-anchor.png")
         prompt = compose(style, "keyframe", row, span=moment)
+    elif task["kind"] == "anchor" and row.get("style_ref"):
+        references.append(style_reference(job, source_id, row["style_ref"]))
+        prompt = compose(style, "anchor", row, span=moment, style_ref=True)
     elif task["kind"] == "anchor":
         prompt = compose(style, "anchor", row, span=moment)
     else:

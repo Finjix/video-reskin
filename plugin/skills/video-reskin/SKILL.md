@@ -53,7 +53,9 @@ the style if it is not the default realistic material look. By default every vid
 bottom warning text (the user's standing request); keep HUD numbers, icons and buttons. When the user asks to see
 the result next to the original (对比, 并排, 左右对比), `compare` after the last `assemble` writes
 `<name>_写实_对比.mp4` beside the delivery (original left, restyled right; `--layout top` stacks them); never build it
-with FFmpeg yourself. Then work to the delivered
+with FFmpeg yourself. When the user asks to redo a delivered video and compare versions (原版-旧版-新版), start a new
+job (`init`) so the old delivery stays, and after its last `assemble` run `compare --only S01 --with <old delivery>
+--labels 原版 旧写实版 新写实版`. Then work to the delivered
 batch without asking; an open question never stops production: take the default below and report it at the end.
 
 | Situation | Default |
@@ -67,16 +69,23 @@ batch without asking; an open question never stops production: take the default 
 | Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too |
 | A coin counter, timer or other screen-fixed HUD with changing numbers | a `hud` box around it (from the still-overlay boxes in the catalog): it is copied back from the original frame by frame, so the digits are always right |
 | Screen-fixed, flat text or UI (captions, labels, banners, buttons) comes out garbled or changed | an `overlays` item for each (a `box` or `poly` hugging it): the models leave it out and the program burns the original's pixels (or the drawn `text`) back; `colors` for letters over a moving scene. UI standing in the scene (floor price tags, bubbles) and text with complex motion stay with the models |
+| The user finds the result not realistic enough, still cartoonish in places | the preset already rebuilds every object as its real counterpart (shape, proportions and surface; layout, positions, counts and colours stay). Name each prominent object in `materials` by its real-world look (`枝叶层次丰富、挂着积雪的真实云杉树`, `被积雪半覆盖的不规则雪堆和岩石`, `排队的穿浅蓝色棉服的真人顾客`), the scenery too: Seedance keeps the realism of its first frame on what it shows, but draws what pans into view later (snow mounds, trees, crowds) nearly as the cartoon source unless the text describes its real look |
+| The user gives a reference picture or video for the look | `style_ref` in the edits: `{"path": <video>, "at": <seconds>, "box": [x0, y0, x1, y1]}` (or an image path); pick a frame with the textures wanted (ground, water, wood, snow) and few objects that could be copied, crop away its logos and warning lines. The anchor keyframe learns its texture and realism (never its content); the rest of the video follows the anchor. Check the anchor for objects copied from the reference. The job keeps the frame as `keyframes/<id>-styleref.png`: if the user moves the reference file away, point `style_ref` at that copy (the anchor stays current) |
 | Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
 | A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
-| Looking at previews | compare the colour of every prominent object with the original, in every preview, the late ones of each segment too: a whole yellowfin that came out pale in one preview was drawn silver-grey for the last 20 s of the video. Fixing it in the edits before rendering costs a few images; a redo costs 6-9 minutes and every later segment of the shot |
+| Looking at keyframes | besides layout and colours, note how each recurring character looks there (the protagonist, customers): write that look into `materials` (`身穿深蓝色派克大衣、灰色毛领兜帽、深色长裤的写实成年男子主角`) before rendering. A generic `身穿蓝色棉服的真人主角` let the protagonist slide back to the game's light-blue chibi within the first segment, and every later segment kept it |
+| `identity` issue or lines under a preview or a held segment (a subject changed look) | look at the close-up sheet (`-identity-...-subjects.jpg`, REF columns first): confirmed -> `redo` the segment where the change starts (its successors in the shot follow) with the subject's keyframe look in `materials` and a `--prompt` that keeps it; a preview -> `preview --at T --redo` |
+| Looking at previews | judge their realism too (they are the look each moment should have), and compare the colour of every prominent object with the original, in every preview, the late ones of each segment too: a whole yellowfin that came out pale in one preview was drawn silver-grey for the last 20 s of the video. Fixing it in the edits before rendering costs a few images; a redo costs 6-9 minutes and every later segment of the shot |
 | A preview shows a wrong object, colour or text | the edits are wrong for that moment (an untimed item, a missing colour, a confusable name): fix them, `plan`, `preview` again; previews cost a few images, a wrong prompt costs every segment |
+| After a `redo --prompt`, before rendering | `preview --only S01:K02` (or `--at <the flaw's time>`): previews carry the segment's corrective sentences, so a sentence that recolours the wrong object shows on a still for the price of an image instead of a render. `run` makes them by itself and stops to let you look |
+| The video turns cartoonish later in a segment or along a shot (realism 3 or lower, toy trucks, doll people, flat snow), while the previews of those moments look real | `midframes` in the edits: preview times inside each fading segment (or `"auto"`), sent to Seedance as extra reference pictures; check those previews, then `redo` the segment. See "Realism that fades" in [review](references/review.md) |
 | `lint` suggests a change | it is Gemini's reading of the video: check it on the sheets (it once claimed a logo vanished at 22 s that stayed to 34 s); take what the sheets confirm |
-| A segment is held by the segment check | look at its stills (`review/gate/<id>-<Kxx>-p1.jpg`): confirmed -> `redo` it (with `--prompt`); a false alarm -> `accept --segment <key> --reason <why>`; then `run` again |
+| A segment is held by the segment check | look at its stills (`review/gate/<id>-<Kxx>-p1.jpg`) and its realism line: confirmed -> `redo` it (with `--prompt`, or `midframes` when its realism fades); a false alarm or a flaw you let through -> `accept --segment <key> --reason <why>` (later checks and the review are told, so it does not hold the next segments again); then `run` again |
 | Screen-fixed text or UI comes out garbled after rendering | add an `overlays` (or `hud`) item covering it with a `box`/`poly` and no `colors`, `plan`, `assemble`: the segments are reused, nothing is rendered again |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
 | A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` (inside a shot this also renders the later segments of that shot again). This is the default |
 | Writing a corrective `--prompt` | name only the part that changes and what stays, e.g. `只有吊臂的金属立柱和横臂换成红色涂装；金枪鱼保持蓝白色鱼身，绝不变红`: a bare colour change (`吊臂由蓝色变为红色`) turned the tuna it held red too |
+| Redoing a video in a new job with the same segments | carry the old job's corrective sentences over with `redo --prompt` before the first render, but reread each against every object of its segment: `被抓起的金枪鱼保持蓝白色` (meant for the blue tuna) turned the golden yellowfin the claw lifts later silver |
 | A corrective sentence made things worse | `redo --segment <key> --reason R --replace-prompt --prompt <new sentence>`: corrective sentences otherwise accumulate over attempts |
 | A confirmed flaw that is short (a few seconds) and local, inside a long segment, with later segments of the shot already done | consider `patch --segment <key> --at <start> <end> --reason R [--prompt P]`: only 4-8 s render again and the rest of the shot stays. Not for flaws spread over the segment, a wrong look or colour of the whole segment, fast camera motion or a cut at the patch's edges, or a flaw within 0.75 s of the segment's end. After `assemble`, both patch joins must be clean or slight; a visible join -> `patch --drop` and `redo` the segment |
 | A visible seam jump (seam sheet, measured or Gemini) | `redo` the segment after the seam; if it stays, `split_at` a still moment elsewhere |
@@ -116,25 +125,32 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
      best-matching frame, splices in patches, copies the `hud` back from the original, burns in the `overlays`, joins
      everything with the source audio and writes `<name>_写实.mp4` into the delivery folder. It measures every seam
      (`clean`, `slight`, `visible`) and draws `sheets/<id>-seams.jpg`: look at it.
-   - `review` has Gemini compare the video with its original (穿帮, bugs, 拼接色差, leftover logos/text), look at every
-     seam close up, adds the measured seam jumps, draws the stills of every issue (`review/issues/<id>-r<n>-p<k>.jpg`)
-     and lets Gemini triage them (a hint, not a verdict).
+   - `review` has Gemini compare the video with its original (穿帮, bugs, 拼接色差, leftover logos/text, and whether it
+     looks real enough: a realism timeline, `not_realistic` issues; and whether every recurring character and
+     object keeps its keyframe look to the end: `identity` issues on close-ups), look at every seam close up, adds the measured
+     seam jumps, draws the stills of every issue (`review/issues/<id>-r<n>-p<k>.jpg`) and lets Gemini triage them (a
+     hint, not a verdict).
    (`keyframes`, `preview`, `render`, `assemble`, `review` also run one by one.)
 6. Held segments first: look at their stills, `redo` or `accept`. Then confirm every review issue on its stills (more
-   moments: `frames --source <id> --at <t>`), `redo` the confirmed segments (or `patch` a short local flaw, see the
-   table), and `run` again: only what changed renders, unchanged videos are not reviewed again. Up to `review_rounds`
-   rounds. A video with a visible seam is not done.
+   moments: `frames --source <id> --at <t>`). Judge the realism yourself as well, on those stills and on `frames`
+   every ~10 s across the whole video, its end too: a part that looks like a game is a flaw even when Gemini rates
+   it well (fix: `midframes`, see the table). `redo` the confirmed segments (or `patch` a short local flaw, see the
+   table), and `run` again: only what changed renders, unchanged videos are not reviewed again. Up to
+   `review_rounds` rounds. A video with a visible seam is not done.
 7. If the user asked for a comparison, `compare` (after the last `assemble`).
-8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
+8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, how
+   real each part looks (the realism timeline and your own judgement), review
    rounds and verdict, seam measurements; issues dismissed (and why) or still open (with times); redos, patches,
    accepted holds and keyframe redos; and the `cost` lines (seconds sent to Seedance by cause).
 
 ## Rules
 
-1. **Honest work.** Judge only from sheets, stills, reports and command output you read. Never claim a review passed,
+1. **Honest work.** Judge only from sheets, stills, reports and command output you read. Report how real the
+   delivery looks, part by part, not only that the review passed. Never claim a review passed,
    that you watched a video, or that a fix worked without the stills or a new review round to show it.
-2. **Same video, new materials, one look.** Composition, motion, timing, characters, counts and HUD stay as in the
-   original; only the materials change, plus the removals. The restyled scene never changes at a seam. Never ask
+2. **Same video, real materials, one look.** Composition, motion, timing, characters, counts, positions, colours and
+   HUD stay as in the original; the materials change and each object's appearance is rebuilt as its real-world
+   counterpart (shape details, proportions, surface), plus the removals. The restyled scene never changes at a seam. Never ask
    for added objects, text or effects.
 3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
 4. **Confirm before redoing.** Gemini can be wrong: look at the stills of every issue (and of every held segment)

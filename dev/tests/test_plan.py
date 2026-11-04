@@ -88,6 +88,26 @@ class EditsTests(unittest.TestCase):
         self.assertEqual(row["keep"], [0.0, 50.0])
         self.assertEqual(row["materials"], "x")
 
+    def test_style_ref(self):
+        import tempfile
+        from pathlib import Path
+        catalog = {"sources": [catalog_row()]}
+        with tempfile.TemporaryDirectory() as folder:
+            video, image = Path(folder) / "ref.mp4", Path(folder) / "ref.jpg"
+            video.write_bytes(b"x")
+            image.write_bytes(b"x")
+            edits = plan.check_edits({"defaults": {"style_ref": {"path": str(video), "at": 3, "box": [0, .1, 1, .8]}},
+                                      "sources": {"S01": {}}}, {}, catalog)
+            row = plan.source_edits(edits, "S01", catalog["sources"][0], {"default_materials": "x"})
+            self.assertEqual(row["style_ref"]["at"], 3)
+            edits = plan.check_edits({"sources": {"S01": {"style_ref": str(image)}}}, {}, catalog)
+            row = plan.source_edits(edits, "S01", catalog["sources"][0], {"default_materials": "x"})
+            self.assertEqual(row["style_ref"], {"path": str(image)})
+            for bad in ({"path": str(video)}, {"path": str(Path(folder) / "missing.jpg")},
+                        {"path": str(image), "box": [.5, 0, .4, 1]}, {"path": str(image), "zoom": 2}):
+                with self.assertRaises(ValueError):
+                    plan.check_edits({"sources": {"S01": {"style_ref": bad}}}, {}, catalog)
+
 
 if __name__ == "__main__":
     unittest.main()

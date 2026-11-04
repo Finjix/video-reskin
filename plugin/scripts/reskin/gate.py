@@ -81,7 +81,9 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
                                               job / "review/gate" / f"{source_id}-{seg['id']}-compare.mp4")
         part = winky.inline(compare, "video/mp4")
         part["videoMetadata"] = {"fps": GEMINI_FPS}
-        answer = winky.gemini([part, {"text": review.segment_prompt(state, row, layout)}], schema=review.SCHEMA)
+        known = review.accepted_notes(job, source_id)
+        answer = winky.gemini([part, {"text": review.segment_prompt(state, row, layout, known=known)}],
+                              schema=review.SCHEMA)
         ledger.add(job, kind="gemini", purpose="gate", key=key, seconds=round(end - start, 2))
         for number, issue in enumerate(answer.get("issues") or [], 1):
             a, b = sorted((float(issue.get("start", 0)), float(issue.get("end", issue.get("start", 0)))))
@@ -89,6 +91,27 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
             offset = start - row["keep"][0]
             verdict["issues"].append({"n": number, **issue, "start": round(a + offset, 2), "end": round(b + offset, 2),
                                       "segments": [seg["id"]], "source": "gemini-gate", "local": [round(a, 2), round(b, 2)]})
+        offset = start - row["keep"][0]
+        local = review.realism_ranges(answer)
+        verdict["realism"] = [dict(r, start=round(r["start"] + offset, 2), end=round(r["end"] + offset, 2)) for r in local]
+        local_issues = [dict(i, start=i["local"][0], end=i["local"][1]) for i in verdict["issues"]]
+        for extra in review.realism_issues(local, local_issues):
+            verdict["issues"].append({"n": len(verdict["issues"]) + 1, **extra, "start": round(extra["start"] + offset, 2),
+                                      "end": round(extra["end"] + offset, 2), "segments": [seg["id"]],
+                                      "source": "gemini-realism", "local": [extra["start"], extra["end"]]})
+        log(f"{key}: realism {review.realism_line(verdict['realism'])}")
+        # Identity: this segment's stills beside the keyframes its shot started from (the look to keep).
+        frames = review.identity_frames(review.identity_references(job, source_id, row, [seg["id"]]), size,
+                                        source_path=source["path"], source_offset=start, result_path=str(clip),
+                                        times=review.identity_times(0.0, end - start, 3.0, 8))
+        subjects, found, sheets = review.identity_check(job, key, frames, row, "one rendered segment of a restyled "
+                                                        "video", size, job / "review/gate" / f"{source_id}-{seg['id']}-identity")
+        verdict["identity"], verdict["identity_sheets"] = subjects, [str(p) for p in sheets]
+        for extra in found:
+            verdict["issues"].append({"n": len(verdict["issues"]) + 1, **extra, "start": round(extra["start"] + offset, 2),
+                                      "end": round(extra["end"] + offset, 2), "segments": [seg["id"]],
+                                      "source": "gemini-identity", "local": [extra["start"], extra["end"]]})
+        log(f"{key}: identity check: {len(subjects)} subjects, {len(found)} changes")
         verdict["summary"] = answer.get("summary", "")
         if review.judge(verdict["issues"]) == "fail":
             reasons.append("Gemini: " + "; ".join(f"[{i['severity']}] {i['category']}" for i in verdict["issues"]
