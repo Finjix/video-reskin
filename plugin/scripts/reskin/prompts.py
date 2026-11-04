@@ -46,7 +46,10 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
     its second image (the style's `style_ref` sentence says how to use it)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = "、".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    removal = remove_clause(on_screen(row.get("remove"), span), on_screen(burned_items(row), span))
+    # Items the program wipes (`box`: from the clip before the render, or after it) stay out of the texts: naming a
+    # logo made Seedance draw one, even over a wiped corner.
+    told = [i for i in row.get("remove") or [] if not (isinstance(i, dict) and i.get("box"))]
+    removal = remove_clause(on_screen(told, span), on_screen(burned_items(row), span))
     text = style[kind].format(materials=materials, remove=removal, look=style.get("look", ""),
                               rebuild=style.get("rebuild", ""), extra=wishes,
                               style_ref=style.get("style_ref", "") if style_ref else "")

@@ -214,10 +214,23 @@ class IdentityTests(unittest.TestCase):
         stocky = {"build": "stylized", "rendering": "photo_real", "colours": "深蓝外套"}
         self.assertEqual(review.pair_difference({"left": real, "middle": chibi, "same_colours": False,
                                                  "difference": "low"}), "high")
+        # one step in build alone (a heavy parka read as stocky) is low; with other colours it counts
         self.assertEqual(review.pair_difference({"left": real, "middle": stocky, "same_colours": True,
+                                                 "difference": "low"}), "low")
+        self.assertEqual(review.pair_difference({"left": real, "middle": stocky, "same_colours": False,
                                                  "difference": "low"}), "medium")
         self.assertEqual(review.pair_difference({"left": real, "middle": real, "same_colours": True,
                                                  "difference": "low"}), "low")
+        blue = {"build": "not_a_figure", "rendering": "photo_real", "colours": "蓝色"}
+        red = {"build": "not_a_figure", "rendering": "photo_real", "colours": "红色"}
+        # an upgrade the original makes too: not a difference
+        self.assertEqual(review.pair_difference({"left": blue, "middle": red, "same_colours": False,
+                                                 "original_changes_too": True, "difference": "medium"}), "low")
+        self.assertEqual(review.pair_difference({"left": blue, "middle": red, "same_colours": False,
+                                                 "original_changes_too": False, "difference": "low"}), "medium")
+        # build still counts when the original changes colour too
+        self.assertEqual(review.pair_difference({"left": real, "middle": chibi, "same_colours": False,
+                                                 "original_changes_too": True, "difference": "low"}), "high")
         crane = {"build": "not_a_figure", "rendering": "photo_real", "colours": "红色"}
         self.assertEqual(review.pair_difference({"left": crane, "middle": crane, "same_colours": True,
                                                  "difference": "none"}), "none")
@@ -226,6 +239,191 @@ class IdentityTests(unittest.TestCase):
         from PIL import Image
         tile = review.closeup(Image.new("RGB", (480, 854)), [.4, .4, .45, .48], side=150)
         self.assertEqual(tile.size, (150, 150))
+
+class WipeTests(unittest.TestCase):
+    def test_boxes_for_the_clip(self):
+        r = {"remove": ["底部警示语", {"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15],
+                                       "fill": "mirror"},
+                        {"what": "左下角logo", "start": 37.5, "end": 55.2, "box": [0.03, 0.85, 0.3, 0.92],
+                         "fill": "mirror"}]}
+        self.assertEqual(render.clean_boxes(r, 10.0, 30.0), [[0.7, 0.08, 0.97, 0.15, 0.0, 6.5]])
+        self.assertEqual(render.clean_boxes(r, 30.0, 50.0), [[0.03, 0.85, 0.3, 0.92, 7.5, 20.0]])
+        graph, label = render.wipe_graph([[0.0, 0.0, 1.0, 0.05, 0.0, 6.5], [0.1, 0.93, 0.9, 1.0, 2.0, 3.0]], 1080, 1920)
+        self.assertEqual(label, "w1")
+        self.assertIn("crop=1080:118:0:118,vflip", graph)        # top box (grown by the feather): from below
+        self.assertIn("crop=908:156:86:1608,vflip", graph)       # bottom box: from above
+        import numpy as np
+        frame = np.full((1920, 1080, 3), 200, dtype=np.uint8)
+        frame[1450:1920, 760:1080] = np.random.default_rng(1).integers(0, 255, (470, 320, 3))   # busy fence above and below
+        chosen = render.wipe_sources([[0.71, 0.85, 0.97, 0.915, 0, 1]], 1080, 1920, frame)
+        self.assertEqual(chosen[0][2], "hflip")                    # the plain snow beside it wins
+        self.assertIn("overlay=86:1764:enable='between(t,2.000,3.000)'", graph)
+        with_masks, _ = render.wipe_graph([[0.0, 0.0, 1.0, 0.05, 0.0, 6.5]], 1080, 1920, masks=[1])
+        self.assertIn("[1:v]format=gray[w0m];[w0p][w0m]alphamerge[w0q]", with_masks)
+        # a rounding sliver of overlap does not count
+        self.assertEqual(render.clean_boxes({"remove": [{"what": "x", "start": 10.33, "end": 24.5,
+                                                         "box": [0.7, 0.9, 1, 1]}]}, 0.0, 10.333), [])
+
+    def test_glyph_boxes_carry_their_mask(self):
+        r = {"remove": [{"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15]},
+                        {"what": "左下角logo", "start": 0, "end": 9, "box": [0.03, 0.85, 0.3, 0.92], "fill": "mirror"}]}
+        logos = {0: {"hash": "abc123", "path": "m.png", "region": [0, 0, 10, 10]}}
+        self.assertEqual(render.clean_boxes(r, 0.0, 10.0, logos),
+                         [[0.7, 0.08, 0.97, 0.15, 0.0, 10.0, "glyph:abc123"], [0.03, 0.85, 0.3, 0.92, 0.0, 9.0]])
+        with self.assertRaises(ValueError):          # a letter-by-letter wipe never runs without its mask
+            render.clean_boxes(r, 0.0, 10.0, {})
+        from reskin import plan
+        self.assertIsNone(plan.items_problem(r["remove"], "remove"))
+        self.assertIsNotNone(plan.items_problem([{"what": "x", "box": [0, 0, .2, .2], "fill": "blur"}], "remove"))
+
+    def test_logo_mask_is_the_still_letters(self):
+        """A static logo (two white bars) over a scene that pans: the mask covers the bars, not the scene."""
+        import subprocess
+        import numpy as np
+        from reskin import logos
+        from reskin.common import FFMPEG
+        if not Path(FFMPEG).is_file():
+            self.skipTest("no FFmpeg in the runtime cache")
+        rng = np.random.default_rng(3)
+        world = (rng.integers(0, 255, (100, 60, 3)).repeat(8, 0).repeat(8, 1)).astype(np.uint8)
+        frames = []
+        for k in range(40):
+            frame = world[k * 4:k * 4 + 480, k * 3:k * 3 + 270].copy()
+            frame[400:410, 20:120] = 255
+            frame[440:450, 20:120] = 255
+            frames.append(frame)
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "logo.mp4"
+            subprocess.run([str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "270x480",
+                            "-r", "30", "-i", "-", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv444p", str(source)],
+                           input=np.stack(frames).tobytes(), check=True)
+            box = [10 / 270, 390 / 480, 130 / 270, 460 / 480]
+            soft = logos.measure(source, box, 0.0, 1.3, (270, 480))
+        x0, y0, _, _ = logos.region(box, (270, 480))
+        bars = soft[400 - y0:410 - y0, 30 - x0:110 - x0]
+        scene = soft[90 - 24 + 0:90 - 24 + 6, 0:6] if soft.shape[0] > 90 else soft[:4, :4]
+        self.assertGreater(float(bars.mean()), .9)
+        self.assertLess(float(scene.mean()), .1)
+        # the gap between the bars is scene that passes by: left alone apart from the grown edge
+        self.assertLess(float(soft[424 - y0:426 - y0, 30 - x0:110 - x0].mean()), .5)
+
+    def test_pushpull_fills_from_around(self):
+        import numpy as np
+        from reskin import logos
+        values = np.zeros((40, 60, 3), np.float32)
+        values[:, :30] = (200, 40, 40)
+        values[:, 30:] = (40, 40, 200)
+        known = np.ones((40, 60), np.float32)
+        known[15:25, 10:20] = 0                 # a hole in the red half
+        filled = logos.pushpull(values * known[..., None], known)
+        self.assertGreater(float(filled[20, 15, 0]), 150)          # red comes in from around, not black
+        self.assertLess(float(filled[20, 15, 2]), 90)
+        frame = np.zeros((40, 60, 3), np.uint8)
+        frame[:] = (200, 40, 40)
+        frame[18:22, 12:18] = 255                                   # a white letter
+        soft = np.zeros((40, 60), np.float32)
+        soft[17:23, 11:19] = 1
+        logos.wipe(frame, [0, 0, 60, 40], soft)
+        self.assertLess(int(frame[20, 15, 1]), 90)                   # the letter is gone, the red is back
+
+    def test_wipe_check_moments(self):
+        from reskin import review
+        times = review.wipe_times(16.5, 36.67)
+        self.assertEqual(len(times), review.WIPE_MOMENTS)
+        self.assertTrue(16.5 < times[0] < times[-1] < 36.67)
+        self.assertEqual(review.wipe_times(5.0, 5.1), [])              # a sliver has no moments
+        self.assertIn("upside_down", review.WIPE_SCHEMA["properties"]["problems"]["items"]["properties"]["problem"]["enum"])
+        text = review.wipe_prompt(3)
+        self.assertIn("These 3 sheets", text)
+        self.assertTrue(set(review.WIPE_STRICT) <= set(review.WIPE_PROBLEMS))
+
+    def test_wipe_check_merges_neighbouring_moments(self):
+        from unittest import mock
+        from reskin import review, winky, ledger
+        sheets = [{"sheet": "a.jpg", "what": "底部警示语", "times": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "box": [0, .9, 1, 1]}]
+        answer = {"problems": [{"sheet": 1, "column": c, "problem": "smear", "severity": "low", "description": "糊"}
+                               for c in (1, 2, 3, 6)]
+                  + [{"sheet": 1, "column": 4, "problem": "upside_down", "severity": "low", "description": "倒"},
+                     {"sheet": 2, "column": 1, "problem": "smear", "severity": "low", "description": "不存在的图"}]}
+        with mock.patch.object(review, "wipe_sheets", return_value=sheets), \
+                mock.patch.object(winky, "inline", return_value={}), \
+                mock.patch.object(winky, "gemini", return_value=answer), \
+                mock.patch.object(ledger, "add"):
+            issues, _ = review.wipe_check(Path("."), "S01", {}, {}, "src.mp4", Path("x"))
+        spans = sorted((i["start"], i["end"], i["severity"]) for i in issues)
+        self.assertEqual(spans, [(0.7, 3.3, "low"), (3.7, 4.3, "high"), (5.7, 6.3, "low")])
+        self.assertIn("3 个时刻", next(i for i in issues if i["start"] == 0.7)["description"])
+
+    def test_glyph_wiped_clip_renders(self):
+        import subprocess
+        import numpy as np
+        from PIL import Image
+        from reskin.common import FFMPEG
+        if not Path(FFMPEG).is_file():
+            self.skipTest("no FFmpeg in the runtime cache")
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "src.mp4"
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc=size=270x480:rate=30",
+                            "-t", "2", "-pix_fmt", "yuv420p", str(source)], check=True)
+            mask = Path(folder) / "mask.png"
+            Image.fromarray(np.full((40, 60), 255, np.uint8)).save(mask)
+            logos = {0: {"hash": "h1", "path": str(mask), "region": [10, 400, 70, 440]}}
+            out = render.cut_clip(source, [0, 45], 30.0, 270, 480, Path(folder) / "clip.mp4",
+                                  clean=[[0.7, 0.08, 0.97, 0.15, 0.0, 1.0], [0.0, 0.85, 0.3, 0.95, 0.0, 1.5, "glyph:h1"]],
+                                  logos=logos)
+            self.assertTrue(out.is_file() and out.stat().st_size > 0)
+            from reskin.common import video_info
+            self.assertEqual(round(video_info(out)["duration"] * 30), 45)
+
+    def test_wiped_clip_renders(self):
+        import subprocess
+        from reskin.common import FFMPEG
+        if not Path(FFMPEG).is_file():
+            self.skipTest("no FFmpeg in the runtime cache")
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "src.mp4"
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc=size=270x480:rate=30",
+                            "-t", "2", "-pix_fmt", "yuv420p", str(source)], check=True)
+            out = render.cut_clip(source, [0, 45], 30.0, 270, 480, Path(folder) / "clip.mp4",
+                                  clean=[[0.7, 0.08, 0.97, 0.15, 0.0, 1.0], [0.0, 0.9, 1.0, 1.0, 0.5, 1.5]])
+            self.assertTrue(out.is_file() and out.stat().st_size > 0)
+
+    def test_after_only_boxes_do_not_touch_the_render(self):
+        r = {"remove": [{"what": "logo", "start": 0, "end": 15, "box": [0, 0, .27, .05], "wipe": "after"}]}
+        self.assertEqual(render.clean_boxes(r, 0.0, 28.0), [])
+        from reskin import plan
+        self.assertIsNone(plan.items_problem(r["remove"], "remove"))
+        self.assertIsNotNone(plan.items_problem([{"what": "x", "box": [0, 0, .2, .2], "wipe": "never"}], "remove"))
+
+    def test_after_items_stay_out_of_prompts(self):
+        from reskin import prompts
+        style = read(PROMPTS)["presets"]["realistic"]
+        r = {"materials": "x", "remove": [{"what": "角落logo甲", "box": [0, 0, .2, .1], "wipe": "after"},
+                                          {"what": "底部警示语乙", "box": [0, .9, 1, 1]}]}
+        text = prompts.compose(style, "video", r)
+        self.assertNotIn("角落logo甲", text)      # wiped by the program: never named
+        self.assertNotIn("底部警示语乙", text)
+        r["remove"].append("右上角水印丙")
+        self.assertIn("右上角水印丙", prompts.compose(style, "video", r))      # no box: the model is told
+
+    def test_feather_mask_is_opaque_at_the_frame_border(self):
+        import numpy as np
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder:
+            path = render.feather_mask(86, 1764, 908, 156, 1080, 1920, Path(folder) / "m.png")
+            with Image.open(path) as image:
+                mask = np.asarray(image)
+        self.assertEqual(int(mask[-1, mask.shape[1] // 2]), 255)    # bottom edge on the frame border: opaque
+        self.assertEqual(int(mask[mask.shape[0] // 2, mask.shape[1] // 2]), 255)
+        self.assertLess(int(mask[0, mask.shape[1] // 2]), 60)          # top edge into the scene: soft
+        self.assertLess(int(mask[mask.shape[0] // 2, 0]), 60)
+
+    def test_remove_box_is_validated(self):
+        from reskin import plan
+        self.assertIsNone(plan.items_problem([{"what": "logo", "start": 0, "end": 5, "box": [0, 0, .3, .05]}], "remove"))
+        self.assertIsNotNone(plan.items_problem([{"what": "logo", "box": [.5, 0, .3, .05]}], "remove"))
+        self.assertIsNotNone(plan.items_problem([{"what": "鱼", "box": [0, 0, .3, .05]}], "materials"))
+
 
 if __name__ == "__main__":
     unittest.main()

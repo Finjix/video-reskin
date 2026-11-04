@@ -40,12 +40,13 @@ def segment_record(job: Path, key: str) -> dict:
     return read(path) if path.is_file() else {}
 
 
-def window(row: dict, seg: dict, start: float, end: float, following: bool) -> list[int]:
+def window(row: dict, seg: dict, start: float, end: float, following: bool, last: bool = False) -> list[int]:
     """Source frames to render for a flaw from `start` to `end` (source seconds): the flaw with a margin, at least
-    MIN_SECONDS with the overlaps, inside the segment's delivered part (clear of the overlap the next segment uses)."""
+    MIN_SECONDS with the overlaps, inside the segment's delivered part (clear of the overlap the next segment uses).
+    In the video's `last` segment a patch may run to the end: it then has no join out (nothing follows it)."""
     fps = row["fps"]
     lo = seg["frames"][0] + round(EDGE * fps)
-    hi = seg["frames"][1] - round((EDGE + (OVERLAP if following else 0)) * fps)
+    hi = seg["frames"][1] - (0 if last else round((EDGE + (OVERLAP if following else 0)) * fps))
     a, b = round((start - OVERLAP) * fps), round((end + OVERLAP) * fps)
     minimum = round(MIN_SECONDS * fps)
     if b - a < minimum:
@@ -75,8 +76,9 @@ def add(job: Path, plan: dict, key: str, start: float, end: float, reason: str, 
         raise ValueError(f"{key} is not rendered; a patch needs the finished segment")
     seg = segments[index]
     following = index + 1 < len(segments) and segments[index + 1]["seam"] == "continuous"
+    last = index + 1 == len(segments)
     a, b = sorted((start, end))
-    frames = window(row, seg, row["keep"][0] + a, row["keep"][0] + b, following)
+    frames = window(row, seg, row["keep"][0] + a, row["keep"][0] + b, following, last)
     data = load(job)
     current = [p for p in data.get(key, []) if p.get("base") == record["generation_id"]]
     for other in current:
@@ -119,13 +121,16 @@ def output_path(job: Path, key: str, patch_id: str) -> Path:
 def render_patch(job: Path, state: dict, row: dict, source_id: str, seg: dict, entry: dict, style: dict) -> dict:
     """Render one patch (reused when nothing changed); returns its record."""
     from reskin.prompts import compose
-    from reskin.render import cut_clip
+    from reskin.render import clean_boxes, cut_clip, logo_masks
     key = f"{source_id}:{seg['id']}"
     record_path = state_path(job, key, entry["id"])
     record = read(record_path) if record_path.is_file() else {}
     base = segment_record(job, key)
+    logos = logo_masks(job, state, row, source_id)
+    clean = clean_boxes(row, entry["render_frames"][0] / row["fps"], entry["render_frames"][1] / row["fps"], logos)
     inputs = {"base": entry["base"], "frames": entry["render_frames"], "attempt": entry.get("attempt", 1),
-              "resolution": state["options"]["resolution"], "model": lumos.VIDEO_MODEL}
+              "resolution": state["options"]["resolution"], "model": lumos.VIDEO_MODEL,
+              **({"clean": clean, "wipe": "feather"} if clean else {})}
     want = digest(inputs)
     output = output_path(job, key, entry["id"])
     if record.get("digest") == want and record.get("status") == "done" and output.is_file():
@@ -135,7 +140,8 @@ def render_patch(job: Path, state: dict, row: dict, source_id: str, seg: dict, e
     if not (record.get("digest") == want and record.get("status") in ("submitted", "running")):
         source = Path(next(r for r in state["sources"] if r["id"] == source_id)["path"])
         clip = cut_clip(source, frames, fps, row["width"], row["height"],
-                        job / "segments" / f"{source_id}-{seg['id']}-{entry['id']}.mp4")
+                        job / "segments" / f"{source_id}-{seg['id']}-{entry['id']}.mp4", clean=clean,
+                        logos=logos)
         # The segment's own frame at the patch's first moment (its result is a uniformly compressed copy).
         moment = (frames[0] - seg["render_frames"][0]) / fps
         length = (seg["render_frames"][1] - seg["render_frames"][0]) / fps
@@ -231,27 +237,37 @@ def apply(job: Path, source_id: str, row: dict, line: dict, clip: Path, out_fps:
         if not (work.is_file() and work.with_suffix(".json").is_file() and read(work.with_suffix(".json")) == pstamp):
             normalise(Path(record["output"]), length, length / out_fps, out_fps, size, work)
             write(work.with_suffix(".json"), pstamp)
+        tail = local1 >= total          # the patch runs to the end of the video: no join out
         base_in = frames_rgb(current, local0, overlap, out_fps)
         patch_in = frames_rgb(work, 0, overlap, out_fps)
-        base_out = frames_rgb(current, local1 - overlap, overlap, out_fps)
-        patch_out = frames_rgb(work, length - overlap, overlap, out_fps)
-        gain, offset = colour_fit(np.concatenate([base_in, base_out]), np.concatenate([patch_in, patch_out]))
+        if tail:
+            gain, offset = colour_fit(base_in, patch_in)
+        else:
+            base_out = frames_rgb(current, local1 - overlap, overlap, out_fps)
+            patch_out = frames_rgb(work, length - overlap, overlap, out_fps)
+            gain, offset = colour_fit(np.concatenate([base_in, base_out]), np.concatenate([patch_in, patch_out]))
         identity = (np.ones(3), np.zeros(3))
         join_in = choose_join(base_in, patch_in, identity, (gain, offset), ignore)
-        join_out = choose_join(patch_out, base_out, (gain, offset), identity, ignore)
+        join_out = None if tail else choose_join(patch_out, base_out, (gain, offset), identity, ignore)
         a_end = local0 + join_in["frame"] + half
-        p_start, p_end = join_in["frame"] - half, length - (overlap - join_out["frame"] - half)
-        b_start = local1 - overlap + join_out["frame"] - half
+        p_start = join_in["frame"] - half
+        p_end = length if tail else length - (overlap - join_out["frame"] - half)
         blend = BLEND_FRAMES / out_fps
         len_a, len_p = a_end, p_end - p_start
         graph = (f"[0:v]trim=start_frame=0:end_frame={a_end},setpts=PTS-STARTPTS[a];"
                  f"[1:v]trim=start_frame={p_start}:end_frame={p_end},setpts=PTS-STARTPTS,format=rgb24,"
-                 f"{lut(gain, offset)},format=yuv420p[p];"
-                 f"[0:v]trim=start_frame={b_start},setpts=PTS-STARTPTS[b];"
-                 f"[a][p]xfade=transition=fade:duration={blend:.6f}:offset={(len_a / out_fps) - blend:.6f}[ap];"
-                 f"[ap][b]xfade=transition=fade:duration={blend:.6f}:"
-                 f"offset={((len_a + len_p - BLEND_FRAMES) / out_fps) - blend:.6f},"
-                 f"trim=end_frame={total},setpts=PTS-STARTPTS,format=yuv420p[v]")
+                 f"{lut(gain, offset)},format=yuv420p[p];")
+        if tail:
+            graph += (f"[a][p]xfade=transition=fade:duration={blend:.6f}:offset={(len_a / out_fps) - blend:.6f},"
+                      f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={total},setpts=PTS-STARTPTS,"
+                      f"format=yuv420p[v]")
+        else:
+            b_start = local1 - overlap + join_out["frame"] - half
+            graph += (f"[0:v]trim=start_frame={b_start},setpts=PTS-STARTPTS[b];"
+                      f"[a][p]xfade=transition=fade:duration={blend:.6f}:offset={(len_a / out_fps) - blend:.6f}[ap];"
+                      f"[ap][b]xfade=transition=fade:duration={blend:.6f}:"
+                      f"offset={((len_a + len_p - BLEND_FRAMES) / out_fps) - blend:.6f},"
+                      f"trim=end_frame={total},setpts=PTS-STARTPTS,format=yuv420p[v]")
         applied.append(record["generation_id"])
         patched = job / "work" / f"{source_id}-{line['id']}-patched-{len(applied)}.mp4"
         run([FFMPEG, "-v", "error", "-y", "-i", current, "-i", work, "-filter_complex", graph, "-map", "[v]",
@@ -260,8 +276,9 @@ def apply(job: Path, source_id: str, row: dict, line: dict, clip: Path, out_fps:
         joins.append({"patch": entry["id"], "segment": line["id"], "reason": entry.get("reason", ""),
                       "in": {**{k: join_in[k] for k in ("mismatch", "motion", "local")}, "jump": jump_verdict(join_in),
                              "frame": offset_frames + local0 + join_in["frame"]},
-                      "out": {**{k: join_out[k] for k in ("mismatch", "motion", "local")}, "jump": jump_verdict(join_out),
-                              "frame": offset_frames + local1 - overlap + join_out["frame"]},
+                      "out": None if tail else {**{k: join_out[k] for k in ("mismatch", "motion", "local")},
+                                                "jump": jump_verdict(join_out),
+                                                "frame": offset_frames + local1 - overlap + join_out["frame"]},
                       "start_frame": offset_frames + local0, "end_frame": offset_frames + local1})
         current = patched
     return current, joins

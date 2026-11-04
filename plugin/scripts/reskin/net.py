@@ -13,6 +13,9 @@ from pathlib import Path
 
 USER_AGENT = "video-reskin/0.0.1"
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
+# The gateway in front of Lumos reports its own failed connection to the service under any status (seen: 403 from
+# /upload-callback); its text marks it as a network failure, not a refusal.
+GATEWAY_FAILURES = (b"upstream connect error", b"reset before headers", b"no healthy upstream")
 
 
 class NetworkError(RuntimeError):
@@ -56,7 +59,8 @@ def request(method: str, url: str, *, body: bytes | None = None, headers: dict |
                 return response.status, response.read(), dict(response.headers.items())
         except urllib.error.HTTPError as error:
             payload = error.read()
-            if error.code in RETRY_STATUS and attempt + 1 < attempts:
+            transient = error.code in RETRY_STATUS or any(text in payload for text in GATEWAY_FAILURES)
+            if transient and attempt + 1 < attempts:
                 time.sleep(delay); delay *= 2
                 continue
             raise HttpError(error.code, payload.decode("utf-8", errors="replace"), url) from None

@@ -33,10 +33,14 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 {"sources": ["D:/footage/ad1.mp4", "D:/footage/batch2"],
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
+ "delivery_dir": "<optional: the exact folder the user named for the videos, instead of output_root>",
  "style": "realistic",
  "options": {"resolution": "480p", "max_segment_seconds": 30, "fps": 30, "review_rounds": 3}}
 ```
 
+- `delivery_dir`: when the user names the folder the videos go to (`成片放 D:80P成片`), the deliveries go
+  exactly there and the job into its `temp/`; it must be new or empty. Otherwise `output_root` gets a new
+  `视频换风格_YYYYMMDD_HHMMSS/` folder.
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
 - `style`: a preset name from `assets/prompts.json` (`realistic`: 写实版材质，风格不变) or an object with `label`,
   `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look (optional:
@@ -85,6 +89,26 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   "end": s}` when the element is on screen only for part of the source: a prompt only names the items on screen
   during its keyframe or segment. List only what the sheets show: naming text that is not there makes Seedance
   draw garbled text in its place. Never list HUD counters, prices, labels or buttons.
+  A screen-fixed logo or warning line also gets `"box": [x0, y0, x1, y1]` (fractions, a little larger than the
+  element; the catalog's still-overlay boxes are a good start, check them on a frame). The clip sent to Seedance has
+  the element wiped during the item's time letter by letter: a mask of the pixels that stay still in the box while
+  the scene moves behind them (they match their median over the item's time and the median keeps them crisp; a
+  translucent logo by its crisp edges alone), grown a few pixels, filled each frame from the scene around and between
+  the letters (`work/logos/`, made once per item). The item is not named in the prompts: the model never sees or
+  reads about the element and renders the scene between the letters as scene. At 1080p Seedance kept the logos and
+  the warning line the prompt told it to remove and drew them back, larger, at other times when the prompt named
+  them. Every fill of the whole box came back as something else: an interpolating blur as streaks, a hard-edged fill
+  as a rectangle, a mirrored neighbouring strip as upside-down people, doubled lock icons and fence crosses, a smooth
+  fill as a blurred rectangle; filling the letters from a plate of the scene seen in other frames (camera motion
+  tracked around the box) pasted stale or misaligned scene wherever people walked past or shadows moved. The soft
+  fill under dense letters crossing an icon or a fence can stay a little soft. `"fill": "mirror"` keeps the old
+  mirrored strip for an item (only to keep a render made with it). Time the items to the frame where the logo
+  moves (step through `ffmpeg -ss` stills a tenth of a second apart): a logo that jumps corners at 36.65 s with
+  items switching at 37.5 s stayed visible in the new corner for most of a second. Split an item in two (same
+  `what`, one with the box) to wipe only from a moment on: a box that overlaps a segment's render span by 0.1 s or
+  more (`reports/plan.md`: the overlap before a seam counts) renders that segment again. `"wipe": "after"` paints
+  the box over in the delivered video instead (no render): a last resort, since a copied patch of the restyled
+  frame shows as a patch.
 - `anchor`: the source time whose frame sets the look (default: a lively moment of the longest shot). Pick a frame
   that shows the main scene sharply, without transitions or pop-ups.
 - `hud`: screen-fixed UI whose numbers change (coin counters, timers, scores): `{"box": [x0, y0, x1, y1],
@@ -124,7 +148,10 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   Patches do not get them.
 - `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
-- `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment.
+- `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment (keep a seam
+  off an effect burst or a fast camera move). Inside a shot it is a chained seam like any other (the next segment
+  starts from the previous result, with the 0.5 s overlap), not a cut. Corrective sentences name seconds into a
+  segment: after moving a split, recompute them from `reports/plan.md`.
 - `max_segment_seconds`: per-source override; `skip: true` leaves a source out.
 
 ## Plan (`config/plan.json`, `reports/plan.md`)
@@ -160,5 +187,7 @@ A patch renders the flaw plus 0.5 s on both sides (at least 4 s, at most 8 s, ke
 and clear of the next segment's overlap) from the segment's own frame at its first moment, with the segment's video
 prompt, the chain sentence, the segment's redo sentences and the patch's `--prompt`. `assemble` switches into the
 patch and back at the best-matching overlap frames (colours matched to the segment) and measures both joins like
-seams (`S01:K02:P1:in`, `:out` in the seams list and the review). A patch belongs to the segment render it was made
-for: when the segment renders again, its patches are dropped.
+seams (`S01:K02:P1:in`, `:out` in the seams list and the review). In the video's last segment a patch may run to
+the end: it then has only the join in (a flaw in the last seconds, such as a far crowd in the wrong colour, costs one
+join instead of two). A patch belongs to the segment render it was made for: when the segment renders again, its
+patches are dropped.

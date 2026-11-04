@@ -51,6 +51,43 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("删除", text)
 
 
+class ImageRetryTests(unittest.TestCase):
+    def test_failed_image_is_tried_once_more(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from reskin import lumos
+        failed = lumos.GenerationFailed({"status": "Failed", "id": "g1"})
+        with tempfile.TemporaryDirectory() as folder,                 mock.patch.object(images.lumos, "upload", return_value={"media_id": "m"}),                 mock.patch.object(images.lumos, "submit_image_to_image", side_effect=[{"generation_id": "g1"},
+                                                                                     {"generation_id": "g2"}]),                 mock.patch.object(images.lumos, "wait", side_effect=[failed, {"status": "Succeeded"}]),                 mock.patch.object(images.lumos, "result_urls", return_value=["https://x/y.png"]),                 mock.patch.object(images.net, "download") as download:
+            made = images.edit([Path(folder) / "a.png"], "p", Path(folder) / "out.png", width=1080, height=1920)
+        self.assertEqual(made["generation_id"], "g2")
+        download.assert_called_once()
+        with mock.patch.object(images.lumos, "upload", return_value={"media_id": "m"}),                 mock.patch.object(images.lumos, "submit_image_to_image", return_value={"generation_id": "g"}),                 mock.patch.object(images.lumos, "wait", side_effect=[failed, failed]):
+            with self.assertRaises(lumos.GenerationFailed):
+                images.edit([Path("a.png")], "p", Path("out.png"), width=1080, height=1920)
+
+
+class DeliveryDirTests(unittest.TestCase):
+    def test_named_delivery_folder(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from reskin import job as JOB
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "ad.mp4"
+            video.write_bytes(b"x")
+            target = Path(folder) / "1080P成片"
+            with mock.patch.object(JOB, "sha", return_value="h"):
+                job, state = JOB.init({"sources": [str(video)], "delivery_dir": str(target)})
+            self.assertEqual(job, target.resolve() / "temp")
+            self.assertEqual(state["delivery_dir"], str(target.resolve()))
+            (Path(folder) / "busy").mkdir()
+            (Path(folder) / "busy" / "old.mp4").write_bytes(b"x")
+            with self.assertRaises(ValueError):
+                JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "busy")})
+
+
 class SizeTests(unittest.TestCase):
     def test_target_sizes(self):
         self.assertEqual(assemble.target_size(1080, 1920, "1080p"), (1080, 1920))
@@ -80,6 +117,24 @@ class TimelineTests(unittest.TestCase):
 
 
 class NetTests(unittest.TestCase):
+    def test_gateway_failure_is_retried(self):
+        import io
+        import urllib.error
+        from unittest import mock
+        body = b"upstream connect error or disconnect/reset before headers. reset reason: connection termination"
+        failure = urllib.error.HTTPError("https://x/upload-callback", 403, "Forbidden", {}, io.BytesIO(body))
+
+        class Reply(io.BytesIO):
+            status, headers = 200, {}
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+        with mock.patch.object(net.urllib.request, "urlopen", side_effect=[failure, Reply(b"ok")]),                 mock.patch.object(net.time, "sleep"):
+            self.assertEqual(net.request("POST", "https://x/upload-callback")[1], b"ok")
+        refused = urllib.error.HTTPError("https://x", 403, "Forbidden", {}, io.BytesIO(b"no permission"))
+        with mock.patch.object(net.urllib.request, "urlopen", side_effect=[refused]),                 mock.patch.object(net.time, "sleep"):
+            with self.assertRaises(net.HttpError):
+                net.request("POST", "https://x")
+
     def test_multipart(self):
         body, content_type = net.multipart([("model", "m"), ("image[]", ("a.png", b"\x89PNG", "image/png"))])
         boundary = content_type.split("boundary=")[1]

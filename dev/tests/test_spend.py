@@ -206,6 +206,12 @@ class PatchTests(unittest.TestCase):
         a, b = patch.window(self.row, self.seg, 0.1, 0.2, following=False)
         self.assertGreaterEqual(a, round(.25 * 30))
 
+    def test_window_runs_to_the_end_of_the_last_segment(self):
+        a, b = patch.window(self.row, self.seg, 27.0, 30.0, following=False, last=True)
+        self.assertEqual(b, 900)                              # no join out at the end of the video
+        a, b = patch.window(self.row, self.seg, 27.0, 30.0, following=False)
+        self.assertEqual(b, 900 - round(.25 * 30))
+
     def test_window_too_long(self):
         with self.assertRaises(ValueError):
             patch.window(self.row, self.seg, 5, 15, following=False)

@@ -58,6 +58,15 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(len(segments), 2)
         self.assertAlmostEqual(segments[1]["frames"][0] / fps, 10.0, delta=.6)
 
+    def test_split_inside_a_shot_is_a_continuous_seam(self):
+        row = catalog_row(65.7, 30.0)
+        segments = plan.segment(row, [0.0, 65.7], 30.0, [], [47.5])
+        self.assertEqual(segments[-1]["start"], 47.5)
+        self.assertEqual(segments[-1]["seam"], "continuous")
+        self.assertEqual(segments[-1]["render_frames"][0], round(47.5 * 30) - round(plan.OVERLAP_SECONDS * 30))
+        self.assertTrue(all(not s["inner_cuts"] for s in segments))
+        self.assertTrue(all(s["seconds"] <= 30.0 for s in segments))
+
     def test_keep_range_respected(self):
         row = catalog_row(65.0, 30.0, cuts=(10.33,))
         segments = plan.segment(row, [2.0, 61.0], 12.0, [], [])

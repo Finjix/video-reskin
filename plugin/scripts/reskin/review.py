@@ -416,25 +416,31 @@ PAIR_SCHEMA = {
         "pair": {"type": "INTEGER"},
         "left": _SIDE, "middle": _SIDE,
         "same_colours": {"type": "BOOLEAN"},
+        "original_changes_too": {"type": "BOOLEAN"},
         "difference": {"type": "STRING", "enum": ["none", "low", "medium", "high"]},
         "reference_look": {"type": "STRING"},
         "look": {"type": "STRING"}},
-        "required": ["pair", "left", "middle", "same_colours", "difference", "reference_look", "look"]}}},
+        "required": ["pair", "left", "middle", "same_colours", "original_changes_too", "difference",
+                     "reference_look", "look"]}}},
     "required": ["pairs"]}
 PAIR_PROMPT = (
     "Each pair image shows one subject of an AI-restyled video (a game advertisement turned into realistic, "
     "real-camera footage): LEFT = how the subject must look (its REFERENCE close-up: the styled keyframe, or its first "
-    "appearance), MIDDLE = the same subject RESTYLED at a later moment, small RIGHT = the original game at that "
-    "moment (only to tell intended changes, such as an upgrade that recolours a machine). For every pair decide "
+    "appearance), MIDDLE = the same subject RESTYLED at a later moment, small RIGHT = the ORIGINAL game (top: at the "
+    "reference moment, bottom: at the later moment; only to tell intended changes, such as an upgrade that recolours "
+    "a machine). For every pair decide "
     "whether the MIDDLE keeps the look of the LEFT: clothes and their colours (dark navy vs bright light blue, grey "
     "vs white fur), headwear, body build and proportions (realistic adult vs chibi or doll with a big head), face and "
     "beard, species or kind of object, material, and how real it looks (photo vs game figure, plastic or clay). Judge "
     "only LEFT vs MIDDLE; ignore pose, angle, distance, cropping, motion blur and what covers part of the subject; "
     "a change the small RIGHT original makes too is intended (difference none). For LEFT and MIDDLE each fill in: "
-    "build (people and animals: realistic = real adult proportions; stylized = stocky or toy-like but not chibi; "
+    "build (people and animals: realistic = real adult proportions, bulky winter clothes and a view from above "
+    "included; stylized = toy-like proportions (oversized head or hands) but not chibi; "
     "chibi = big head, short limbs, doll or figurine; objects: not_a_figure), rendering (photo_real = looks filmed; "
     "game_cg = a 3D game model or CG render; cartoon), colours (the main colours in Chinese, e.g. 深蓝外套、灰色毛领). "
-    "same_colours = the MIDDLE keeps the LEFT's colours. difference (your overall verdict): none; low = small; "
+    "same_colours = the MIDDLE keeps the LEFT's colours. original_changes_too = the ORIGINAL bottom differs from the "
+    "ORIGINAL top in the same way (then a colour change is intended). difference (your overall verdict): none; "
+    "low = small; "
     "medium = clearly other colours, build or realism; high = it looks like another person or object. Describe both "
     "looks briefly in Chinese (`reference_look` for LEFT, `look` for MIDDLE).")
 
@@ -444,16 +450,22 @@ def pair_difference(item: dict) -> str:
     words a model writes ("矮胖卡通化") and the grade it gives ("low") do not always agree; the attributes do."""
     left, middle = item.get("left") or {}, item.get("middle") or {}
     rank = SEVERITY_RANK.get(item.get("difference", "none"), 0)
+    render = {name: i for i, name in enumerate(RENDERINGS)}
+    rendering = 0
+    if left.get("rendering") in render and middle.get("rendering") in render:
+        rendering = render[middle["rendering"]] - render[left["rendering"]]
+        rank = max(rank, 3 if rendering >= 2 else 2 if rendering == 1 else 0)
+    recoloured = item.get("same_colours") is False and not item.get("original_changes_too")
+    if recoloured:
+        rank = max(rank, 2)
     build = {name: i for i, name in enumerate(BUILDS[:3])}
     if left.get("build") in build and middle.get("build") in build:
         step = build[middle["build"]] - build[left["build"]]
-        rank = max(rank, 3 if step >= 2 else 2 if step == 1 else 0)
-    render = {name: i for i, name in enumerate(RENDERINGS)}
-    if left.get("rendering") in render and middle.get("rendering") in render:
-        step = render[middle["rendering"]] - render[left["rendering"]]
-        rank = max(rank, 3 if step >= 2 else 2 if step == 1 else 0)
-    if item.get("same_colours") is False:
-        rank = max(rank, 2)
+        # chibi instead of a real adult always counts; one step (a "stocky" heavy parka seen from above was read as
+        # stylized) only together with a change in rendering or colours
+        rank = max(rank, 3 if step >= 2 else 2 if step == 1 and (rendering > 0 or recoloured) else 1 if step == 1 else 0)
+    if item.get("original_changes_too") and SEVERITY_RANK.get(item.get("difference", "none"), 0) == rank:
+        rank = min(rank, 1)     # an intended change (an upgrade): only build or rendering still count
     return ["none", "low", "medium", "high"][rank]
 
 
@@ -479,6 +491,7 @@ def pair_images(frames: list[dict], found: dict, limit: int = CLOSEUPS) -> list[
             step = len(rest) / limit
             rest = [rest[int(k * step)] for k in range(limit)]
         left = closeup(ref[0]["restyled"], ref[1], 256)
+        left_original = closeup(ref[0]["original"], ref[1], 128)
         for frame, box in rest:
             picture = Image.new("RGB", (640, 282), "white")
             draw = ImageDraw.Draw(picture)
@@ -487,7 +500,8 @@ def pair_images(frames: list[dict], found: dict, limit: int = CLOSEUPS) -> list[
             draw.text((516, 3), "original", fill="gray", font=label)
             picture.paste(left, (0, 26))
             picture.paste(closeup(frame["restyled"], box, 256), (256, 26))
-            picture.paste(closeup(frame["original"], box, 128), (512, 90))
+            picture.paste(left_original, (512, 26))
+            picture.paste(closeup(frame["original"], box, 128), (512, 154))
             buffer = io.BytesIO()
             picture.save(buffer, "JPEG", quality=88)
             out.append((name, frame["label"], buffer.getvalue()))
@@ -650,6 +664,135 @@ def identity_references(job: Path, source_id: str, plan_row: dict, segment_ids: 
             if ref not in refs:
                 refs.append(ref)
     return refs[:4]
+
+
+# --- the boxes logos were wiped from ------------------------------------------------------------------------------
+
+WIPE_PROBLEMS = {
+    "logo_left": "part of the logo, its letters, outline or glow, or of the warning text is still visible",
+    "copied_objects": "objects appear twice or copied in from beside the box (a second fence, lock icon, price tag, "
+                      "person, tree), or mirror-symmetric patterns such as a fence forming an X or V",
+    "upside_down": "people, animals or objects stand upside down or lie mirrored",
+    "smear": "a clearly blurred, smeared or streaky patch the scene around it does not have (a slightly softer "
+             "area where the letters were is not a smear)",
+    "rectangle": "a visible rectangle, frame or hard edge outlining where the box was",
+}
+WIPE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"problems": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "sheet": {"type": "INTEGER"}, "column": {"type": "INTEGER"},
+        "problem": {"type": "STRING", "enum": sorted(WIPE_PROBLEMS)},
+        "severity": {"type": "STRING", "enum": ["high", "medium", "low"]},
+        "description": {"type": "STRING"}},
+        "required": ["sheet", "column", "problem", "severity", "description"]}}},
+    "required": ["problems"]}
+WIPE_MOMENTS = 8          # moments per box sheet
+WIPE_MARGIN = .06         # of the frame width: scene shown around the box
+WIPE_STRICT = ("logo_left", "copied_objects", "upside_down")    # always high: a viewer sees them at once
+
+
+def wipe_times(start: float, end: float, count: int = WIPE_MOMENTS) -> list[float]:
+    """Moments spread over a box's time on the delivered clock."""
+    length = max(0.0, end - start)
+    return [round(start + length * (i + .5) / count, 2) for i in range(count)] if length > .2 else []
+
+
+def wipe_sheets(plan_row: dict, assembled: dict, source_path: str, stem: Path) -> list[dict]:
+    """Per boxed `remove` item a sheet of its corner over time (upper: the original with the logo, lower: the
+    delivered video): {"sheet": path, "what", "times", "box"}."""
+    keep_start, keep_end = assembled["keep"]
+    size = tuple(assembled["size"])
+    found = []
+    for item in plan_row.get("remove") or []:
+        if not (isinstance(item, dict) and item.get("box")):
+            continue
+        a = max(keep_start, float(item.get("start", keep_start))) - keep_start
+        b = min(keep_end, float(item.get("end", keep_end))) - keep_start
+        times = wipe_times(a, b)
+        if not times:
+            continue
+        x0, y0, x1, y1 = item["box"]
+        margin_y = WIPE_MARGIN * size[0] / size[1]
+        crop = (max(0.0, x0 - WIPE_MARGIN), max(0.0, y0 - margin_y), min(1.0, x1 + WIPE_MARGIN), min(1.0, y1 + margin_y))
+        pixels = (round(crop[0] * size[0]), round(crop[1] * size[1]), round(crop[2] * size[0]), round(crop[3] * size[1]))
+        columns = []
+        for t in times:
+            upper = _still(source_path, t + keep_start, *size)
+            lower = _still(assembled["output"], t, *size)
+            if upper is None or lower is None:
+                continue
+            columns.append((f"{t:.1f} s", upper.crop(pixels), lower.crop(pixels), False))
+        if not columns:
+            continue
+        w, h = pixels[2] - pixels[0], pixels[3] - pixels[1]
+        scale = min(1.0, 300 / w)
+        tile = (max(2, round(w * scale)), max(2, round(h * scale)))
+        number = len(found) + 1
+        sheet = _pairs_sheet(columns, tile, 4, f"sheet {number}: {item.get('what', '')} | upper: ORIGINAL (with the "
+                                               f"logo) | lower: DELIVERED (logo wiped)")
+        path = Path(f"{stem}-{number}.jpg")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sheet.save(path, quality=90)
+        found.append({"sheet": str(path), "what": item.get("what", ""), "times": [_seconds(c[0]) for c in columns],
+                      "box": item["box"]})
+    return found
+
+
+def wipe_prompt(count: int) -> str:
+    return "\n".join([
+        f"These {count} sheets each show one corner of a game advertisement over time, column by column (the time "
+        "is above each column). Upper row: the ORIGINAL game video, where a screen-fixed logo, watermark or warning "
+        "text sits in that corner. Lower row: the DELIVERED restyled video, where the program wiped it and a video "
+        "model repainted the scene behind it.",
+        "Judge the lower row only, using the upper row to know what scene lies behind the logo (fences, icons, "
+        "people, snow that the original also shows are fine, even if restyled to look real). Report a column when "
+        "its lower picture shows any of these:",
+        *[f"- {name}: {text}" for name, text in WIPE_PROBLEMS.items()],
+        "Give the sheet number and column number (1 = leftmost, counting along each row of the sheet). Report "
+        "nothing for clean columns; an empty list when every column is clean. Be strict: this is a delivery check, "
+        "and a viewer notices a doubled icon, an upside-down person or a smeared corner.",
+    ])
+
+
+def wipe_check(job: Path, key: str, plan_row: dict, assembled: dict, source_path: str, stem: Path
+               ) -> tuple[list[dict], list[dict]]:
+    """Gemini looks at every wiped corner over time; returns (issues, sheets)."""
+    sheets = wipe_sheets(plan_row, assembled, source_path, stem)
+    if not sheets:
+        return [], []
+    parts = [winky.inline(Path(entry["sheet"]), "image/jpeg") for entry in sheets]
+    parts.append({"text": wipe_prompt(len(sheets))})
+    answer = winky.gemini(parts, schema=WIPE_SCHEMA)
+    ledger.add(job, kind="gemini", purpose="wipe", key=key, seconds=0)
+    # One issue per corner and kind of problem, over the run of neighbouring moments it shows in (a corner smeared
+    # in every column is one finding, not eight).
+    found: dict[tuple[int, str], list[tuple[int, dict]]] = {}
+    for problem in answer.get("problems") or []:
+        index, column = int(problem.get("sheet", 0)) - 1, int(problem.get("column", 0)) - 1
+        if not (0 <= index < len(sheets)) or not (0 <= column < len(sheets[index]["times"])):
+            continue
+        found.setdefault((index, problem.get("problem", "smear")), []).append((column, problem))
+    issues = []
+    for (index, kind), hits in sorted(found.items()):
+        hits.sort(key=lambda hit: hit[0])
+        runs = [[hits[0]]]
+        for hit in hits[1:]:
+            if hit[0] == runs[-1][-1][0] + 1:
+                runs[-1].append(hit)
+            else:
+                runs.append([hit])
+        times = sheets[index]["times"]
+        for span in runs:
+            severities = [hit[1].get("severity", "medium") for hit in span]
+            severity = "high" if kind in WIPE_STRICT else max(severities, key=lambda s: SEVERITY_RANK.get(s, 0))
+            first, last = times[span[0][0]], times[span[-1][0]]
+            moments = f"（{len(span)} 个时刻）" if len(span) > 1 else ""
+            issues.append({"start": round(max(0.0, first - .3), 2), "end": round(last + .3, 2),
+                           "category": "leftover_overlay" if kind == "logo_left" else "artifact",
+                           "severity": severity, "where": sheets[index]["what"],
+                           "description": f"去logo区域（{sheets[index]['what']}）{kind}{moments}："
+                                          f"{span[0][1].get('description', '')}"})
+    return issues, sheets
 
 
 def judge(issues: list[dict]) -> str:
@@ -862,6 +1005,13 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     for issue in found:
         add(**issue, source="gemini-identity", segments=segment_for(issue["start"], issue["end"], assembled))
     log(f"{source_id}: identity check: {len(subjects)} subjects, {len(found)} changes")
+    # Every corner a logo was wiped from, over time: leftover letters, copied or flipped scene, smears.
+    wiped, wipe_sheet_list = wipe_check(job, source_id, plan_row, assembled, source["path"],
+                                        job / "review" / f"{source_id}-wipes-r{number}")
+    for issue in wiped:
+        add(**issue, source="gemini-wipe", segments=segment_for(issue["start"], issue["end"], assembled))
+    if wipe_sheet_list:
+        log(f"{source_id}: wipe check: {len(wipe_sheet_list)} corners, {len(wiped)} problems")
     # Gemini close-up of every join.
     for seam in seam_checks(job, source_id, assembled, clip, layout):
         reply = seam["answer"]
@@ -879,7 +1029,8 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     triage(job, source_id, issues, sheets)
     result = {"source": source_id, "round": number, "output": assembled["output"], "verdict": verdict,
               "summary": answer.get("summary", ""), "realism": realism, "identity": subjects,
-              "identity_sheets": [str(p) for p in identity_sheets], "issues": issues, "compare": str(clip),
+              "identity_sheets": [str(p) for p in identity_sheets],
+              "wipe_sheets": [entry["sheet"] for entry in wipe_sheet_list], "issues": issues, "compare": str(clip),
               "sheets": [str(p) for p in sheets], "assembled": assembled.get("inputs")}
     history["rounds"].append({k: result[k] for k in ("round", "verdict", "summary", "assembled")} | {"issues": len(issues)})
     write(rounds_path, history)
@@ -916,6 +1067,9 @@ def markdown(result: dict) -> str:
     if result.get("sheets"):
         lines += ["", "Stills of every issue (upper row original, lower row restyled): "
                   + ", ".join(Path(p).name for p in result["sheets"])]
+    if result.get("wipe_sheets"):
+        lines += ["", "Wiped corners over time (upper row original with the logo, lower row delivered): "
+                  + ", ".join(Path(p).name for p in result["wipe_sheets"])]
     return "\n".join(lines) + "\n"
 
 

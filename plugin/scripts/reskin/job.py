@@ -52,6 +52,14 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent
+    elif order.get("delivery_dir"):
+        # The user named the folder the videos go to: exactly there, the job in its temp/.
+        delivery = Path(order["delivery_dir"]).expanduser().resolve()
+        stray = [p.name for p in delivery.iterdir() if p.name != "temp"] if delivery.is_dir() else []
+        if stray:
+            raise ValueError(f"delivery_dir {delivery} is not empty ({', '.join(stray[:5])}); give an empty or new "
+                             "folder (deliveries hold only the finished videos and temp/)")
+        job = delivery / "temp"
     else:
         root = Path(order.get("output_root") or desktop()).expanduser().resolve()
         stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")

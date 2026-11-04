@@ -25,12 +25,21 @@ def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: i
          model: str = IMAGE_MODEL, job: Path | None = None, key: str = "", purpose: str = "keyframe") -> dict:
     """Edit the first image (later images are references); writes `output` and returns the generation. With `job`
     the call goes into the spend ledger."""
-    references = [lumos.upload(path, "image-to-image") for path in images]
-    started = lumos.submit_image_to_image(references, prompt, model=model, aspect_ratio=aspect_for(width, height),
-                                          quality=quality, log=lambda text: _log(f"{key}: {text}"))
-    if job is not None:
-        ledger.add(job, kind="image", event="submit", purpose=purpose, key=key, model=model,
-                   generation_id=started["generation_id"])
-    finished = lumos.wait(started["generation_id"], timeout=600, poll=5)
-    net.download(lumos.result_urls(finished)[0], Path(output))
-    return {"backend": "lumos", "model": model, "generation_id": started["generation_id"]}
+    for attempt in range(2):
+        # Uploads go again too: one failure seen was Lumos timing out fetching an uploaded picture.
+        references = [lumos.upload(path, "image-to-image") for path in images]
+        started = lumos.submit_image_to_image(references, prompt, model=model, aspect_ratio=aspect_for(width, height),
+                                              quality=quality, log=lambda text: _log(f"{key}: {text}"))
+        if job is not None:
+            ledger.add(job, kind="image", event="submit", purpose=purpose, key=key, model=model,
+                       generation_id=started["generation_id"], cause="new" if attempt == 0 else "auto-retry")
+        try:
+            finished = lumos.wait(started["generation_id"], timeout=600, poll=5)
+        except lumos.GenerationFailed as error:
+            if attempt == 0:
+                _log(f"{key}: image generation failed ({str(error)[:120]}); trying once more")
+                continue
+            raise
+        net.download(lumos.result_urls(finished)[0], Path(output))
+        return {"backend": "lumos", "model": model, "generation_id": started["generation_id"]}
+    raise AssertionError("unreachable")

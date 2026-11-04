@@ -306,7 +306,7 @@ def inputs_digest(job: Path, state: dict, source_id: str, row: dict) -> str:
             if patch_path.is_file() and read(patch_path).get("status") == "done":
                 generations.append(read(patch_path)["generation_id"])
     return digest({"generations": generations, "row": row, "fps": state["options"]["fps"],
-                   "resolution": state["options"]["resolution"]})
+                   "resolution": state["options"]["resolution"], "version": ASSEMBLY_VERSION})
 
 
 def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
@@ -318,6 +318,45 @@ def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
     if record.get("inputs") == inputs_digest(job, state, source_id, row) and Path(record["output"]).is_file():
         return record
     return None
+
+
+FEATHER = .02            # feathered edge of a post-render wipe, as a fraction of the frame width
+ASSEMBLY_VERSION = 4     # raise when the assembly itself changes, so delivered videos are made again
+
+
+def post_wipes(job: Path, source_id: str, source_path: str, row: dict, size: tuple[int, int]) -> list[dict]:
+    """`remove` boxes painted over in the delivered video too: a neighbouring strip of the restyled frame (the
+    plainest one on the original frame there), mirrored, slightly larger than the box and feathered, so neither a
+    logo the model drew anyway nor the edge of the pre-render wipe shows. Returns per box the patch rectangle, the
+    strip to copy, the flip, the delivered-clock times and a feather mask PNG."""
+    from reskin import render as RENDER
+    width, height = size
+    margin = max(4, round(FEATHER * width))
+    keep_start, keep_end = row["keep"]
+    wipes = []
+    for n, item in enumerate(row.get("remove") or []):
+        if not (isinstance(item, dict) and item.get("box")):
+            continue
+        a, b = max(keep_start, float(item.get("start", 0))), min(keep_end, float(item.get("end", keep_end)))
+        if b - a < RENDER.MIN_WIPE:
+            continue
+        if item.get("wipe", "both") != "after":
+            continue        # wiped before the render (feathered): nothing to paint over
+        x0, y0, x1, y1 = item["box"]
+        grown = [max(0.0, x0 - margin / width), max(0.0, y0 - margin / height),
+                 min(1.0, x1 + margin / width), min(1.0, y1 + margin / height)]
+        raw = run([FFMPEG, "-v", "error", "-ss", f"{(a + b) / 2:.3f}", "-i", source_path, "-frames:v", "1", "-vf",
+                   f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
+        frame = (np.frombuffer(raw[: width * height * 3], dtype=np.uint8).reshape(height, width, 3)
+                 if len(raw) >= width * height * 3 else None)
+        sx, sy, flip = RENDER.wipe_sources([grown + [a, b]], width, height, frame)[0]
+        x, y, w, h = RENDER._pixels(grown, width, height)
+        path = RENDER.feather_mask(x, y, w, h, width, height, job / "work" / f"{source_id}-wipe{n}.png")
+        blur = 0            # a blurred fill read as a censored rectangle
+        wipes.append({"x": x, "y": y, "w": w, "h": h, "sx": sx, "sy": sy, "flip": flip, "blur": blur,
+                      "start": round(a - keep_start, 3), "end": round(b - keep_start, 3), "mask": str(path),
+                      "what": item.get("what", "")})
+    return wipes
 
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
@@ -375,13 +414,26 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     huds = [HUD.matte(Path(source["path"]), row["keep"], item, size, job / "work" / f"{source_id}-hud{n}.png")
             for n, item in enumerate(row.get("hud") or [], 1)]
     current = "v0"
+    # Logos and warning lines: painted over after the render as well (see post_wipes).
+    wipes = post_wipes(job, source_id, source["path"], row, size)
+    for n, item in enumerate(wipes):
+        inputs += ["-loop", "1", "-framerate", str(out_fps), "-t", f"{total / out_fps + 1:.3f}", "-i", item["mask"]]
+        mask_index = sum(1 for part in inputs if part == "-i") - 1
+        graph.append(f"[{current}]split[wa{n}][wb{n}]")
+        soften = f",gblur=sigma={item['blur']}" if item.get("blur") else ""
+        graph.append(f"[wb{n}]crop={item['w']}:{item['h']}:{item['sx']}:{item['sy']},{item['flip']}{soften}[wp{n}]")
+        graph.append(f"[{mask_index}:v]format=gray[wm{n}]")
+        graph.append(f"[wp{n}][wm{n}]alphamerge[wq{n}]")
+        graph.append(f"[wa{n}][wq{n}]overlay=x={item['x']}:y={item['y']}:eof_action=pass:"
+                     f"enable='between(t\\,{item['start']:.3f}\\,{item['end']:.3f})'[wv{n}]")
+        current = f"wv{n}"
     if huds:
         graph.append(f"[{source_index}:v]trim=start={keep_start:.6f}:end={keep_end:.6f},setpts=PTS-STARTPTS,"
                      f"fps={out_fps},scale={size[0]}:{size[1]}:flags=bicubic,format=yuv420p,split={len(huds)}"
                      + "".join(f"[o{n}]" for n in range(len(huds))))
         for n, item in enumerate(huds):
-            mask_index = source_index + 1 + n
             inputs += ["-loop", "1", "-framerate", str(out_fps), "-t", f"{total / out_fps + 1:.3f}", "-i", item["mask"]]
+            mask_index = sum(1 for part in inputs if part == "-i") - 1
             start, end = item["start"] - keep_start, item["end"] - keep_start
             graph.append(f"[o{n}]crop={item['w']}:{item['h']}:{item['x']}:{item['y']}[h{n}]")
             graph.append(f"[{mask_index}:v]format=gray[m{n}]")
@@ -452,6 +504,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     for patch in patches:
         for side in ("in", "out"):
             join = patch[side]
+            if join is None:            # a patch that runs to the end has no join out
+                continue
             seam_times.append({"segment": f"{patch['segment']}:{patch['patch']}:{side}", "seam": "continuous",
                                "patch": True, "time": round(join["frame"] / out_fps, 3),
                                **{k: join[k] for k in ("mismatch", "motion", "local", "jump")}})
@@ -462,11 +516,13 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
               "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
+              "wipes": [{k: v for k, v in item.items() if k != "mask"} for item in wipes],
               "overlays": OVERLAY.summary(burned),
               "patches": [{"key": f"{source_id}:{p['segment']}:{p['patch']}", "reason": p["reason"],
                            "start": round(p["start_frame"] / out_fps, 3), "end": round(p["end_frame"] / out_fps, 3),
-                           "in": p["in"]["jump"], "out": p["out"]["jump"],
-                           "kept": p["in"]["jump"] != "visible" and p["out"]["jump"] != "visible"} for p in patches],
+                           "in": p["in"]["jump"], "out": p["out"]["jump"] if p["out"] else None,
+                           "kept": p["in"]["jump"] != "visible" and (p["out"] or {}).get("jump") != "visible"}
+                          for p in patches],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)

@@ -24,7 +24,16 @@ or other colours is a difference; three moments in a row or a step of two is hig
 `review/<id>-identity-r<n>-subjects.jpg` (close-ups, REF first) and `-frames.jpg` (whole frames) show it. The segment
 check runs the same on each segment against its shot's keyframe and the anchor, and `preview` (and `run`) on the
 previews (`sheets/<id>-preview-identity-subjects.jpg`), since each preview is restyled on its own and a midframe that
-draws another person carries that person into the video. Issues come in nine categories:
+draws another person carries that person into the video.
+
+The wipe check looks at every corner a logo or warning line was wiped from, over its whole time: per boxed `remove`
+item a sheet `review/<id>-wipes-r<n>-<k>.jpg` of eight moments (upper row the original with the logo, lower row the
+delivered video), and Gemini reports leftover letters (`leftover_overlay`), objects copied in from beside the box,
+mirror-symmetric fences, upside-down people or icons, smears and rectangles (`artifact`, source `gemini-wipe`; the
+first three always high). The video review missed all of these in the GOF3D10012 run, where a mirrored fill put a
+cross of fences with two lock icons into one corner for twenty seconds: the corner is small in a whole-frame clip.
+
+Issues come in nine categories:
 
 | Category | Means |
 | --- | --- |
@@ -91,6 +100,10 @@ is a second opinion only. Decide:
   and a corrective `--prompt` (`主角从头到尾保持图片1里深蓝色派克大衣、灰色毛领的写实成年男子外观，不要变成浅蓝色Q版小人`), plus
   `midframes` across the segment when it drifts late. On the previews: `preview --at T --redo` for one that drew the
   subject differently.
+- A subject hidden in a chained segment's first frame (the protagonist behind a cash column when K02 started) is
+  drawn anew from the source, in the game's look, for the whole segment. Give that segment a midframe where the
+  subject shows in its keyframe look, and a `--prompt` naming that look and the picture that shows it
+  (`主角从头到尾都是图片2里那样……的写实成年男子，即使在图片1里被挡住，也不要画成浅蓝色Q版小人`).
 - **Realism that fades** (the video turns cartoonish later in a segment or along a shot, while the previews of
   those moments are real): Seedance holds the realism of its reference picture, the first frame, on what that frame
   shows; what comes into view later, and every later segment of a chain (it starts from the drifted frame), slides
@@ -99,6 +112,11 @@ is a second opinion only. Decide:
   preview moments of every segment). Those previews go along as extra reference pictures, each with a sentence
   naming its second in the segment. `plan`, look at the marked previews (`(Seedance reference)` on the sheet: they
   must be right, the video copies them), then `redo` the segment (adding midframes alone also renders it again).
+  Seedance copies a midframe's colours too: GPT drew the bright green cash stacks olive, and the segment with those
+  midframes turned the cash column beige at its seam and stone-grey later. Pick as midframes only previews whose
+  prominent objects keep the original's colours (and the right state: a preview drew the crane red ten seconds
+  before its upgrade), leave a segment without midframes when its chain frame is already real, and where a midframe
+  is needed despite a colour (trucks arriving late), add a `--prompt` that keeps that object's colour from 图片1.
   Name late objects by their real look in `materials` too.
 - Garbled screen-fixed text or UI needs no render: an `overlays` item over it (`box`/`poly`, no `colors`), `plan`,
   `assemble`.

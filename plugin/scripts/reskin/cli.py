@@ -278,6 +278,9 @@ def review_lines(result: dict, limit: int) -> list[str]:
     if result.get("identity_sheets"):
         lines.append(f"  identity close-ups (whole video beside the styled keyframes): "
                      f"{', '.join(result['identity_sheets'])}")
+    if result.get("wipe_sheets"):
+        lines.append(f"  wiped corners over time (original above, delivered below): "
+                     f"{', '.join(result['wipe_sheets'])}")
     return lines
 
 
@@ -476,7 +479,8 @@ def cmd_run(args) -> int:
         failed += [r for r in previews if r.get("error")]
         made += [r["key"] for r in previews if not r.get("error") and not r.get("reused")]
     if failed:
-        show([f"  {r['key']}: {r['error']}" for r in failed] + ["next: fix the failures and run again"])
+        show([f"  {r['key']}: {r['error']}" for r in failed] + identity_lines(checks)
+             + ["next: fix the failures and run again"])
         return RULE_FAILURE
     if made:
         show([f"new keyframes and previews: {', '.join(made)}",
@@ -502,7 +506,8 @@ def cmd_run(args) -> int:
                          + (f"; seam sheet {assembled['seam_sheet']}" if assembled.get("seam_sheet") else ""))
             for patch in assembled.get("patches") or []:
                 lines.append(f"  patch {patch['key']} {patch['start']:.2f}-{patch['end']:.2f} s: joins {patch['in']} / "
-                             f"{patch['out']}" + ("" if patch["kept"] else " -> visible: drop it and redo the segment"))
+                             f"{patch['out'] or 'none (runs to the end)'}"
+                             + ("" if patch["kept"] else " -> visible: drop it and redo the segment"))
             last = REVIEW.last_round(job, source_id)
             if last and last.get("assembled") == assembled.get("inputs"):
                 lines.append(f"  unchanged since review round {last['round']}:")

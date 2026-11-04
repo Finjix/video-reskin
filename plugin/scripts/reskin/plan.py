@@ -20,20 +20,32 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
+def box_problem(box) -> bool:
+    return (not isinstance(box, list) or len(box) != 4 or not all(isinstance(v, (int, float)) for v in box)
+            or not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1))
+
+
 def items_problem(items, name: str) -> str | None:
     """`remove` (and `materials` when not one text) is a list of Chinese descriptions, each a string or
-    {"what": ..., "start": s, "end": s} for something on screen only part of the time."""
+    {"what": ..., "start": s, "end": s} for something on screen only part of the time; a `remove` item may add
+    "box": [x0, y0, x1, y1] (fractions) for a screen-fixed logo or warning line, wiped from the clip Seedance gets
+    (letter by letter by default; `"fill": "mirror"` fills the whole box with a mirrored neighbouring strip)."""
     if not isinstance(items, list):
         return f"{name} must be a list"
     for item in items:
         if isinstance(item, str) and item.strip():
             continue
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end"}
+                and set(item) <= {"what", "start", "end", *(("box", "wipe", "fill") if name == "remove" else ())}
+                and ("box" not in item or not box_problem(item["box"]))
+                and item.get("wipe", "both") in ("both", "after")
+                and item.get("fill", "glyph") in ("glyph", "mirror")
                 and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
-        return f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds}}"
+        return (f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds"
+                + (", \"box\": [x0, y0, x1, y1], \"fill\": \"glyph\" or \"mirror\"" if name == "remove" else "")
+                + "}")
     return None
 
 
@@ -181,8 +193,10 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
             split_at: list[float]) -> list[dict]:
     fps = catalog_row["info"]["fps"]
     first, last = round(keep[0] * fps), min(catalog_row["info"]["frames"], round(keep[1] * fps))
-    cuts = sorted({s["frames"][0] for s in catalog_row["shots"]} | {round(t * fps) for t in split_at})
-    cuts = [c for c in cuts if first < c < last]
+    # Camera cuts hide a seam; `split_at` points are wanted seam moments inside a shot (to keep a seam off an
+    # effect burst), so they join chained like any seam inside a shot, not like a cut.
+    camera = {c for c in (s["frames"][0] for s in catalog_row["shots"]) if first < c < last}
+    cuts = sorted(camera | {c for c in (round(t * fps) for t in split_at) if first < c < last})
     minimum, maximum = round(MIN_SECONDS * fps), int(max_seconds * fps)
     overlap = round(OVERLAP_SECONDS * fps)
     window = int(2 * fps)
@@ -197,7 +211,8 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
             break
         options = [c for c in cuts if position + minimum <= c <= position + limit and last - c >= minimum]
         if options:
-            end, following = options[-1], "cut"
+            end = options[-1]
+            following = "cut" if end in camera else "continuous"
         else:
             # Split this shot (up to its next cut) into equal pieces, each at a still moment within the limits;
             # fewer, longer pieces mean fewer seams.
@@ -210,7 +225,7 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
             end, following = (_stillest(motion, lo, hi, fps) if lo < hi else max(lo, min(hi, target))), "continuous"
         spans.append((position, end, seam))
         position, seam = end, following
-    segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b]}
+    segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in sorted(camera) if a < c < b]}
                 for a, b, kind in spans]
     for number, row in enumerate(segments, 1):
         row["id"] = f"K{number:02d}"
