@@ -52,6 +52,7 @@ batch without asking; an open question never stops production: take the default 
 | An object comes out in another colour than in the original (a yellow cable drawn red, a crane flickering) | name its colour in `materials` (`黄色的缆绳`), timed when the original changes it (`蓝色的金属吊机` until the upgrade, `红色的金属吊机` after) |
 | Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too |
 | A coin counter, timer or other screen-fixed HUD with changing numbers | a `hud` box around it (from the still-overlay boxes in the catalog): it is copied back from the original frame by frame, so the digits are always right |
+| Screen-fixed, flat text or UI (captions, labels, banners, buttons) comes out garbled or changed | an `overlays` item for each (a `box` or `poly` hugging it): the models leave it out and the program burns the original's pixels (or the drawn `text`) back; `colors` for letters over a moving scene. UI standing in the scene (floor price tags, bubbles) and text with complex motion stay with the models |
 | Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
 | A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
@@ -72,7 +73,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    `catalog/<id>.jpg` and `catalog/<id>-end.jpg`.
 3. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world
    `materials` of what is on screen, what to `remove` (only logos and warning lines you actually saw on that source's
-   sheets, timed when they come and go; HUD stays), `hud` boxes for screen-fixed counters, and an `anchor` time when
+   sheets, timed when they come and go; HUD stays), `hud` boxes for screen-fixed counters, `overlays` for screen-fixed flat text and UI the models garble, and an `anchor` time when
    the automatic one would be a poor frame. `plan --edits <file>` cuts every kept range into as few segments as
    Seedance allows (at most 30 s each, at camera cuts where possible) and writes `reports/plan.md`.
 4. `keyframes` restyles one anchor frame per source and the first frame of every shot's first segment after it (later
@@ -81,7 +82,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    look. Redo bad ones before rendering: a whole shot follows its keyframe.
 5. `render` edits every segment with Seedance 2.5 on Lumos at the job resolution (480p by default while developing), chaining the segments of each shot.
 6. `assemble` retimes each segment to its source duration, matches colours, switches between segments at their
-   best-matching frame, copies the `hud` back from the original, joins everything with the source audio and writes
+   best-matching frame, copies the `hud` back from the original, burns in the `overlays`, joins everything with the source audio and writes
    `<name>_写实.mp4` into the delivery folder. It measures every seam (`clean`, `slight`, `visible`) and draws
    `sheets/<id>-seams.jpg` (the frames before and after each switch): look at it.
 7. `review` has Gemini compare each video with its original (穿帮, bugs, 拼接色差, leftover logos/text), then look at

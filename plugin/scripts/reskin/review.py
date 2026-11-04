@@ -74,6 +74,7 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
                       for s in assembled["seams"]) or "none"
     removal = describe(plan_row["remove"]) or "nothing named"
     hud = "; ".join(item.get("what") or "HUD box" for item in plan_row.get("hud") or [])
+    burned = describe(plan_row.get("overlays") or [])
     style = state["style"] if isinstance(state["style"], str) else state["style"].get("label")
     lines = [
         "You are a strict quality reviewer for AI-restyled game advertising videos.",
@@ -86,6 +87,8 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         "shot the restyled scene must continue unchanged (same terrain, objects, rope and cable colours, textures, "
         "light); any change, dissolve or double image there is a seam_color defect.",
         *([f"Screen-fixed HUD copied from the original (identical on both sides by design): {hud}."] if hud else []),
+        *([f"UI and text burned in by the program afterwards (copied from the original or drawn, identical on both "
+           f"sides by design; a translucent plate keeps the original's tint): {burned}."] if burned else []),
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "
         "Do not report flaws that the original shows identically (game physics, clipping already in the original), "
         "and do not report the intended material change itself.",

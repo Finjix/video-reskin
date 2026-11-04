@@ -24,10 +24,19 @@ def on_screen(items, span: tuple[float, float] | None) -> list[str]:
 removals = on_screen
 
 
-def remove_clause(items: list[str]) -> str:
-    if not items:
-        return ""
-    return read(PROMPTS)["remove"].format(items="、".join(items))
+def remove_clause(items: list[str], burned: list[str] | None = None) -> str:
+    """The removal sentence, then the one for elements the program burns in afterwards (the models leave them out,
+    so no garbled copy shows next to the exact one)."""
+    texts = read(PROMPTS)
+    parts = [texts["remove"].format(items="、".join(items))] if items else []
+    if burned:
+        parts.append(texts["burn"].format(items="、".join(burned)))
+    return "".join(parts)
+
+
+def burned_items(row: dict) -> list:
+    """Overlays the models should leave out: every `overlays` item unless it says "ai": "keep"."""
+    return [item for item in row.get("overlays") or [] if item.get("ai", "remove") == "remove"]
 
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None) -> str:
@@ -35,8 +44,9 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
     source time the text is for (a frame: start == end)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = "、".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    text = style[kind].format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
-                              extra=wishes)
+    removal = remove_clause(on_screen(row.get("remove"), span), on_screen(burned_items(row), span))
+    text = style[kind].format(materials=materials, remove=removal,
+                              look=style.get("look", ""), extra=wishes)
     return " ".join(text.split())
 
 

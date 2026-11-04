@@ -8,12 +8,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from reskin.common import read, write, write_text
+from reskin.overlay import problem as overlay_problem
 from reskin.prompts import describe
 
 MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
 OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more; assemble joins inside it
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "hud"}
+             "hud", "overlays"}
 
 
 def items_problem(items, name: str) -> str | None:
@@ -84,6 +85,8 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: {items_problem(row['remove'], 'remove')}")
         if "hud" in row and hud_problem(row["hud"]):
             problems.append(f"{source_id}: {hud_problem(row['hud'])}")
+        if "overlays" in row and overlay_problem(row["overlays"]):
+            problems.append(f"{source_id}: {overlay_problem(row['overlays'])}")
         if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
@@ -119,6 +122,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
     return {"keep": [float(keep[0]), float(keep[1])], "materials": row.get("materials") or style["default_materials"],
             "remove": remove, "anchor": row.get("anchor"), "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
+            "overlays": row.get("overlays") or [],
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
 
 

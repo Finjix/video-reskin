@@ -82,6 +82,23 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   catalog's still-overlay boxes are a good start). Seedance redraws such digits wrongly; `assemble` copies the pixels
   that stay still inside the box (icon, panel and the digits they enclose) back from the original, frame by frame.
   Only screen-fixed elements: price tags or labels that move with the scene stay restyled.
+- `overlays`: screen-fixed, flat 2D text and UI the program burns in after the restyle, so they are always exact
+  (captions, labels, banners, buttons the models garble). Each item:
+  `{"what": "底部字幕「钓到大金枪鱼！」", "poly": [[x, y], ...] | "box": [x0, y0, x1, y1], "start": s, "end": s,
+  "shape": "box" | "ellipse", "colors": ["#ffffff"], "tolerance": 60, "ai": "remove" | "keep"}`, or a drawn one
+  with `"text": "钓到大金枪鱼！"` and `"color"`, `"stroke"`, `"fill"` (`#rrggbb[aa]`), `"font"` (`bold`, `regular`,
+  `heavy` or a font file).
+  - Region: `box` or `poly` (points, fractions of the frame), hugging the element: whatever it holds comes from the
+    original (or the drawn text) instead of the restyle. A translucent plate keeps the original's tint, like the HUD.
+  - `colors`: only original pixels close to these colours come back (`tolerance`, RGB distance, default 60), e.g.
+    white letters over a moving scene.
+  - `ai`: by default (`remove`) `what` joins the removals of the keyframe and video prompts during `start`-`end`,
+    so the models leave the element out and no garbled copy shows around the exact one; write `what` as the
+    element's plain name. `keep` lets the models draw it underneath (only when the burn covers it fully).
+  - Add overlays before `keyframes`: the removal is in the keyframes and renders.
+  - Only screen-fixed, flat elements. UI standing in the scene (floor price tags, bubbles over characters, signs in
+    perspective) and text with complex motion (zooms, bounces, 3D) stay with the models: a pasted copy does not
+    keep up with the moving scene. Never add text or UI the original does not show.
 - `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
 - `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment.
@@ -106,5 +123,5 @@ so redoing a segment also renders the rest of its chain again. Edit the edits fi
 - `temp/state/assembled/<id>.json`: seams (`time` of the switch, `mismatch`: mean grey difference of the two versions
   there, `motion`: the picture's own change per frame, `local`: the largest colour change of one of 60 regions beyond
   its own motion, so one object changing colour counts; `jump`: clean, slight or visible), colour corrections, HUD
-  mattes, segment times in the delivered video. `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
+  mattes, overlays (frames they cover), segment times in the delivered video. `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

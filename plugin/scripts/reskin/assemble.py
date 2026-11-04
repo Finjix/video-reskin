@@ -245,7 +245,7 @@ def seam_sheet(job: Path, source_id: str, clips: list[Path], lines: list[dict], 
 
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
-    from reskin import hud as HUD
+    from reskin import hud as HUD, overlay as OVERLAY
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
@@ -274,7 +274,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     joins = {}
     for index, (before, after) in overlaps.items():
         join = choose_join(before, after, corrections[index - 1], corrections[index],
-                           [item["box"] for item in row.get("hud") or []])
+                           [item["box"] for item in row.get("hud") or []]
+                           + [list(OVERLAY.region(item)) for item in row.get("overlays") or []])
         overlap = lines[index]["body"][0] - lines[index]["out"][0]
         trims[index - 1][1] -= overlap - join["frame"] - half
         trims[index][0] = join["frame"] - half
@@ -325,24 +326,43 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
                          f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[hv{n}]")
             current = f"hv{n}"
     graph.append(f"[{current}]format=yuv420p[vout]")
-    audio = []
+    audio_filter = None
     if info["audio"]:
         fade = []
         if keep_end < info["duration"] - .1:
             fade.append(f"afade=t=out:st={max(0.0, keep_end - keep_start - .35):.3f}:d=0.35")
         if keep_start > .05:
             fade.append("afade=t=in:st=0:d=0.15")
-        graph.append(f"[{source_index}:a]atrim=start={keep_start:.6f}:end={keep_end:.6f},asetpts=PTS-STARTPTS"
-                     + "".join("," + f for f in fade) + "[aout]")
-        audio = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+        audio_filter = (f"atrim=start={keep_start:.6f}:end={keep_end:.6f},asetpts=PTS-STARTPTS"
+                        + "".join("," + f for f in fade))
+    audio_codec = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    encode = ["-c:v", "libx264", "-preset", "medium", "-crf", "17", "-profile:v", "high", "-pix_fmt", "yuv420p",
+              "-r", str(out_fps), "-frames:v", str(total), "-movflags", "+faststart"]
     delivery = Path(state["delivery_dir"])
     names = [r["name"] for r in state["sources"]]
     name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
     output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
     partial = output.with_name(output.stem + ".partial.mp4")
-    run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
-         "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-profile:v", "high", "-pix_fmt", "yuv420p",
-         "-r", str(out_fps), "-frames:v", str(total), "-movflags", "+faststart", partial])
+    burned = []
+    if row.get("overlays"):
+        # Screen-fixed text and UI the program burns in (from the original, or drawn): a per-frame pass
+        # between the assembled picture and the encoder; the audio is cut first, on its own.
+        burned = OVERLAY.prepare(row["overlays"], (keep_start, keep_end), out_fps, size, total)
+        extra, audio = [], []
+        if audio_filter:
+            sound = job / "work" / f"{source_id}-audio.m4a"
+            run([FFMPEG, "-v", "error", "-y", "-i", source["path"], "-vn", "-af", audio_filter, *audio_codec, sound])
+            extra, audio = ["-i", sound], ["-map", "1:a", "-c:a", "copy"]
+        OVERLAY.burn([*inputs, "-filter_complex", ";".join(graph), "-map", "[vout]"], Path(source["path"]),
+                     (keep_start, keep_end), out_fps, size, total, burned,
+                     ["-map", "0:v", *audio, *encode, partial], extra_inputs=extra)
+    else:
+        audio = []
+        if audio_filter:
+            graph.append(f"[{source_index}:a]{audio_filter}[aout]")
+            audio = ["-map", "[aout]", *audio_codec]
+        run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
+             *encode, partial])
     try:
         partial.replace(output)
     except PermissionError:
@@ -369,6 +389,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
               "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
+              "overlays": OVERLAY.summary(burned),
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)
