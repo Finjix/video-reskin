@@ -231,7 +231,7 @@ def cmd_assemble(args) -> int:
             lines.append(f"  seam sheet: {result['seam_sheet']}")
     show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else
                               "look at the seam sheet (a visible jump: redo the segment after it; a smeared logo "
-                              "corner: see the skill's logo rows), then review")])
+                              "corner or a kept element unlike the original: see the skill's logo rows), then review")])
     return RULE_FAILURE if failed else 0
 
 
@@ -275,6 +275,10 @@ def seam_lines(assembled: dict) -> list[str]:
     for wipe in assembled.get("wipes") or []:
         lines.append(f"  wiped corner {wipe['what']} {wipe['start']:.1f}-{wipe['end']:.1f} s: {wipe['verdict']}"
                      + (f" (detail {wipe['share']} of the scene around it)" if wipe.get("share") is not None else ""))
+    for kept in assembled.get("fidelity") or []:
+        lines.append(f"  kept {kept['what']} {kept['start']:.1f}-{kept['end']:.1f} s: {kept['verdict']}"
+                     + (f" (grey difference {kept['diff']} to the original, matte {kept.get('method')})"
+                        if kept.get("diff") is not None else ""))
     return lines
 
 
@@ -297,8 +301,8 @@ def review_lines(result: dict, limit: int) -> list[str]:
 
 
 REVIEW_NEXT = ("next: confirm each high issue on its stills (upper row original, lower row restyled; the triage hint "
-               "is Gemini's, not a verdict); redo only confirmed flaws a viewer sees at once (seams, smeared or "
-               "leftover logos, garbled text, morphing or vanishing objects, wrong colours of prominent objects), "
+               "is Gemini's, not a verdict); redo only confirmed flaws a viewer sees at once (seams, kept logos or warning lines unlike the original, smeared or "
+               "leftover removed elements, garbled text, morphing or vanishing objects, wrong colours of prominent objects), "
                "then run again; medium and low issues are reported, not redone")
 
 
@@ -480,6 +484,7 @@ def cmd_run(args) -> int:
                 assembled = ASSEMBLE.assemble_source(job, state, source_id, row, style)
             visible = [s for s in assembled["seams"] if s.get("jump") == "visible"]
             smeared = [w for w in assembled.get("wipes") or [] if w.get("verdict") == "smeared"]
+            unfaithful = [k for k in assembled.get("fidelity") or [] if k.get("verdict") == "changed"]
             lines.append(f"{source_id}: {Path(assembled['output']).name}"
                          + (f"; seam sheet {assembled['seam_sheet']}" if assembled.get("seam_sheet") else ""))
             lines += seam_lines(assembled)
@@ -493,6 +498,9 @@ def cmd_run(args) -> int:
                 lines.append(f"  visible seams: {', '.join(s['segment'] for s in visible)} (not done until fixed)")
             if smeared:
                 lines.append(f"  smeared logo corners: {'; '.join(w['what'] for w in smeared)} (not done until fixed)")
+            if unfaithful:
+                lines.append(f"  kept elements unlike the original: {'; '.join(k['what'] for k in unfaithful)} "
+                             "(not done until fixed: check the hud box and times, plan, assemble)")
         except Exception as error:
             lines.append(f"{source_id}: follow-up failed: {type(error).__name__}: {error}")
         with lock:

@@ -94,7 +94,8 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
             "Check every `materials` and `remove` item: ok; not_on_screen (the video never shows it: naming it makes the "
             "model draw it); wrong_time (shown only part of the time but untimed, or the times are wrong: give the "
             "right ones); wrong_colour; ambiguous (another object could be turned into it). Add `missing` items for "
-            "prominent objects whose colour should be named, logos or warning lines that are not in `remove`, and "
+            "prominent objects whose colour should be named, screen-fixed logos or warning lines that are not in `hud` "
+            "(they are kept, copied from the original), and "
             "live-action stretches that are not in `live` (or `live` items that show the game). "
             "`suggestion` (in English, as it would go into the prompt) says what to write instead.",
         ]
@@ -128,11 +129,13 @@ def draft(facts: dict, catalog_row: dict) -> dict:
         if item.get("always") or (start <= keep[0] + .3 and stop >= keep[1] - .3):
             return item["what"]
         return {"what": item["what"], "start": start, "end": stop}
-    row = {"keep": keep, "materials": [timed(o) for o in facts.get("objects") or [] if o.get("what")],
-           "remove": [timed(o) for o in facts.get("logos") or [] if o.get("what")]}
+    row = {"keep": keep, "materials": [timed(o) for o in facts.get("objects") or [] if o.get("what")]}
+    # Logos and warning lines stay (the user's standing request): like HUD counters, their pixels are copied back
+    # from the original, so the models can neither garble nor restyle them. `remove` is only for what the user asks
+    # to delete.
     hud = [{"box": box, "what": h["what"], "start": round(float(h["start"]), 2), "end": round(float(h["end"]), 2)}
-           for h in facts.get("hud") or [] if (box := _box(h.get("box")))
-           and (box[2] - box[0]) * (box[3] - box[1]) <= .15]
+           for h in [*(facts.get("hud") or []), *(facts.get("logos") or [])] if h.get("what")
+           and (box := _box(h.get("box"))) and (box[2] - box[0]) * (box[3] - box[1]) <= .15]
     if hud:
         row["hud"] = hud
     overlays = [{"what": t["what"], "box": box, "start": round(float(t["start"]), 2), "end": round(float(t["end"]), 2)}

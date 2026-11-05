@@ -10,14 +10,14 @@
       "interface": {
         "displayName": "视频批量换画风",
         "shortDescription": "批量把视频转为写实材质的1080p成片",
-        "longDescription": "把游戏广告等视频批量转换画风（默认写实版材质，风格不变）：自动拆分镜头、去掉尾板，用 GPT Image 生成风格关键帧，在 Lumos 上用 Seedance 2.5 逐段视频编辑并去除游戏 logo 和警示语，按原时长拼接并保留原声，输出 1080p、24fps 成片；最后由 Gemini 审片，问题经抽帧确认后自动回炉重做。需要 Windows 10/11 64 位、飞书扫码登录 Lumos 和一个 Winky API key。首次使用时自动下载运行依赖。",
+        "longDescription": "把游戏广告等视频批量转换画风（默认写实版材质，风格不变）：自动拆分镜头、去掉尾板，用 GPT Image 生成风格关键帧，在 Lumos 上用 Seedance 2.5 逐段视频编辑（游戏 logo 和警示语按原片原样保留），按原时长拼接并保留原声，输出 1080p、24fps 成片；最后由 Gemini 审片，问题经抽帧确认后自动回炉重做。需要 Windows 10/11 64 位、飞书扫码登录 Lumos 和一个 Winky API key。首次使用时自动下载运行依赖。",
         "developerName": "钟丰骏-实习生",
         "websiteURL": "https://github.com/Finjix/video-reskin",
         "category": "视频",
         "capabilities": [],
         "logo": "./assets/icon.svg",
         "composerIcon": "./assets/icon.svg",
-        "defaultPrompt": "把这些视频批量转换成写实材质画风，去掉 logo、警示语和尾板。"
+        "defaultPrompt": "把这些视频批量转换成写实材质画风，保留 logo 和警示语，去掉尾板。"
       }
     }
   }

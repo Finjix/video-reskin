@@ -204,13 +204,30 @@ class LintTests(unittest.TestCase):
         self.assertEqual(drafted["keep"], [0.0, 65.7])
         self.assertEqual(drafted["materials"][0], "积雪地面")
         self.assertEqual(drafted["materials"][1], {"what": "蓝色皮卡车", "start": 56, "end": 65.7})
-        self.assertEqual(drafted["remove"][0]["start"], 0)
+        # logos and warning lines are kept: drafted as HUD boxes copied back from the original, nothing removed
+        self.assertNotIn("remove", drafted)
+        self.assertEqual([h["what"] for h in drafted["hud"]], ["金币计数", "右上角的游戏logo「WHITEOUT SURVIVAL」"])
+        self.assertEqual(drafted["hud"][1]["box"], [.8, .02, .98, .09])
         self.assertEqual(len(drafted["overlays"]), 1)
         self.assertEqual(drafted["overlays"][0]["box"], [.1, .8, .9, .9])
         self.assertIsNone(PLAN.overlay_problem(drafted["overlays"]))
         self.assertIsNone(PLAN.hud_problem(drafted["hud"]))
         self.assertIsNone(PLAN.items_problem(drafted["materials"], "materials"))
         self.assertIn("edits_check", lint.prompt(row, {"materials": ["三文鱼"]}))
+
+
+class KeepCheckTests(unittest.TestCase):
+    def test_strict_kinds_are_high_and_runs_merge(self):
+        sheets = [{"what": "the game logo", "times": [1.0, 2.0, 3.0, 4.0]}]
+        answer = {"problems": [{"sheet": 1, "column": 1, "problem": "garbled", "severity": "low", "description": "x"},
+                               {"sheet": 1, "column": 2, "problem": "garbled", "severity": "low", "description": "x"},
+                               {"sheet": 1, "column": 4, "problem": "patch", "severity": "low", "description": "y"},
+                               {"sheet": 3, "column": 1, "problem": "blurred", "severity": "high", "description": "z"}]}
+        issues = review.keep_issues(answer, sheets)
+        self.assertEqual(len(issues), 2)
+        garbled = next(i for i in issues if "garbled" in i["description"])
+        self.assertEqual((garbled["severity"], garbled["start"], garbled["end"]), ("high", 0.7, 2.3))
+        self.assertEqual(next(i for i in issues if "patch" in i["description"])["severity"], "low")
 
 
 class PreviewTests(unittest.TestCase):

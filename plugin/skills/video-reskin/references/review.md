@@ -31,7 +31,16 @@ close-ups of each from the styled keyframes (REF) and from moments across the vi
 build, rendering and colours (`identity` issues, sheets `review/<id>-identity-r<n>-subjects.jpg`). It runs in the
 review only (not per segment or per preview).
 
-The wipe check looks at every corner a logo or warning line was wiped from, over its whole time: per boxed `remove`
+The kept-element check holds every `hud` item (game logos, warning lines, counters) to the original: `assemble`
+measures the mean grey difference inside the solid part of its matte at six moments (`fidelity`: `exact` up to 6,
+re-encoding alone gives about 3; `drift` up to 12, medium; above that `changed`, high, source `measured`), and the
+review draws a sheet per item, `review/<id>-kept-r<n>-<k>.jpg` (eight moments, upper row original, lower row
+delivered), on which Gemini compares the element character by character (`gemini-keep`): garbled, blurred, doubled
+(a ghost copy beside it), changed (moved, resized, recoloured, restyled letters, partly missing) are always high; a
+cartoon patch around it takes Gemini's severity. Fixes need no render: the `hud` box or times, `plan`, `assemble`.
+
+The wipe check (only when the user asked to remove a logo: game logos and warning lines are kept by default and
+not reported) looks at every corner a logo or warning line was removed from, over its whole time: per boxed `remove`
 item a sheet `review/<id>-wipes-r<n>-<k>.jpg` of eight moments (upper row the original with the logo, lower row the
 delivered video), and Gemini reports leftover letters (`leftover_overlay`), objects copied in from beside the box,
 upside-down objects, smears and rectangles (`artifact`, source `gemini-wipe`). The measured check (`assemble`'s
@@ -46,7 +55,7 @@ Issues come in nine categories:
 | `artifact` | bug: morphing, melting, flicker, jitter, frozen frames, garbled HUD text or numbers, strong noise, a blurred or smeared patch where a logo was |
 | `added_text` | captions, warning lines, watermarks or garbled characters the original does not have |
 | `seam_color` | colour jump / scene change at a seam: colour, brightness, texture, terrain, cable colours or realism jump; source `measured`, `gemini-seam` (close-up) or `gemini` |
-| `leftover_overlay` | a logo, watermark or warning line still visible |
+| `leftover_overlay` | an element listed in `remove` still visible (game logos and warning lines are kept by default) |
 | `end_card` | closing-card content still visible |
 | `style_drift` | the look changes between parts of the video |
 | `identity` | a recurring character or object looks different in another part of the video, compared with the styled keyframes; a gradual drift counts |
@@ -97,7 +106,7 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
   consistent: check whether the original itself changes abruptly there (an effect bursting, a stack of bills flying
   off, a flash). The measure counts that motion as a jump. Confirm it on `frames --source <id> --at <seam time>`;
   if so, dismiss it with that reason.
-- A smeared logo corner (an item with `"wipe": "before"`): drop the `wipe` (Seedance is then told to remove the logo
+- Only when the user asked to remove a logo: a smeared logo corner (an item with `"wipe": "before"`): drop the `wipe` (Seedance is then told to remove the logo
   itself), `plan`, redo the segments it spans. A logo Seedance kept: redo once with a `--prompt` naming the corner.
   A warning line along the bottom edge it always keeps: cropping the source is the fix (ask the user first).
 - Garbled screen-fixed text or UI needs no render: an `overlays` item over it (`box`/`poly`, no `colors`), `plan`,

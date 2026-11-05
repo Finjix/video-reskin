@@ -86,3 +86,40 @@ def matte(source: Path, keep: list[float], item: dict, size: tuple[int, int], ou
     return {"mask": str(output), "x": cx0, "y": cy0, "w": cw, "h": ch, "start": start, "end": end,
             "method": method, "scene_motion": round(scene, 1), "coverage": round(coverage, 2),
             "what": item.get("what", "")}
+
+
+FIDELITY_SAMPLES = 6
+EXACT, DRIFT = 6.0, 12.0     # mean grey difference inside the matte: re-encoding alone stays under 4
+
+
+def fidelity(video: Path, source: Path, keep_start: float, item: dict, size: tuple[int, int],
+             samples: int = FIDELITY_SAMPLES) -> dict:
+    """How exactly a kept element (logo, warning line, counter) came out in the delivered `video`: the mean grey
+    difference to the original inside the solid part of its matte, at `samples` moments of its time (seconds of the
+    delivery = source seconds - keep_start). exact / drift / changed; `box` matte (the scene hardly moved) is noted,
+    since the whole box, background included, comes from the original there."""
+    width, height = size
+    soft = np.asarray(Image.open(item["mask"]).convert("L"), np.float32) / 255
+    solid = soft >= .9
+    a, b = item["start"] - keep_start, item["end"] - keep_start
+    crop = f"scale={width}:{height}:flags=bicubic,crop={item['w']}:{item['h']}:{item['x']}:{item['y']},format=gray"
+    diffs, moments = [], []
+    for k in range(samples):
+        moment = a + (k + .5) * (b - a) / samples
+        frames = []
+        for path, t in ((video, moment), (source, moment + keep_start)):
+            raw = run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path, "-frames:v", "1", "-vf", crop,
+                       "-f", "rawvideo", "-"], binary=True)
+            if len(raw) < item["w"] * item["h"]:
+                break
+            frames.append(np.frombuffer(raw[: item["w"] * item["h"]], np.uint8).reshape(item["h"], item["w"])
+                          .astype(np.float32))
+        if len(frames) == 2 and solid.shape == frames[0].shape and solid.any():
+            diffs.append(float(np.abs(frames[0] - frames[1])[solid].mean()))
+            moments.append(round(moment, 2))
+    worst = max(diffs) if diffs else None
+    verdict = ("unmeasured" if worst is None else "exact" if worst <= EXACT else "drift" if worst <= DRIFT
+               else "changed")
+    return {"what": item.get("what", ""), "start": round(a, 2), "end": round(b, 2), "method": item.get("method"),
+            "coverage": item.get("coverage"), "diff": None if worst is None else round(worst, 1),
+            "verdict": verdict, "worst_at": [m for m, d in zip(moments, diffs) if d > EXACT], "measured": len(diffs)}

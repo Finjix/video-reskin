@@ -54,7 +54,7 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 
 `catalog/catalog.md` per source: size, frame rate, duration, shots (`#2 59.58-63.58`), the end-card candidate
 (`cut` or `transition`, or none) and still overlays (`O1 top-right box [x0, y0, x1, y1] 0.0-17.8 s`, fractions of
-the frame). Still overlays are candidates only: logos and warning lines (remove) and HUD counters (keep) both show
+the frame). Still overlays are candidates only: logos, warning lines and HUD counters (all kept, as `hud` boxes) show
 up, scene objects that stand still too. `catalog/<id>.jpg` shows a frame every 1-2 s with cuts marked and overlay
 boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
 
@@ -68,14 +68,15 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
                         "whole tuna", "people in winter clothes",
                         {"what": "green stacks of banknotes", "start": 16, "end": 65.7},
                         {"what": "a blue pickup truck and an asphalt road", "start": 56, "end": 65.7}],
-          "remove": [{"what": "the game logo \"WHITEOUT SURVIVAL\" in the top-right corner", "start": 0, "end": 36, "box": [0.73, 0.02, 1.0, 0.11]},
-                     {"what": "the game logo \"WHITEOUT SURVIVAL\" in the bottom-left corner", "start": 35, "end": 65.7, "box": [0.0, 0.85, 0.36, 1.0]}],
-          "hud": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "the coin counter at the top left"}],
+          "hud": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "the coin counter at the top left"},
+                  {"box": [0.73, 0.02, 1.0, 0.11], "what": "the game logo \"WHITEOUT SURVIVAL\" in the top-right corner", "start": 0, "end": 36},
+                  {"box": [0.0, 0.85, 0.36, 1.0], "what": "the game logo \"WHITEOUT SURVIVAL\" in the bottom-left corner", "start": 35, "end": 65.7},
+                  {"box": [0.1, 0.955, 0.9, 1.0], "what": "the small white warning text at the bottom of the frame"}],
           "anchor": 36.5},
   "S02": {"keep": [0, 61.0], "style_from": "S01"},
   "S03": {"like": "S01",
-          "remove": [{"what": "the game logo \"WHITEOUT SURVIVAL\" in the top-left corner", "box": [0.0, 0.0, 0.3, 0.06]}],
-          "hud": [{"box": [0.0, 0.05, 0.3, 0.09], "what": "the coin counter at the top left"}]}}}
+          "hud": [{"box": [0.0, 0.05, 0.3, 0.09], "what": "the coin counter at the top left"},
+                  {"box": [0.0, 0.0, 0.3, 0.05], "what": "the game logo \"WHITEOUT SURVIVAL\" in the top-left corner"}]}}}
 ```
 
 - `keep`: `[start, end]` seconds of the source to deliver. The end is the last moment before the end card (its
@@ -87,7 +88,8 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   material the video does not show or one another object could turn into: a list naming salmon turned stacks of
   whole tuna and of green cash into salmon steaks, and an untimed `blue pickup truck` (trucks arrive near the end) put
   a truck into the opening seconds.
-- `remove`: on-screen elements to delete, in English, each naming what it shows (`the game logo "…" in the top-right
+- `remove`: on-screen elements to delete, only when the user asks for it (game logos and warning lines are
+  kept by default, as `hud` boxes), in English, each naming what it shows (`the game logo "…" in the top-right
   corner`, `the small white warning text at the bottom of the frame`); merged with `defaults.remove`. An item is text, or `{"what": text, "start": s,
   "end": s}` when the element is on screen only for part of the source. List only what the sheets show: naming text
   that is not there makes Seedance draw garbled text in its place. Never list HUD counters, prices, labels or buttons.
@@ -108,9 +110,11 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
     the box changes.
 - `anchor`: the source time whose frame sets the look (default: a lively moment of the longest shot). Pick a frame
   that shows the main scene sharply, without transitions or pop-ups.
-- `hud`: screen-fixed UI whose numbers change (coin counters, timers, scores): `{"box": [x0, y0, x1, y1],
+- `hud`: screen-fixed UI kept exactly as in the original: counters, timers and scores whose numbers change, and the
+  game logos and warning lines (kept by default): `{"box": [x0, y0, x1, y1],
   "start": s, "end": s, "what": text}` with the box in fractions of the frame, a little larger than the element.
-  Seedance redraws such digits wrongly; `assemble` copies the pixels that stay still inside the box (icon, panel and
+  At most 15% of the frame each; a logo that moves to another corner is one timed item per corner. Seedance
+  redraws such digits and letters wrongly; `assemble` copies the pixels that stay still inside the box (icon, panel and
   the digits they enclose) back from the original, frame by frame. Only screen-fixed elements.
 - `overlays`: screen-fixed, flat 2D text and UI the program burns in after the restyle, so they are always exact
   (captions, labels, banners, buttons the models garble). Each item:

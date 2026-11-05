@@ -268,8 +268,8 @@ def analyze_source(job: Path, row: dict) -> dict:
 def catalog_markdown(rows: list[dict]) -> str:
     lines = ["# Catalog", "",
              "Per source: media facts, camera shots, the end-card candidate (`end_card.start` is where the kept part",
-             "would stop) and still overlays (red boxes on the sheets: logos, watermarks and warning lines to remove, or",
-             "HUD counters to keep). Look at both sheets of every source before writing the edits file.", ""]
+             "would stop) and still overlays (red boxes on the sheets: logos, warning lines and HUD counters, all kept",
+             "and copied back from the original as `hud` boxes). Look at both sheets of every source before writing the edits file.", ""]
     for row in rows:
         info = row["info"]
         lines.append(f"## {row['id']} {row['name']}")

@@ -534,7 +534,7 @@ def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
     return None
 
 
-ASSEMBLY_VERSION = 7     # raise when the assembly itself changes, so delivered videos are made again
+ASSEMBLY_VERSION = 8     # raise when the assembly itself changes, so delivered videos are made again (8: kept-element fidelity)
 
 
 def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
@@ -709,6 +709,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     # Every corner a logo was wiped from: a smooth patch left in the delivery (see logos.quality).
     from reskin import logos as LOGOS
     wipes = LOGOS.quality(output, wipe_items(job, state, source_id, row))
+    # Every kept element (logos, warning lines, counters) against the original: it must come out pixel-exact.
+    fidelity = [HUD.fidelity(output, Path(source["path"]), keep_start, item, size) for item in huds]
     sheet = seam_sheet(job, source_id, clips, lines, joins, trims, out_fps,
                        verdicts={entry["segment"]: entry for entry in seam_times})
     result = {"source": source_id, "inputs": inputs_digest(job, state, source_id, row), "output": str(output),
@@ -716,7 +718,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
               "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
-              "wipes": wipes,
+              "wipes": wipes, "fidelity": fidelity,
               "overlays": OVERLAY.summary(burned),
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3),

@@ -18,11 +18,13 @@ CATEGORIES = {
                   "longer matches)",
     "artifact": "bug: morphing, melting, warping, flicker, jitter, frozen or repeated frames, garbled UI text or numbers, "
                 "broken limbs, smeared detail, strong noise or a fragmented look",
-    "added_text": "text the original does not have: captions, warning lines, watermarks or garbled characters drawn "
+    "added_text": "text the original does not have at that place and time: captions, warning lines, watermarks or "
+                  "garbled characters drawn "
                   "anywhere (look along the bottom and top edges in particular)",
     "seam_color": "seam: a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
                   "especially at the listed seam times",
-    "leftover_overlay": "a logo, watermark or warning/disclaimer text that should have been removed is still visible",
+    "leftover_overlay": "an element listed as removed on purpose is still visible (game logos and warning lines "
+                        "are kept unless listed there)",
     "end_card": "closing-card content (big logo, store badges, call to action) is visible",
     "style_drift": "the realism level or overall look changes from one part of the video to another",
     "identity": "a recurring character or object looks different in another part of the video (clothes or their "
@@ -121,7 +123,8 @@ def _goal(state: dict, plan_row: dict, layout: str, what: str) -> list[str]:
         f"The {what} shows the ORIGINAL on the {layout} and the RESTYLED version on the {other}, frame-synchronised "
         f"(same timestamps). The restyle goal: {describe(plan_row['materials'])} — game-rendered cartoon materials replaced by "
         f"realistic real-world materials (style preset: {style}) while composition, camera motion, characters, object "
-        "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
+        "positions, counts and timing stay exactly as in the original. HUD numbers, icons, buttons, game logos and "
+        "warning lines must stay as in the original.",
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         *([f"Screen-fixed HUD copied from the original afterwards (it may look wrong on the restyled side here; do not "
            f"report its digits): {hud}."] if hud and what == "clip of one segment" else
@@ -184,7 +187,7 @@ def segment_prompt(state: dict, plan_row: dict, layout: str, known: list[str] | 
     lines = [*_goal(state, plan_row, layout, "clip of one segment"),
              "This is one separately rendered segment, checked before the rest of the shot is rendered from it: look "
              "hardest for wrong or vanished objects, changed colours of prominent objects, garbled or added text, "
-             "leftover logos and warning lines, blurred patches, sudden changes and morphing. Use high only for what "
+             "leftover removed elements, blurred patches, sudden changes and morphing. Use high only for what "
              "a casual viewer notices at once.", *_rules(), *_known(known)]
     return "\n".join(lines)
 
@@ -720,12 +723,17 @@ def wipe_times(start: float, end: float, count: int = WIPE_MOMENTS) -> list[floa
 def wipe_sheets(plan_row: dict, assembled: dict, source_path: str, stem: Path) -> list[dict]:
     """Per boxed `remove` item a sheet of its corner over time (upper: the original with the logo, lower: the
     delivered video): {"sheet": path, "what", "times", "box"}."""
+    return box_sheets([item for item in plan_row.get("remove") or [] if isinstance(item, dict) and item.get("box")],
+                      assembled, source_path, stem, "upper: ORIGINAL (with the logo) | lower: DELIVERED (logo wiped)")
+
+
+def box_sheets(items: list[dict], assembled: dict, source_path: str, stem: Path, legend: str) -> list[dict]:
+    """Per boxed item a sheet of its box over time, the original above the delivered video:
+    {"sheet": path, "what", "times", "box"}."""
     keep_start, keep_end = assembled["keep"]
     size = tuple(assembled["size"])
     found = []
-    for item in plan_row.get("remove") or []:
-        if not (isinstance(item, dict) and item.get("box")):
-            continue
+    for item in items:
         a = max(keep_start, float(item.get("start", keep_start))) - keep_start
         b = min(keep_end, float(item.get("end", keep_end))) - keep_start
         times = [t for t in wipe_times(a, b) if not inside_live(assembled, t, t)]
@@ -748,8 +756,7 @@ def wipe_sheets(plan_row: dict, assembled: dict, source_path: str, stem: Path) -
         scale = min(1.0, 300 / w)
         tile = (max(2, round(w * scale)), max(2, round(h * scale)))
         number = len(found) + 1
-        sheet = _pairs_sheet(columns, tile, 4, f"sheet {number}: {item.get('what', '')} | upper: ORIGINAL (with the "
-                                               f"logo) | lower: DELIVERED (logo wiped)")
+        sheet = _pairs_sheet(columns, tile, 4, f"sheet {number}: {item.get('what', '')} | {legend}")
         path = Path(f"{stem}-{number}.jpg")
         path.parent.mkdir(parents=True, exist_ok=True)
         sheet.save(path, quality=90)
@@ -813,6 +820,86 @@ def wipe_check(job: Path, key: str, plan_row: dict, assembled: dict, source_path
                            "description": f"去logo区域（{sheets[index]['what']}）{kind}{moments}："
                                           f"{span[0][1].get('description', '')}"})
     return issues, sheets
+
+
+# --- the elements kept from the original (logos, warning lines, counters) ---------------------------------------------
+
+KEEP_PROBLEMS = {
+    "garbled": "letters, digits or characters differ from the original: misspelt, missing, extra, broken or "
+               "unreadable strokes, other characters",
+    "blurred": "softer, smeared or less crisp than in the original",
+    "doubled": "a second copy, ghost, shadow outline or offset edge of the element next to or around it",
+    "changed": "moved, resized, rotated, recoloured, restyled (realistic texture on the letters) or partly missing",
+    "patch": "a visible rectangle or patch of the original's cartoon background around the element",
+}
+KEEP_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"problems": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "sheet": {"type": "INTEGER"}, "column": {"type": "INTEGER"},
+        "problem": {"type": "STRING", "enum": sorted(KEEP_PROBLEMS)},
+        "severity": {"type": "STRING", "enum": ["high", "medium", "low"]},
+        "description": {"type": "STRING"}},
+        "required": ["sheet", "column", "problem", "severity", "description"]}}},
+    "required": ["problems"]}
+KEEP_STRICT = ("garbled", "blurred", "doubled", "changed")    # always high: kept elements must stay faithful
+
+
+def keep_prompt(count: int) -> str:
+    return "\n".join([
+        f"These {count} sheets each show one screen-fixed element of a game advertisement over time (a game logo, "
+        "a warning or disclaimer line, or a HUD counter), column by column (the time is above each column). Upper "
+        "row: the ORIGINAL video. Lower row: the DELIVERED restyled video, where the element must be exactly the "
+        "original's: the same characters, sharpness, position, size and colours. The scene around it may look "
+        "realistic in the lower row; that is intended.",
+        "Compare the element itself, character by character. Report a column when its lower picture shows any of "
+        "these:", *[f"- {name}: {text}" for name, text in KEEP_PROBLEMS.items()],
+        "Give the sheet number and column number (1 = leftmost, counting along each row of the sheet). Report "
+        "nothing for faithful columns; an empty list when every column is faithful. Be strict: a single wrong or "
+        "blurred character is a defect.",
+    ])
+
+
+def keep_issues(answer: dict, sheets: list[dict]) -> list[dict]:
+    """Gemini's findings as issues: one per element and kind over each run of neighbouring moments."""
+    found: dict[tuple[int, str], list[tuple[int, dict]]] = {}
+    for problem in answer.get("problems") or []:
+        index, column = int(problem.get("sheet", 0)) - 1, int(problem.get("column", 0)) - 1
+        if 0 <= index < len(sheets) and 0 <= column < len(sheets[index]["times"]):
+            found.setdefault((index, problem.get("problem", "changed")), []).append((column, problem))
+    issues = []
+    for (index, kind), hits in sorted(found.items()):
+        hits.sort(key=lambda hit: hit[0])
+        runs = [[hits[0]]]
+        for hit in hits[1:]:
+            if hit[0] == runs[-1][-1][0] + 1:
+                runs[-1].append(hit)
+            else:
+                runs.append([hit])
+        times = sheets[index]["times"]
+        for span in runs:
+            severity = ("high" if kind in KEEP_STRICT else
+                        max((hit[1].get("severity", "medium") for hit in span), key=lambda s: SEVERITY_RANK.get(s, 0)))
+            moments = f"（{len(span)} 个时刻）" if len(span) > 1 else ""
+            issues.append({"start": round(max(0.0, times[span[0][0]] - .3), 2), "end": round(times[span[-1][0]] + .3, 2),
+                           "category": "added_text" if kind == "garbled" else "artifact", "severity": severity,
+                           "where": sheets[index]["what"],
+                           "description": f"保留元素（{sheets[index]['what']}）{kind}{moments}："
+                                          f"{span[0][1].get('description', '')}"})
+    return issues
+
+
+def keep_check(job: Path, key: str, plan_row: dict, assembled: dict, source_path: str, stem: Path
+               ) -> tuple[list[dict], list[dict]]:
+    """Gemini compares every kept element (`hud` box) with the original over time; returns (issues, sheets)."""
+    sheets = box_sheets([item for item in plan_row.get("hud") or [] if item.get("box")], assembled, source_path,
+                        stem, "upper: ORIGINAL | lower: DELIVERED (must be identical)")
+    if not sheets:
+        return [], []
+    parts = [winky.inline(Path(entry["sheet"]), "image/jpeg") for entry in sheets]
+    parts.append({"text": keep_prompt(len(sheets))})
+    answer = winky.gemini(parts, schema=KEEP_SCHEMA)
+    ledger.add(job, kind="gemini", purpose="keep", key=key, seconds=0)
+    return keep_issues(answer, sheets), sheets
 
 
 def judge(issues: list[dict]) -> str:
@@ -1121,6 +1208,14 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
                 description=f"去logo区域（{wipe['what']}）{'留下模糊的涂抹色块' if wipe['verdict'] == 'smeared' else '偏模糊'}："
                             f"细节只有周围场景的 {wipe['share']}",
                 segments=segment_for(moments[0], moments[-1], assembled))
+    # Measured: kept elements (logos, warning lines, counters) that differ from the original (see hud.fidelity).
+    for kept in assembled.get("fidelity") or []:
+        if kept.get("verdict") in ("drift", "changed"):
+            moments = kept.get("worst_at") or [kept["start"]]
+            add(start=moments[0], end=moments[-1], category="artifact",
+                severity="high" if kept["verdict"] == "changed" else "medium", where=kept["what"], source="measured",
+                description=f"保留元素（{kept['what']}）与原片不一致：遮罩内平均灰度差 {kept['diff']}（仅重新编码约 3）",
+                segments=segment_for(moments[0], moments[-1], assembled))
     # The same characters and objects from the first second to the last (stills beside the styled keyframes).
     source = next(r for r in state["sources"] if r["id"] == source_id)
     number = len((read(job / "state/review" / f"{source_id}.json") if (job / "state/review" / f"{source_id}.json").is_file()
@@ -1141,6 +1236,13 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         add(**issue, source="gemini-wipe", segments=segment_for(issue["start"], issue["end"], assembled))
     if wipe_sheet_list:
         log(f"{source_id}: wipe check: {len(wipe_sheet_list)} corners, {len(wiped)} problems")
+    # Every kept logo, warning line and counter against the original, character by character.
+    kept_found, keep_sheet_list = keep_check(job, source_id, plan_row, assembled, source["path"],
+                                             job / "review" / f"{source_id}-kept-r{number}")
+    for issue in kept_found:
+        add(**issue, source="gemini-keep", segments=segment_for(issue["start"], issue["end"], assembled))
+    if keep_sheet_list:
+        log(f"{source_id}: kept-element check: {len(keep_sheet_list)} elements, {len(kept_found)} problems")
     # Gemini close-up of every join.
     for seam in seam_checks(job, source_id, assembled, clip, layout):
         reply = seam["answer"]
@@ -1168,7 +1270,8 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     result = {"source": source_id, "round": number, "output": assembled["output"], "verdict": verdict,
               "summary": answer.get("summary", ""), "realism": realism, "identity": subjects,
               "identity_sheets": [str(p) for p in identity_sheets],
-              "wipe_sheets": [entry["sheet"] for entry in wipe_sheet_list], "issues": issues, "compare": str(clip),
+              "wipe_sheets": [entry["sheet"] for entry in wipe_sheet_list],
+              "keep_sheets": [entry["sheet"] for entry in keep_sheet_list], "issues": issues, "compare": str(clip),
               "sheets": [str(p) for p in sheets], "assembled": assembled.get("inputs")}
     history["rounds"].append({k: result[k] for k in ("round", "verdict", "summary", "assembled")} | {"issues": len(issues)})
     write(rounds_path, history)
@@ -1208,6 +1311,9 @@ def markdown(result: dict) -> str:
     if result.get("wipe_sheets"):
         lines += ["", "Wiped corners over time (upper row original with the logo, lower row delivered): "
                   + ", ".join(Path(p).name for p in result["wipe_sheets"])]
+    if result.get("keep_sheets"):
+        lines += ["", "Kept logos, warning lines and counters over time (upper row original, lower row delivered, "
+                  "must be identical): " + ", ".join(Path(p).name for p in result["keep_sheets"])]
     return "\n".join(lines) + "\n"
 
 

@@ -37,5 +37,19 @@ class HudMatteTests(unittest.TestCase):
             self.assertLessEqual(item["y"] + item["h"], 854)
 
 
+    def test_fidelity_tells_exact_from_changed(self):
+        # A kept logo pasted back is exact; a delivery where the box shows something else is changed.
+        size = (480, 854)
+        item = hud.matte(self.source, [0.0, 3.0], {"box": [0.1, 0.1, 0.5, 0.3], "what": "logo"}, size,
+                         self.dir / "m.png")
+        same = hud.fidelity(self.source, self.source, 0.0, item, size, samples=3)
+        self.assertEqual(same["verdict"], "exact", same)
+        other = self.dir / "other.mp4"
+        run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=540x960:rate=30:duration=3",
+             "-pix_fmt", "yuv420p", "-c:v", "libx264", other])
+        changed = hud.fidelity(other, self.source, 0.0, item, size, samples=3)
+        self.assertEqual(changed["verdict"], "changed", changed)
+        self.assertEqual(len(changed["worst_at"]), 3)
+
 if __name__ == "__main__":
     unittest.main()
