@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from reskin.common import read, write, write_text
-from reskin.overlay import problem as overlay_problem
 from reskin.prompts import describe
 
 MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
@@ -17,16 +16,20 @@ OVERLAP_SECONDS = 1.0     # a segment after a seam inside a shot renders this mu
 #                           frames); assemble joins inside it
 HEAD_SECONDS = 0.5        # ... and its clip starts with this much of the shot's opening (cut off again in assembly)
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "hud", "overlays", "style_ref", "chain_prefix", "like", "live"}
-# `like`: the same ad in another framing (横版/竖版). The timeline and the texts are the twin's; boxes (remove, hud,
-# overlays) sit elsewhere in another framing, so the source names its own.
+             "ui", "style_ref", "chain_prefix", "like", "live"}
+# `like`: the same ad in another framing (横版/竖版). The timeline and the texts are the twin's; boxes (remove) and
+# the `ui` (named by position) sit elsewhere in another framing, so the source names its own.
 LIKE_FIELDS = ("keep", "materials", "extra", "anchor", "split_at", "max_segment_seconds", "chain_prefix", "live")
 LIVE_SNAP = .25           # seconds: a live-action span's ends move onto a camera cut this close (they start and end
 #                           at hard cuts; a frame or two of the other footage on the wrong side would show)
 LIKE_SECONDS = .3         # twins differing more in length than this are different cuts: their times do not carry over
 LIKE_MATCH = .1           # seconds: a segment whose start and end lie this close to a twin segment's shares its fixes
 REMOVED_KEYS = {"midframes": "midframes were removed (extra preview references cost previews and carried their "
-                             "colour mistakes into the video); leave the key out"}
+                             "colour mistakes into the video); leave the key out",
+                "hud": "hud was removed (nothing is copied back from the original any more): describe the element in "
+                       "`ui` so the models draw it",
+                "overlays": "overlays was removed (nothing is burned in by the program any more): describe the element "
+                            "in `ui` so the models draw it"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -60,20 +63,22 @@ def items_problem(items, name: str) -> str | None:
     return None
 
 
-def hud_problem(items) -> str | None:
-    """`hud`: screen-fixed UI (counters, timers) copied back from the original: [{"box": [x0, y0, x1, y1] as
-    fractions of the frame, "start": s, "end": s, "what": text}]."""
+def ui_problem(items) -> str | None:
+    """`ui`: screen-fixed interface and text the models draw exactly as in the original (HUD counters, buttons,
+    captions, banners, game logos, warning lines): [{"what": English text naming its position, exact text in quotes,
+    colours and how its numbers change, "start": s, "end": s, "box": [x0, y0, x1, y1] (fractions, optional: for the
+    review's close-up check)}]."""
     if not isinstance(items, list):
-        return "hud must be a list"
+        return "ui must be a list"
     for item in items:
-        box = item.get("box") if isinstance(item, dict) else None
-        if (not isinstance(box, list) or len(box) != 4 or not all(isinstance(v, (int, float)) for v in box)
-                or not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
-                or (box[2] - box[0]) * (box[3] - box[1]) > .15
-                or not set(item) <= {"box", "start", "end", "what"}
-                or not all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))):
-            return (f"hud item {item!r} must be {{\"box\": [x0, y0, x1, y1] (fractions, at most 15% of the frame), "
-                    "\"start\": s, \"end\": s, \"what\": text}")
+        if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
+                and set(item) <= {"what", "start", "end", "box"}
+                and ("box" not in item or not box_problem(item["box"]))
+                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
+                and item.get("start", 0) <= item.get("end", float("inf"))):
+            continue
+        return (f"ui item {item!r} must be {{\"what\": text, \"start\": seconds, \"end\": seconds, "
+                "\"box\": [x0, y0, x1, y1] (optional)}")
     return None
 
 
@@ -206,10 +211,8 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: {items_problem(row['materials'], 'materials')}")
         if "remove" in row and items_problem(row["remove"], "remove"):
             problems.append(f"{source_id}: {items_problem(row['remove'], 'remove')}")
-        if "hud" in row and hud_problem(row["hud"]):
-            problems.append(f"{source_id}: {hud_problem(row['hud'])}")
-        if "overlays" in row and overlay_problem(row["overlays"]):
-            problems.append(f"{source_id}: {overlay_problem(row['overlays'])}")
+        if "ui" in row and ui_problem(row["ui"]):
+            problems.append(f"{source_id}: {ui_problem(row['ui'])}")
         if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
         if "live" in row and live_problem(row["live"], duration):
@@ -259,8 +262,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             remove.append(item)
     return {"keep": [float(keep[0]), float(keep[1])], "materials": row.get("materials") or style["default_materials"],
             "remove": remove, "anchor": row.get("anchor"), "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
-            "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
-            "overlays": row.get("overlays") or [],
+            "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "ui": row.get("ui") or [],
             "style_ref": ({"path": row["style_ref"]} if isinstance(row.get("style_ref"), str) else row.get("style_ref")),
             "chain_prefix": row.get("chain_prefix"), "like": row.get("like"),
             "live": sorted(({"start": float(i["start"]), "end": float(i["end"]), "what": i.get("what", "")}

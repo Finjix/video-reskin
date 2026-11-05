@@ -31,13 +31,13 @@ close-ups of each from the styled keyframes (REF) and from moments across the vi
 build, rendering and colours (`identity` issues, sheets `review/<id>-identity-r<n>-subjects.jpg`). It runs in the
 review only (not per segment or per preview).
 
-The kept-element check holds every `hud` item (game logos, warning lines, counters) to the original: `assemble`
-measures the mean grey difference inside the solid part of its matte at six moments (`fidelity`: `exact` up to 6,
-re-encoding alone gives about 3; `drift` up to 12, medium; above that `changed`, high, source `measured`), and the
-review draws a sheet per item, `review/<id>-kept-r<n>-<k>.jpg` (eight moments, upper row original, lower row
-delivered), on which Gemini compares the element character by character (`gemini-keep`): garbled, blurred, doubled
-(a ghost copy beside it), changed (moved, resized, recoloured, restyled letters, partly missing) are always high; a
-cartoon patch around it takes Gemini's severity. Fixes need no render: the `hud` box or times, `plan`, `assemble`.
+The kept-element check holds every `ui` item with a `box` (game logos, warning lines, counters, captions, buttons)
+to the original: the review draws a sheet per item, `review/<id>-kept-r<n>-<k>.jpg` (eight moments, upper row
+original, lower row delivered), on which Gemini compares the element character by character (`gemini-keep`):
+garbled, blurred, doubled (a second copy beside it), changed (moved, resized, recoloured, restyled letters, partly
+missing) are always high. The models draw these elements, so a fix renders: wrong on the keyframe too, sharpen the
+`ui` description, `plan`, `redo --keyframe`; only in the video, `redo` the segment with a `--prompt` naming the
+element and its exact text. A `ui` item without a box is checked only by the whole-video review.
 
 The wipe check (only when the user asked to remove a logo: game logos and warning lines are kept by default and
 not reported) looks at every corner a logo or warning line was removed from, over its whole time: per boxed `remove`
@@ -109,8 +109,9 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
 - Only when the user asked to remove a logo: a smeared logo corner (an item with `"wipe": "before"`): drop the `wipe` (Seedance is then told to remove the logo
   itself), `plan`, redo the segments it spans. A logo Seedance kept: redo once with a `--prompt` naming the corner.
   A warning line along the bottom edge it always keeps: cropping the source is the fix (ask the user first).
-- Garbled screen-fixed text or UI needs no render: an `overlays` item over it (`box`/`poly`, no `colors`), `plan`,
-  `assemble`.
+- Garbled screen-fixed text or UI: make its `ui` item exact (quoted text, look, place, times), `plan`, then redo
+  the keyframe (wrong there too) or the segment with a `--prompt` naming it. After two failed redos report it as
+  open; nothing is burned in.
 - Then `run` (only redone segments render, with their checks; assembly and review follow per source). Each review
   round is numbered; after `review_rounds` (2) rounds deliver and list what is still open.
 
@@ -118,7 +119,7 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
 
 `run`/`render` checks every segment that has a successor in its shot before the successor starts: the seam to the
 segment before it and the segment's wiped logo corners are measured, and Gemini compares the segment with its
-original (same categories; the HUD and burned overlays are not in yet). A visible seam, a smeared corner or a high
+original (same categories, the `ui` elements included). A visible seam, a smeared corner or a high
 Gemini finding holds the segment; the rest of the shot waits, other shots go on. Confirm on
 `review/gate/<id>-<Kxx>-p<k>.jpg` like a review issue: `redo` (one segment renders again instead of the whole shot) or
 `accept --segment <key> --reason <why>`. An accepted finding (and its reason) is passed to the later checks, so the

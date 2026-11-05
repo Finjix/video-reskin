@@ -389,13 +389,6 @@ def work_clip(job: Path, source_id: str, line: dict, out_fps: float, size: tuple
     return work
 
 
-def ignore_boxes(row: dict) -> list[list[float]]:
-    """Regions whose pixels come from the original anyway (HUD, burned overlays): seam measures skip them."""
-    from reskin import overlay as OVERLAY
-    return ([item["box"] for item in row.get("hud") or []]
-            + [list(OVERLAY.region(item)) for item in row.get("overlays") or []])
-
-
 def measure_seam(before_clip: Path, after_clip: Path, before_line: dict, after_line: dict, out_fps: float,
                  ignore: list[list[float]] | None = None, cut: bool = False) -> dict:
     """One seam inside a shot measured on its own (colours matched for this pair only): the join `assemble` would
@@ -534,7 +527,7 @@ def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
     return None
 
 
-ASSEMBLY_VERSION = 8     # raise when the assembly itself changes, so delivered videos are made again (8: kept-element fidelity)
+ASSEMBLY_VERSION = 9     # raise when the assembly itself changes, so delivered videos are made again (9: no HUD copy-back or burn-in)
 
 
 def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
@@ -557,7 +550,6 @@ def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
 
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
-    from reskin import hud as HUD, overlay as OVERLAY
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps, size = output_spec(state, row)
@@ -575,14 +567,14 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         overlap = lines[index]["body"][0] - lines[index]["out"][0]
         if index in cuts:
             # the earlier segment plays to its end; the later one starts with its own frames
-            join = cut_join(before, after, corrections[index - 1], corrections[index], ignore_boxes(row))
+            join = cut_join(before, after, corrections[index - 1], corrections[index])
             join["frame"] = overlap
             join["inside"] = dict(join, jump=jump_verdict(join))
             trims[index][0] = overlap
             joins[index] = join
             continue
-        join = choose_join(before, after, corrections[index - 1], corrections[index], ignore_boxes(row))
-        join["inside"] = inside_jump(clips[index], overlap, out_fps, ignore_boxes(row))
+        join = choose_join(before, after, corrections[index - 1], corrections[index])
+        join["inside"] = inside_jump(clips[index], overlap, out_fps)
         trims[index - 1][1] -= overlap - join["frame"] - half
         trims[index][0] = join["frame"] - half
         joins[index] = join
@@ -617,25 +609,6 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     keep_start, keep_end = row["keep"]
     source_index = len(clips)
     inputs += ["-i", source["path"]]
-    # Screen-fixed HUD comes back from the original, frame by frame, through a matte of its still pixels.
-    huds = [HUD.matte(Path(source["path"]), row["keep"], item, size, job / "work" / f"{source_id}-hud{n}.png")
-            for n, item in enumerate(row.get("hud") or [], 1)]
-    current = "v0"
-    if huds:
-        graph.append(f"[{source_index}:v]trim=start={keep_start:.6f}:end={keep_end:.6f},setpts=PTS-STARTPTS,"
-                     f"fps={out_fps},scale={size[0]}:{size[1]}:flags=bicubic,format=yuv420p,split={len(huds)}"
-                     + "".join(f"[o{n}]" for n in range(len(huds))))
-        for n, item in enumerate(huds):
-            inputs += ["-loop", "1", "-framerate", str(out_fps), "-t", f"{total / out_fps + 1:.3f}", "-i", item["mask"]]
-            mask_index = sum(1 for part in inputs if part == "-i") - 1
-            start, end = item["start"] - keep_start, item["end"] - keep_start
-            graph.append(f"[o{n}]crop={item['w']}:{item['h']}:{item['x']}:{item['y']}[h{n}]")
-            graph.append(f"[{mask_index}:v]format=gray[m{n}]")
-            graph.append(f"[h{n}][m{n}]alphamerge[ha{n}]")
-            graph.append(f"[{current}][ha{n}]overlay=x={item['x']}:y={item['y']}:eof_action=pass:"
-                         f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[hv{n}]")
-            current = f"hv{n}"
-    graph.append(f"[{current}]format=yuv420p[vout]")
     audio_filter = None
     if info["audio"]:
         fade = []
@@ -653,26 +626,12 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
     output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
     partial = output.with_name(output.stem + ".partial.mp4")
-    burned = []
-    if row.get("overlays"):
-        # Screen-fixed text and UI the program burns in (from the original, or drawn): a per-frame pass
-        # between the assembled picture and the encoder; the audio is cut first, on its own.
-        burned = OVERLAY.prepare(row["overlays"], (keep_start, keep_end), out_fps, size, total)
-        extra, audio = [], []
-        if audio_filter:
-            sound = job / "work" / f"{source_id}-audio.m4a"
-            run([FFMPEG, "-v", "error", "-y", "-i", source["path"], "-vn", "-af", audio_filter, *audio_codec, sound])
-            extra, audio = ["-i", sound], ["-map", "1:a", "-c:a", "copy"]
-        OVERLAY.burn([*inputs, "-filter_complex", ";".join(graph), "-map", "[vout]"], Path(source["path"]),
-                     (keep_start, keep_end), out_fps, size, total, burned,
-                     ["-map", "0:v", *audio, *encode, partial], extra_inputs=extra)
-    else:
-        audio = []
-        if audio_filter:
-            graph.append(f"[{source_index}:a]{audio_filter}[aout]")
-            audio = ["-map", "[aout]", *audio_codec]
-        run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
-             *encode, partial])
+    audio = []
+    if audio_filter:
+        graph.append(f"[{source_index}:a]{audio_filter}[aout]")
+        audio = ["-map", "[aout]", *audio_codec]
+    run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
+         *encode, partial])
     try:
         partial.replace(output)
     except PermissionError:
@@ -709,17 +668,13 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     # Every corner a logo was wiped from: a smooth patch left in the delivery (see logos.quality).
     from reskin import logos as LOGOS
     wipes = LOGOS.quality(output, wipe_items(job, state, source_id, row))
-    # Every kept element (logos, warning lines, counters) against the original: it must come out pixel-exact.
-    fidelity = [HUD.fidelity(output, Path(source["path"]), keep_start, item, size) for item in huds]
     sheet = seam_sheet(job, source_id, clips, lines, joins, trims, out_fps,
                        verdicts={entry["segment"]: entry for entry in seam_times})
     result = {"source": source_id, "inputs": inputs_digest(job, state, source_id, row), "output": str(output),
               "duration": round(made["duration"], 3),
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
-              "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
-              "wipes": wipes, "fidelity": fidelity,
-              "overlays": OVERLAY.summary(burned),
+              "wipes": wipes,
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3),
                             **({"live": True} if line.get("live") else {})} for line in lines]}
@@ -731,7 +686,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
 def _label(text: str, width: int, output: Path) -> Path:
     """A caption strip for one column of a comparison: white text on a dark translucent band."""
     from PIL import Image, ImageDraw
-    from reskin.overlay import _font
+    from reskin.common import font as _font
     size = max(18, width // 18)
     font = _font("bold", size)
     band = Image.new("RGBA", (width, round(size * 1.8)), (0, 0, 0, 150))

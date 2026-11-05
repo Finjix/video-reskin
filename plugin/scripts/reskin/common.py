@@ -182,3 +182,21 @@ class job_lock:
                 fcntl.flock(self.stream, fcntl.LOCK_UN)
         finally:
             self.stream.close()
+
+
+FONTS = {"bold": ["C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/arialbd.ttf"],
+         "regular": ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/arial.ttf"]}
+
+
+def font(name: str, size: int):
+    """A PIL font for labels: `bold` or `regular` (Chinese-capable where installed), else PIL's default."""
+    from PIL import ImageFont
+    for path in FONTS.get(name, FONTS["bold"]):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()

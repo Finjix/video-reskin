@@ -204,14 +204,16 @@ class LintTests(unittest.TestCase):
         self.assertEqual(drafted["keep"], [0.0, 65.7])
         self.assertEqual(drafted["materials"][0], "积雪地面")
         self.assertEqual(drafted["materials"][1], {"what": "蓝色皮卡车", "start": 56, "end": 65.7})
-        # logos and warning lines are kept: drafted as HUD boxes copied back from the original, nothing removed
+        # logos, warning lines, HUD and screen-fixed text are kept: drafted as `ui` for the models, nothing removed
         self.assertNotIn("remove", drafted)
-        self.assertEqual([h["what"] for h in drafted["hud"]], ["金币计数", "右上角的游戏logo「WHITEOUT SURVIVAL」"])
-        self.assertEqual(drafted["hud"][1]["box"], [.8, .02, .98, .09])
-        self.assertEqual(len(drafted["overlays"]), 1)
-        self.assertEqual(drafted["overlays"][0]["box"], [.1, .8, .9, .9])
-        self.assertIsNone(PLAN.overlay_problem(drafted["overlays"]))
-        self.assertIsNone(PLAN.hud_problem(drafted["hud"]))
+        self.assertNotIn("hud", drafted)
+        self.assertNotIn("overlays", drafted)
+        self.assertEqual([h["what"] for h in drafted["ui"]],
+                         ["金币计数", "右上角的游戏logo「WHITEOUT SURVIVAL」", '底部字幕 reading "钓到了！"'])
+        self.assertEqual(drafted["ui"][1]["box"], [.8, .02, .98, .09])
+        self.assertEqual((drafted["ui"][1]["start"], drafted["ui"][1]["end"]), (0, 36))
+        self.assertNotIn("start", drafted["ui"][0])
+        self.assertIsNone(PLAN.ui_problem(drafted["ui"]))
         self.assertIsNone(PLAN.items_problem(drafted["materials"], "materials"))
         self.assertIn("edits_check", lint.prompt(row, {"materials": ["三文鱼"]}))
 

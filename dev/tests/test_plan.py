@@ -127,7 +127,7 @@ def twin_catalog(duration_b=60.0):
 class LikeTests(unittest.TestCase):
     TWIN = {"keep": [0, 59.9], "materials": ["whole tuna"], "extra": "The snow stays white.", "anchor": 30,
             "split_at": [40], "remove": [{"what": "the logo top right", "box": [.7, 0, 1, .1]}],
-            "hud": [{"box": [0, 0, .2, .05]}]}
+            "ui": [{"what": "the coin counter at the top left", "box": [0, 0, .2, .05]}]}
 
     def edits(self, own, catalog=None):
         catalog = catalog or twin_catalog()
@@ -142,7 +142,7 @@ class LikeTests(unittest.TestCase):
         self.assertEqual((row["anchor"], row["split_at"]), (30, [40]))
         self.assertEqual(row["style_from"], "S01")
         self.assertEqual(row["remove"], [{"what": "the logo bottom", "box": [0, .9, .4, 1]}])
-        self.assertEqual(row["hud"], [])
+        self.assertEqual(row["ui"], [])
         self.assertEqual(row["like"], "S01")
 
     def test_own_fields_win(self):

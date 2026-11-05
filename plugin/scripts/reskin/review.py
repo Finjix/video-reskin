@@ -115,8 +115,7 @@ def _known(notes: list[str] | None) -> list[str]:
 def _goal(state: dict, plan_row: dict, layout: str, what: str) -> list[str]:
     other = "right" if layout == "left" else "bottom"
     removal = describe(plan_row["remove"]) or "nothing named"
-    hud = "; ".join(item.get("what") or "HUD box" for item in plan_row.get("hud") or [])
-    burned = describe(plan_row.get("overlays") or [])
+    ui = describe(plan_row.get("ui") or [])
     style = state["style"] if isinstance(state["style"], str) else state["style"].get("label")
     return [
         "You are a strict quality reviewer for AI-restyled game advertising videos.",
@@ -126,11 +125,9 @@ def _goal(state: dict, plan_row: dict, layout: str, what: str) -> list[str]:
         "positions, counts and timing stay exactly as in the original. HUD numbers, icons, buttons, game logos and "
         "warning lines must stay as in the original.",
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
-        *([f"Screen-fixed HUD copied from the original afterwards (it may look wrong on the restyled side here; do not "
-           f"report its digits): {hud}."] if hud and what == "clip of one segment" else
-          [f"Screen-fixed HUD copied from the original (identical on both sides by design): {hud}."] if hud else []),
-        *([f"UI and text burned in by the program afterwards (copied from the original or drawn; the models leave these "
-           f"areas without them on purpose): {burned}."] if burned else []),
+        *([f"Screen-fixed interface and text the models must draw exactly as in the original (same characters, "
+           f"digits, place, size and colours; report any garbled, missing, doubled, restyled or changed one as "
+           f"added_text or artifact): {ui}."] if ui else []),
     ]
 
 
@@ -336,7 +333,7 @@ def _pairs_sheet(columns: list[tuple[str, Image.Image, Image.Image, bool]], tile
                  title: str, sections: list[tuple[str, int]] | None = None) -> Image.Image:
     """Columns of (label, upper, lower, reference) in rows of `per_row`; `sections`: (heading, column count) groups
     that each start on a new row under their heading."""
-    from reskin.overlay import _font
+    from reskin.common import font as _font
     label = _font("regular", 15)
     groups = sections or [("", len(columns))]
     layout, index = [], 0
@@ -494,7 +491,7 @@ def pair_images(frames: list[dict], found: dict, limit: int = CLOSEUPS) -> list[
     """Per subject: its reference close-up (the REF column with the largest box, else its first appearance) beside
     each later close-up, the original small on the right: (subject, column label, JPEG bytes)."""
     import io
-    from reskin.overlay import _font
+    from reskin.common import font as _font
     label = _font("regular", 18)
     out = []
     for subject in found["subjects"]:
@@ -830,7 +827,6 @@ KEEP_PROBLEMS = {
     "blurred": "softer, smeared or less crisp than in the original",
     "doubled": "a second copy, ghost, shadow outline or offset edge of the element next to or around it",
     "changed": "moved, resized, rotated, recoloured, restyled (realistic texture on the letters) or partly missing",
-    "patch": "a visible rectangle or patch of the original's cartoon background around the element",
 }
 KEEP_SCHEMA = {
     "type": "OBJECT",
@@ -847,10 +843,11 @@ KEEP_STRICT = ("garbled", "blurred", "doubled", "changed")    # always high: kep
 def keep_prompt(count: int) -> str:
     return "\n".join([
         f"These {count} sheets each show one screen-fixed element of a game advertisement over time (a game logo, "
-        "a warning or disclaimer line, or a HUD counter), column by column (the time is above each column). Upper "
-        "row: the ORIGINAL video. Lower row: the DELIVERED restyled video, where the element must be exactly the "
-        "original's: the same characters, sharpness, position, size and colours. The scene around it may look "
-        "realistic in the lower row; that is intended.",
+        "a warning or disclaimer line, a HUD counter, a caption, banner or button), column by column (the time is "
+        "above each column). Upper row: the ORIGINAL video. Lower row: the DELIVERED restyled video, where an AI "
+        "model redrew the element; it must match the original's: the same characters and digits, sharpness, "
+        "position, size and colours, flat and not restyled. The scene around it may look realistic in the lower "
+        "row; that is intended.",
         "Compare the element itself, character by character. Report a column when its lower picture shows any of "
         "these:", *[f"- {name}: {text}" for name, text in KEEP_PROBLEMS.items()],
         "Give the sheet number and column number (1 = leftmost, counting along each row of the sheet). Report "
@@ -890,9 +887,10 @@ def keep_issues(answer: dict, sheets: list[dict]) -> list[dict]:
 
 def keep_check(job: Path, key: str, plan_row: dict, assembled: dict, source_path: str, stem: Path
                ) -> tuple[list[dict], list[dict]]:
-    """Gemini compares every kept element (`hud` box) with the original over time; returns (issues, sheets)."""
-    sheets = box_sheets([item for item in plan_row.get("hud") or [] if item.get("box")], assembled, source_path,
-                        stem, "upper: ORIGINAL | lower: DELIVERED (must be identical)")
+    """Gemini compares every kept element (a `ui` item with a box) with the original over time; returns (issues,
+    sheets)."""
+    sheets = box_sheets([item for item in plan_row.get("ui") or [] if isinstance(item, dict) and item.get("box")],
+                        assembled, source_path, stem, "upper: ORIGINAL | lower: DELIVERED (must match)")
     if not sheets:
         return [], []
     parts = [winky.inline(Path(entry["sheet"]), "image/jpeg") for entry in sheets]
@@ -1208,14 +1206,6 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
                 description=f"去logo区域（{wipe['what']}）{'留下模糊的涂抹色块' if wipe['verdict'] == 'smeared' else '偏模糊'}："
                             f"细节只有周围场景的 {wipe['share']}",
                 segments=segment_for(moments[0], moments[-1], assembled))
-    # Measured: kept elements (logos, warning lines, counters) that differ from the original (see hud.fidelity).
-    for kept in assembled.get("fidelity") or []:
-        if kept.get("verdict") in ("drift", "changed"):
-            moments = kept.get("worst_at") or [kept["start"]]
-            add(start=moments[0], end=moments[-1], category="artifact",
-                severity="high" if kept["verdict"] == "changed" else "medium", where=kept["what"], source="measured",
-                description=f"保留元素（{kept['what']}）与原片不一致：遮罩内平均灰度差 {kept['diff']}（仅重新编码约 3）",
-                segments=segment_for(moments[0], moments[-1], assembled))
     # The same characters and objects from the first second to the last (stills beside the styled keyframes).
     source = next(r for r in state["sources"] if r["id"] == source_id)
     number = len((read(job / "state/review" / f"{source_id}.json") if (job / "state/review" / f"{source_id}.json").is_file()
@@ -1236,7 +1226,8 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         add(**issue, source="gemini-wipe", segments=segment_for(issue["start"], issue["end"], assembled))
     if wipe_sheet_list:
         log(f"{source_id}: wipe check: {len(wipe_sheet_list)} corners, {len(wiped)} problems")
-    # Every kept logo, warning line and counter against the original, character by character.
+    # Every kept logo, warning line, counter and screen text (a `ui` item with a box) against the original,
+    # character by character.
     kept_found, keep_sheet_list = keep_check(job, source_id, plan_row, assembled, source["path"],
                                              job / "review" / f"{source_id}-kept-r{number}")
     for issue in kept_found:
@@ -1312,8 +1303,8 @@ def markdown(result: dict) -> str:
         lines += ["", "Wiped corners over time (upper row original with the logo, lower row delivered): "
                   + ", ".join(Path(p).name for p in result["wipe_sheets"])]
     if result.get("keep_sheets"):
-        lines += ["", "Kept logos, warning lines and counters over time (upper row original, lower row delivered, "
-                  "must be identical): " + ", ".join(Path(p).name for p in result["keep_sheets"])]
+        lines += ["", "Kept logos, warning lines, counters and screen text over time (upper row original, lower "
+                  "row delivered, must match): " + ", ".join(Path(p).name for p in result["keep_sheets"])]
     return "\n".join(lines) + "\n"
 
 

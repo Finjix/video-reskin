@@ -17,7 +17,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `run [--only K] [--no-gate]` | keyframes (stops when any are new, to be looked at); then render with checks, and assemble and review each source as soon as its segments are done (unchanged videos are not reviewed again) | as render |
 | `accept --segment S01:K02 --reason R` | lets a held segment through (the check was wrong, as seen on its stills) | - |
 | `cost [--json]` | Seedance seconds by cause (new, redo, upstream, auto-retry, plan, keyframe, wipe, unusable), resolution and source; GPT Image and Gemini calls | - |
-| `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, copy the HUD back, join with the source audio → delivery folder (1080p, 24 fps); seam and wiped-corner measurements, `sheets/<id>-seams.jpg` | ~1 min per video |
+| `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, join with the source audio → delivery folder (1080p, 24 fps); seam and wiped-corner measurements, `sheets/<id>-seams.jpg` | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2), reports its realism, checks that every recurring character and object keeps its keyframe look (close-ups → `review/<id>-identity-r<n>-subjects.jpg`), checks every seam and wiped corner close up; measured seams and corners added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--replace-prompt] [--keyframe]` | sends confirmed segments back for another attempt; corrective sentences accumulate over attempts, `--replace-prompt` drops the earlier ones first | - |
@@ -54,7 +54,7 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 
 `catalog/catalog.md` per source: size, frame rate, duration, shots (`#2 59.58-63.58`), the end-card candidate
 (`cut` or `transition`, or none) and still overlays (`O1 top-right box [x0, y0, x1, y1] 0.0-17.8 s`, fractions of
-the frame). Still overlays are candidates only: logos, warning lines and HUD counters (all kept, as `hud` boxes) show
+the frame). Still overlays are candidates only: logos, warning lines and HUD counters (all kept, as `ui` items) show
 up, scene objects that stand still too. `catalog/<id>.jpg` shows a frame every 1-2 s with cuts marked and overlay
 boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
 
@@ -68,15 +68,16 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
                         "whole tuna", "people in winter clothes",
                         {"what": "green stacks of banknotes", "start": 16, "end": 65.7},
                         {"what": "a blue pickup truck and an asphalt road", "start": 56, "end": 65.7}],
-          "hud": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "the coin counter at the top left"},
-                  {"box": [0.73, 0.02, 1.0, 0.11], "what": "the game logo \"WHITEOUT SURVIVAL\" in the top-right corner", "start": 0, "end": 36},
-                  {"box": [0.0, 0.85, 0.36, 1.0], "what": "the game logo \"WHITEOUT SURVIVAL\" in the bottom-left corner", "start": 35, "end": 65.7},
-                  {"box": [0.1, 0.955, 0.9, 1.0], "what": "the small white warning text at the bottom of the frame"}],
+          "ui": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "the coin counter at the top left: a gold coin icon and bold white digits with a dark outline on a dark translucent plate, counting up from \"12,580\" at 0 s to \"15,200\" at 3 s, then staying"},
+                 {"box": [0.73, 0.02, 1.0, 0.11], "what": "the game logo \"WHITEOUT SURVIVAL\" in white and ice-blue letters in the top-right corner", "start": 0, "end": 36},
+                 {"box": [0.0, 0.85, 0.36, 1.0], "what": "the game logo \"WHITEOUT SURVIVAL\" in white and ice-blue letters in the bottom-left corner", "start": 35, "end": 65.7},
+                 {"box": [0.1, 0.955, 0.9, 1.0], "what": "one line of small white text \"健康游戏忠告：抵制不良游戏，拒绝盗版游戏\" along the bottom edge"},
+                 {"what": "the caption \"Caught a big tuna!\" in bold yellow letters with a black outline at the bottom centre", "start": 3, "end": 6}],
           "anchor": 36.5},
   "S02": {"keep": [0, 61.0], "style_from": "S01"},
   "S03": {"like": "S01",
-          "hud": [{"box": [0.0, 0.05, 0.3, 0.09], "what": "the coin counter at the top left"},
-                  {"box": [0.0, 0.0, 0.3, 0.05], "what": "the game logo \"WHITEOUT SURVIVAL\" in the top-left corner"}]}}}
+          "ui": [{"box": [0.0, 0.05, 0.3, 0.09], "what": "the coin counter at the top left: ... (as in S01)"},
+                 {"box": [0.0, 0.0, 0.3, 0.05], "what": "the game logo \"WHITEOUT SURVIVAL\" in white and ice-blue letters in the top-left corner"}]}}}
 ```
 
 - `keep`: `[start, end]` seconds of the source to deliver. The end is the last moment before the end card (its
@@ -89,10 +90,11 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   whole tuna and of green cash into salmon steaks, and an untimed `blue pickup truck` (trucks arrive near the end) put
   a truck into the opening seconds.
 - `remove`: on-screen elements to delete, only when the user asks for it (game logos and warning lines are
-  kept by default, as `hud` boxes), in English, each naming what it shows (`the game logo "…" in the top-right
+  kept by default, as `ui` items), in English, each naming what it shows (`the game logo "…" in the top-right
   corner`, `the small white warning text at the bottom of the frame`); merged with `defaults.remove`. An item is text, or `{"what": text, "start": s,
   "end": s}` when the element is on screen only for part of the source. List only what the sheets show: naming text
-  that is not there makes Seedance draw garbled text in its place. Never list HUD counters, prices, labels or buttons.
+  that is not there makes Seedance draw garbled text in its place. Never list HUD counters, prices, labels or buttons
+  (they are `ui`).
   - A screen-fixed logo or warning line gets `"box": [x0, y0, x1, y1]` (fractions, a little larger than the
     element; the catalog's still-overlay boxes are a good start, check them on a frame). By default
     (`"wipe": "none"`) it stays in the clip and every prompt names it for removal during its time; in a
@@ -110,27 +112,24 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
     the box changes.
 - `anchor`: the source time whose frame sets the look (default: a lively moment of the longest shot). Pick a frame
   that shows the main scene sharply, without transitions or pop-ups.
-- `hud`: screen-fixed UI kept exactly as in the original: counters, timers and scores whose numbers change, and the
-  game logos and warning lines (kept by default): `{"box": [x0, y0, x1, y1],
-  "start": s, "end": s, "what": text}` with the box in fractions of the frame, a little larger than the element.
-  At most 15% of the frame each; a logo that moves to another corner is one timed item per corner. Seedance
-  redraws such digits and letters wrongly; `assemble` copies the pixels that stay still inside the box (icon, panel and
-  the digits they enclose) back from the original, frame by frame. Only screen-fixed elements.
-- `overlays`: screen-fixed, flat 2D text and UI the program burns in after the restyle, so they are always exact
-  (captions, labels, banners, buttons the models garble). Each item:
-  `{"what": "the caption \"Caught a big tuna!\" at the bottom", "poly": [[x, y], ...] | "box": [x0, y0, x1, y1], "start": s, "end": s,
-  "shape": "box" | "ellipse", "colors": ["#ffffff"], "tolerance": 60, "ai": "remove" | "keep"}`, or a drawn one
-  with `"text": "钓到大金枪鱼！"` and `"color"`, `"stroke"`, `"fill"` (`#rrggbb[aa]`), `"font"` (`bold`, `regular`,
-  `heavy` or a font file).
-  - Region: `box` or `poly` (points, fractions of the frame), hugging the element: whatever it holds comes from the
-    original (or the drawn text) instead of the restyle. A translucent plate keeps the original's tint, like the HUD.
-  - `colors`: only original pixels close to these colours come back (`tolerance`, RGB distance, default 60), e.g.
-    white letters over a moving scene.
-  - `ai`: by default (`remove`) `what` joins the removals of the keyframe and video prompts during `start`-`end`,
-    so the models leave the element out and no garbled copy shows around the exact one. `keep` lets the models draw
-    it underneath (only when the burn covers it fully).
+- `ui`: screen-fixed interface and text kept as in the original and drawn by the image and video models (nothing
+  is copied back or burned in): HUD counters, timers and scores, buttons, captions, labels, banners, and the game
+  logos and warning lines (kept by default). Each item: `{"what": text, "start": s, "end": s, "box": [x0, y0, x1, y1]}`;
+  `start`/`end` when it shows only part of the time (each prompt names only the items on screen during its
+  keyframe or segment: one named where it is not shown gets drawn there), `box` (fractions, a little larger than the
+  element) for the review's close-up check.
+  - `what`, in English, is all the models get, so write it like a spec: the place on screen, the exact text or
+    digits in quotes in the original's language and characters, the font weight, colours, outline and plate, the
+    size (`one line of small grey text "健康游戏忠告：…" along the bottom edge`). The prompts add that the interface
+    is a flat 2D layer, sharp, untextured, copied character by character, one copy each, and (for Seedance) stable
+    from frame to frame.
+  - Changing numbers: say how they change and when (`counts up from "12,580" at 0 s to "15,200" at 3 s`); a counter
+    that changes often gets one timed item per stretch, and `split_at` where it jumps keeps each segment's values few.
+  - A logo that moves to another corner is one timed item per corner; time the switch to the frame.
   - Only screen-fixed, flat elements. UI standing in the scene (floor price tags, bubbles over characters, signs in
-    perspective) and text with complex motion stay with the models. Never add text or UI the original does not show.
+    perspective) is part of the scene: the models keep it with the rest of the picture.
+  - Long lines of small Chinese text and many changing digits are what the models get wrong most often: check them
+    on the keyframes first.
 - `style_ref`: a texture reference for the anchor keyframe: an image path, or `{"path": <image or video>, "at":
   <seconds, for a video>, "box": [x0, y0, x1, y1]}` (fractions; crop away logos, warning lines and objects that could
   be copied). Stored as `keyframes/<id>-styleref.png`; keyframes and segments follow the anchor.
@@ -145,8 +144,8 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   too. To leave a live-action opening out of the delivery instead, start `keep` after it.
 - `like`: the same ad in another size (the portrait of a landscape source; a separate framing, not a crop). The
   source takes the named twin's `keep`, `materials`, `extra`, `anchor`, `split_at`, `max_segment_seconds`,
-  `chain_prefix` and `live` (its own keys win; an inherited `keep` ends at its own length) and `style_from` the twin; `remove`,
-  `hud` and `overlays` are its own, since the boxes sit elsewhere in another framing. The twin must have its own edits,
+  `chain_prefix` and `live` (its own keys win; an inherited `keep` ends at its own length) and `style_from` the twin; `remove`
+  and `ui` are its own, since the boxes and places sit elsewhere in another framing. The twin must have its own edits,
   no `like` and no `skip`; lengths more than 0.3 s apart need an own `keep` (another cut: check the times). Each
   segment spanning the same seconds as one of the twin's (within 0.1 s, the same seam kind) also takes that segment's
   corrective sentences (`redo --prompt`, listed first; `redo --replace-prompt` on the segment drops them).
@@ -192,7 +191,7 @@ rest of its chain again. Edit the edits file, not the plan.
   - `wipes`: per wiped logo corner the `share` of fine detail inside the wiped letters against the scene around
     them and the `verdict` (clean, soft below 0.6, smeared below 0.4, plain when the scene is too plain to tell),
     with the moments it was smeared.
-  - colour corrections, HUD mattes, overlays (frames they cover), segment times in the delivered video.
+  - colour corrections, segment times in the delivered video.
 - `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments, description and triage
   hint; `temp/review/issues/<id>-r<n>-p<k>.jpg`: the stills of every issue (upper row original, lower row restyled).

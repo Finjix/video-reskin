@@ -69,15 +69,20 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
         "Use names that cannot be confused with "
         "another object (whole fish vs fish steaks, cash vs food). start/end = when it is on screen; always = on "
         "screen during the whole video. If an object changes colour, list each colour as its own item with its times.",
-        "- logos: game logos, watermarks and warning or disclaimer lines, each `what` naming the element and its text "
-        "(e.g. the game logo \"WHITEOUT SURVIVAL\" in the top-right corner, the small white warning text at the "
-        "bottom of the frame), with times and a box [x0, y0, x1, y1] "
+        "Logos, screen-fixed text and HUD are drawn by the image and video models from these descriptions, so each "
+        "`what` of logos, screen_text and hud names its place on the screen, its exact text or digits in quotes "
+        "(the original's language and characters, copied exactly), its colours, outline and plate, and its size "
+        "(e.g. the game logo \"WHITEOUT SURVIVAL\" in white and gold letters in the top-right corner; one line of "
+        "small grey text \"健康游戏忠告：抵制不良游戏\" along the bottom edge).",
+        "- logos: game logos, watermarks and warning or disclaimer lines, with times and a box [x0, y0, x1, y1] "
         "(fractions). A logo that moves to another corner is two items.",
         "- screen_text: other text and flat UI: captions, labels, banners, buttons. fixed = true when it stays at one "
         "place on the screen while the scene moves (it does not move with the 3D scene); price tags standing on the "
         "floor, bubbles over characters or signs in perspective are fixed = false. Give the exact text and a box.",
         "- hud: screen-fixed counters with changing numbers (coins, timers, scores) with a box slightly larger than "
-        "the element.",
+        "the element; `what` also says how the number changes over time (e.g. counts up from \"12,580\" at 0 s to "
+        "\"15,200\" at 3 s, then stays). A counter whose numbers change many times is one item per stretch with its "
+        "values.",
         "- live_action: every stretch that is not game footage: live-action video (real people, real cars, real "
         "landscapes or weather filmed with a camera), real photos, and real human faces pasted onto game objects; "
         "start/end at the hard cuts around it. The game itself, its rendered cutscenes and the end card are not "
@@ -88,14 +93,15 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
     if edits_row:
         lines += [
             "- edits_check: an agent wrote these edits for this video: "
-            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "hud", "overlays", "live")
+            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "ui", "live")
                           if k in edits_row},
                          ensure_ascii=False),
             "Check every `materials` and `remove` item: ok; not_on_screen (the video never shows it: naming it makes the "
             "model draw it); wrong_time (shown only part of the time but untimed, or the times are wrong: give the "
             "right ones); wrong_colour; ambiguous (another object could be turned into it). Add `missing` items for "
-            "prominent objects whose colour should be named, screen-fixed logos or warning lines that are not in `hud` "
-            "(they are kept, copied from the original), and "
+            "prominent objects whose colour should be named, screen-fixed logos, warning lines, text, buttons or HUD that "
+            "are not in `ui` (the models draw them from it), `ui` items whose text, digits, place or times differ from "
+            "the video (field ui, verdict wrong_time or ambiguous, with the right description), and "
             "live-action stretches that are not in `live` (or `live` items that show the game). "
             "`suggestion` (in English, as it would go into the prompt) says what to write instead.",
         ]
@@ -130,18 +136,22 @@ def draft(facts: dict, catalog_row: dict) -> dict:
             return item["what"]
         return {"what": item["what"], "start": start, "end": stop}
     row = {"keep": keep, "materials": [timed(o) for o in facts.get("objects") or [] if o.get("what")]}
-    # Logos and warning lines stay (the user's standing request): like HUD counters, their pixels are copied back
-    # from the original, so the models can neither garble nor restyle them. `remove` is only for what the user asks
-    # to delete.
-    hud = [{"box": box, "what": h["what"], "start": round(float(h["start"]), 2), "end": round(float(h["end"]), 2)}
-           for h in [*(facts.get("hud") or []), *(facts.get("logos") or [])] if h.get("what")
-           and (box := _box(h.get("box"))) and (box[2] - box[0]) * (box[3] - box[1]) <= .15]
-    if hud:
-        row["hud"] = hud
-    overlays = [{"what": t["what"], "box": box, "start": round(float(t["start"]), 2), "end": round(float(t["end"]), 2)}
-                for t in facts.get("screen_text") or [] if t.get("fixed") and (box := _box(t.get("box")))]
-    if overlays:
-        row["overlays"] = overlays
+    # Logos, warning lines, HUD and screen-fixed text and UI stay as in the original (the user's standing request);
+    # the models draw them from these descriptions (nothing is copied back or burned in). `remove` is only for what
+    # the user asks to delete.
+    def ui_item(item, text=""):
+        what = item["what"] if not text or f'"{text}"' in item["what"] else f'{item["what"]} reading "{text}"'
+        entry = {"what": what, "start": round(float(item.get("start", 0)), 2),
+                 "end": round(float(item.get("end", keep[1])), 2)}
+        if (box := _box(item.get("box"))):
+            entry["box"] = box
+        if entry["start"] <= keep[0] + .3 and entry["end"] >= keep[1] - .3:
+            del entry["start"], entry["end"]
+        return entry
+    ui = [ui_item(h) for h in [*(facts.get("hud") or []), *(facts.get("logos") or [])] if h.get("what")]
+    ui += [ui_item(t, t.get("text", "")) for t in facts.get("screen_text") or [] if t.get("fixed") and t.get("what")]
+    if ui:
+        row["ui"] = ui
     live = [{"what": item["what"], "start": round(max(keep[0], float(item["start"])), 2),
              "end": round(min(keep[1], float(item["end"])), 2)}
             for item in facts.get("live_action") or [] if item.get("what")]

@@ -52,13 +52,20 @@ def listing(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
 
 
-def remove_clause(items: list[str], burned: list[str] | None = None) -> str:
-    """The removal sentence, then the one for elements the program burns in afterwards (the models leave them out,
-    so no garbled copy shows next to the exact one)."""
+def remove_clause(items: list[str]) -> str:
+    """The removal sentence."""
+    return read(PROMPTS)["remove"].format(items=listing(items)) + " " if items else ""
+
+
+def ui_clause(row: dict, kind: str, span: tuple[float, float] | None) -> str:
+    """The screen-fixed interface the models draw exactly as in the original (`ui`), each element named with its
+    position, quoted text and colours; for Seedance also that it stays stable and follows the original's numbers.
+    Only the elements on screen during `span`: one named where it is not shown gets drawn there."""
     texts = read(PROMPTS)
-    parts = [texts["remove"].format(items=listing(items))] if items else []
-    if burned:
-        parts.append(texts["burn"].format(items=listing(burned)))
+    shown = on_screen(row.get("ui"), span)
+    parts = [texts["ui"].format(items="; ".join(shown))] if shown else []
+    if kind == "video":
+        parts.append(texts["ui_video"])
     return " ".join(parts) + (" " if parts else "")
 
 
@@ -67,11 +74,6 @@ def wiped_clause(items: list, span: tuple[float, float] | None) -> str:
     fill as a blurred patch (S01/S09 of the 1080p batch, every corner); naming the logo instead made it draw one."""
     spots = list(dict.fromkeys(where(item["box"]) for item in timed([i for i in items if is_wiped(i)], span)))
     return read(PROMPTS).get("wiped", "").format(where=listing(spots)) + " " if spots else ""
-
-
-def burned_items(row: dict) -> list:
-    """Overlays the models should leave out: every `overlays` item unless it says "ai": "keep"."""
-    return [item for item in row.get("overlays") or [] if item.get("ai", "remove") == "remove"]
 
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
@@ -86,12 +88,13 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
         # Wiped items stay unnamed for Seedance (naming a logo made it draw one, even over a wiped corner); the
         # prompt only says where the wiped patches are, so it paints scene there instead of keeping the smear.
         told = [i for i in items if not is_wiped(i)]
-        removal = remove_clause(on_screen(told, span), on_screen(burned_items(row), span)) + wiped_clause(items, span)
+        removal = remove_clause(on_screen(told, span)) + wiped_clause(items, span)
     else:
         # GPT Image sees the original frame, logo included, and removes what it is told to.
-        removal = remove_clause(on_screen(items, span), on_screen(burned_items(row), span))
+        removal = remove_clause(on_screen(items, span))
     spaced = lambda value: f"{value} " if value else ""      # English sentences need the space Chinese did not
-    text = style[kind].format(materials=materials, remove=removal, look=spaced(style.get("look", "")),
+    text = style[kind].format(materials=materials, remove=removal, ui=ui_clause(row, kind, span),
+                              look=spaced(style.get("look", "")),
                               rebuild=spaced(style.get("rebuild", "")), extra=wishes,
                               style_ref=spaced(style.get("style_ref", "")) if style_ref else "")
     return " ".join(text.split())

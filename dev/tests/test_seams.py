@@ -90,12 +90,5 @@ class LookTests(unittest.TestCase):
         self.assertEqual(assemble._phase_shift(a, b), (3, -2))
 
 
-class HudTests(unittest.TestCase):
-    def test_hud_boxes(self):
-        self.assertIsNone(plan.hud_problem([{"box": [0, .1, .28, .15], "what": "金币"}]))
-        for bad in ([{"box": [.3, .1, .2, .15]}], [{"box": [0, 0, .9, .9]}], [{"rect": [0, 0, .1, .1]}], {"box": []}):
-            self.assertIsNotNone(plan.hud_problem(bad))
-
-
 if __name__ == "__main__":
     unittest.main()
