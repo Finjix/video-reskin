@@ -40,10 +40,9 @@ def image_path(job: Path, source_id: str, moment: float) -> Path:
 def corrections(job: Path, source_id: str, row: dict, moment: float) -> str:
     """The corrective sentences (`redo --prompt`) of the segment that delivers `moment`, told which second of the
     segment this frame is (the sentences name moments in segment seconds: "about 16 s into this segment...")."""
-    path = job / "config/redo.json"
-    redo = read(path) if path.is_file() else {}
+    from reskin.render import corrections as segment_corrections
     seg = segment_at(row, moment)
-    text = redo.get(f"{source_id}:{seg['id']}", {}).get("prompt", "")
+    text = segment_corrections(job, f"{source_id}:{seg['id']}", seg)
     if not text:
         return ""
     return (f"This picture is the frame {moment - seg['render_frames'][0] / row['fps']:.0f} s into its segment (the "
@@ -56,6 +55,8 @@ def make(job: Path, state: dict, source_id: str, row: dict, style: dict, moment:
     folder = job / "keyframes/preview"
     name = f"{source_id}-{moment:07.2f}"
     frame = round(moment * row["fps"])
+    if segment_at(row, moment).get("live"):
+        raise ValueError(f"{moment:g} s lies in a live-action span: delivered from the original, nothing to preview")
     original = grab(Path(sources[source_id]["path"]), frame, row["fps"], folder / f"{name}-src.png")
     anchor = job / "keyframes" / f"{source_id}-anchor.png"
     prompt = compose(style, "keyframe", row, extra=corrections(job, source_id, row, moment), span=(moment, moment))

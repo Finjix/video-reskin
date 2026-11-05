@@ -153,14 +153,27 @@ def _rules() -> list[str]:
     ]
 
 
+def live_spans(assembled: dict) -> list[tuple[float, float]]:
+    """Live-action stretches on the delivered clock: the original's own frames, never restyled."""
+    return [(s["start"], s["end"]) for s in assembled.get("segments") or [] if s.get("live")]
+
+
+def inside_live(assembled: dict, start: float, end: float) -> bool:
+    return any(a - .15 <= start and end <= b + .15 for a, b in live_spans(assembled))
+
+
 def prompt(state: dict, plan_row: dict, assembled: dict, layout: str, known: list[str] | None = None) -> str:
     seams = ", ".join(f"{s['time']:.2f} s ({'hard cut' if s['seam'] == 'cut' else 'inside a shot'})"
                       for s in assembled["seams"]) or "none"
+    live = live_spans(assembled)
     lines = [
         *_goal(state, plan_row, layout, "video"),
         f"The restyled video was rendered in segments and joined at: {seams}. Check these moments closely: inside a "
         "shot the restyled scene must continue unchanged (same terrain, objects, rope and cable colours, textures, "
         "light); any change, dissolve or double image there is a seam_color defect.",
+        *([f"These stretches are live-action footage, not the game, delivered unchanged from the original on purpose: "
+           f"{', '.join(f'{a:.2f}-{b:.2f} s' for a, b in live)}. Both sides show the same there; do not report them "
+           "as unchanged, not restyled or not realistic, and leave them out of `realism`."] if live else []),
         *_rules(), *_known(known),
     ]
     return "\n".join(lines)
@@ -661,6 +674,8 @@ def identity_references(job: Path, source_id: str, plan_row: dict, segment_ids: 
              folder / f"{source_id}-anchor.png")]
     head = None
     for seg in plan_row["segments"]:
+        if seg.get("live"):
+            continue
         if seg["seam"] != "continuous":
             head = seg
         if segment_ids is None or seg["id"] in segment_ids:
@@ -713,7 +728,7 @@ def wipe_sheets(plan_row: dict, assembled: dict, source_path: str, stem: Path) -
             continue
         a = max(keep_start, float(item.get("start", keep_start))) - keep_start
         b = min(keep_end, float(item.get("end", keep_end))) - keep_start
-        times = wipe_times(a, b)
+        times = [t for t in wipe_times(a, b) if not inside_live(assembled, t, t)]
         if not times:
             continue
         x0, y0, x1, y1 = item["box"]
@@ -1060,14 +1075,16 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
                                                  known=accepted_notes(job, source_id))}], schema=SCHEMA)
     ledger.add(job, kind="gemini", purpose="review", key=source_id, seconds=assembled["duration"])
     issues = []
-    for number, issue in enumerate(answer.get("issues") or [], 1):
+    for issue in answer.get("issues") or []:
         a, b = float(issue.get("start", 0)), float(issue.get("end", issue.get("start", 0)))
         a, b = min(a, b), max(a, b)
-        issues.append({"n": number, **issue, "start": round(a, 2), "end": round(b, 2),
+        if inside_live(assembled, a, b):
+            continue        # the original's own frames, delivered as they are
+        issues.append({"n": len(issues) + 1, **issue, "start": round(a, 2), "end": round(b, 2),
                        "segments": segment_for(a, b, assembled), "source": "gemini"})
     def add(**issue):
         issues.append({"n": len(issues) + 1, **issue})
-    realism = realism_ranges(answer)
+    realism = [r for r in realism_ranges(answer) if not inside_live(assembled, r["start"], r["end"])]
     for issue in realism_issues(realism, issues):
         add(**issue, source="gemini-realism", segments=segment_for(issue["start"], issue["end"], assembled))
     for seam in assembled.get("colour") or []:

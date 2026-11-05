@@ -39,6 +39,47 @@ def redo_log(job: Path) -> dict:
     return read(path) if path.is_file() else {}
 
 
+def corrections(job: Path, key: str, seg: dict) -> str:
+    """The corrective sentences of a segment (`redo --prompt`), one per line: those of its `like` twin's segment over
+    the same seconds first (fixes found on the twin, until `redo --replace-prompt` here drops them), then its own."""
+    log = redo_log(job)
+    own = log.get(key, {})
+    sentences = []
+    if seg.get("like") and own.get("inherit", True):
+        sentences += [s for s in (log.get(seg["like"], {}).get("prompt") or "").split("\n") if s]
+    sentences += [s for s in (own.get("prompt") or "").split("\n") if s and s not in sentences]
+    return "\n".join(sentences)
+
+
+def twin_waits(job: Path, state: dict, plan: dict, only: set[str] | None = None) -> dict[str, str]:
+    """`like` sources whose twin is not settled yet: not delivered, not reviewed since its last change, or with redos
+    queued. They render afterwards, so the twin's fixes (corrective sentences, split times) reach them before they
+    are paid for. A source named in `only` renders anyway."""
+    from reskin import assemble as ASSEMBLE, review as REVIEW
+    log, waits = redo_log(job), {}
+    for sid, row in plan["sources"].items():
+        twin = row.get("like")
+        if not twin or twin not in plan["sources"]:
+            continue
+        if only and any(k == sid or k.startswith(f"{sid}:") for k in only):
+            continue
+        trow = plan["sources"][twin]
+        pending = []
+        for seg in (s for s in trow["segments"] if not s.get("live")):
+            key = f"{twin}:{seg['id']}"
+            record = read(state_path(job, key)) if state_path(job, key).is_file() else {}
+            if log.get(key, {}).get("attempt", 1) > record.get("attempt", 1):
+                pending.append(seg["id"])
+        if pending:
+            waits[sid] = f"waits for the redos of {twin} ({', '.join(pending)}) and their review"
+            continue
+        assembled = ASSEMBLE.current(job, state, twin, trow)
+        last = REVIEW.last_round(job, twin)
+        if assembled is None or not last or last.get("assembled") != assembled.get("inputs"):
+            waits[sid] = f"waits until {twin} is delivered and reviewed"
+    return waits
+
+
 def chains(plan_row: dict) -> list[list[dict]]:
     """Segments grouped by camera shot: a new chain starts at the first segment and after every hard cut."""
     groups: list[list[dict]] = []
@@ -258,7 +299,7 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     key = f"{source_id}:{seg['id']}"
     redo = redo_log(job).get(key, {})
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
-    extra = redo.get("prompt", "")
+    extra = corrections(job, key, seg)
     lead = {}
     if seg["seam"] == "continuous":
         if previous is None or not previous.get("generation_id"):
@@ -426,20 +467,23 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     return {**record, "key": key, "reused": False}
 
 
-def plan_order(plan: dict, only: set[str] | None = None) -> list[tuple[str, dict, list[dict]]]:
-    """Chains to render, the longest first, so the batch is not left waiting on one long chain started last."""
+def plan_order(plan: dict, only: set[str] | None = None,
+               hold: set[str] | None = None) -> list[tuple[str, dict, list[dict]]]:
+    """Chains to render, the longest first, so the batch is not left waiting on one long chain started last; the
+    sources in `hold` (see twin_waits) are left out."""
     groups = [(sid, row, members) for sid, row in plan["sources"].items() for members in chains(row)
-              if not only or sid in only or any(f"{sid}:{seg['id']}" in only for seg in members)]
+              if sid not in (hold or ()) and not all(seg.get("live") for seg in members)
+              and (not only or sid in only or any(f"{sid}:{seg['id']}" in only for seg in members))]
     return sorted(groups, key=lambda group: -sum(seg["seconds"] for seg in group[2]))
 
 
 def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None = None, workers: int = 4,
-            gate: bool = True, on_source_done=None) -> list[dict]:
+            gate: bool = True, on_source_done=None, hold: set[str] | None = None) -> list[dict]:
     """Render every selected chain. With `gate`, each segment that has a successor is checked before the successor
     starts; a held segment stops its chain (`held`, the rest `waiting`). `on_source_done(source_id, results)` is
     called as soon as every chain of a source has finished, so its assembly and review need not wait for the batch."""
     from reskin import gate as GATE
-    groups = plan_order(plan, only)
+    groups = plan_order(plan, only, hold)
     todo = [(sid, row, seg) for sid, row, members in groups for seg in members]
     log(f"rendering {len(todo)} segments in {len(groups)} chains, {workers} chains at a time, longest first "
         "(segments of one chain follow each other; each takes a few minutes on Lumos)"
@@ -532,6 +576,7 @@ def bump(job: Path, key: str, reason: str, prompt: str | None = None, replace: b
         row["reasons"].append(reason)
         if replace:
             row.pop("prompt", None)
+            row["inherit"] = False      # a `like` twin's sentences go too
         if prompt and prompt.strip():
             sentences = [s for s in (row.get("prompt") or "").split("\n") if s]
             if prompt.strip() not in sentences:

@@ -33,13 +33,16 @@ SCHEMA = {
         "hud": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "what": {"type": "STRING"}, "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}, "box": BOX},
             "required": ["what", "start", "end", "box"]}},
+        "live_action": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "what": {"type": "STRING"}, "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}},
+            "required": ["what", "start", "end"]}},
         "end_card_start": {"type": "NUMBER"},
         "edits_check": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "field": {"type": "STRING"}, "what": {"type": "STRING"},
             "verdict": {"type": "STRING", "enum": ["ok", "not_on_screen", "wrong_time", "wrong_colour", "ambiguous",
                                                     "missing"]},
             "suggestion": {"type": "STRING"}}, "required": ["field", "what", "verdict", "suggestion"]}}},
-    "required": ["objects", "logos", "screen_text", "hud", "end_card_start", "edits_check"]}
+    "required": ["objects", "logos", "screen_text", "hud", "live_action", "end_card_start", "edits_check"]}
 
 
 def proxy(source: Path, output: Path) -> Path:
@@ -75,18 +78,24 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
         "floor, bubbles over characters or signs in perspective are fixed = false. Give the exact text and a box.",
         "- hud: screen-fixed counters with changing numbers (coins, timers, scores) with a box slightly larger than "
         "the element.",
+        "- live_action: every stretch that is not game footage: live-action video (real people, real cars, real "
+        "landscapes or weather filmed with a camera), real photos, and real human faces pasted onto game objects; "
+        "start/end at the hard cuts around it. The game itself, its rendered cutscenes and the end card are not "
+        "live_action. An empty list when there is none.",
         "- end_card_start: the second where the closing card begins (the transition into it included: wipe, flash, "
         "blur, logo zoom); the duration if there is none.",
     ]
     if edits_row:
         lines += [
             "- edits_check: an agent wrote these edits for this video: "
-            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "hud", "overlays") if k in edits_row},
+            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "hud", "overlays", "live")
+                          if k in edits_row},
                          ensure_ascii=False),
             "Check every `materials` and `remove` item: ok; not_on_screen (the video never shows it: naming it makes the "
             "model draw it); wrong_time (shown only part of the time but untimed, or the times are wrong: give the "
             "right ones); wrong_colour; ambiguous (another object could be turned into it). Add `missing` items for "
-            "prominent objects whose colour should be named, and logos or warning lines that are not in `remove`. "
+            "prominent objects whose colour should be named, logos or warning lines that are not in `remove`, and "
+            "live-action stretches that are not in `live` (or `live` items that show the game). "
             "`suggestion` (in English, as it would go into the prompt) says what to write instead.",
         ]
     else:
@@ -130,6 +139,12 @@ def draft(facts: dict, catalog_row: dict) -> dict:
                 for t in facts.get("screen_text") or [] if t.get("fixed") and (box := _box(t.get("box")))]
     if overlays:
         row["overlays"] = overlays
+    live = [{"what": item["what"], "start": round(max(keep[0], float(item["start"])), 2),
+             "end": round(min(keep[1], float(item["end"])), 2)}
+            for item in facts.get("live_action") or [] if item.get("what")]
+    live = [item for item in live if item["end"] - item["start"] >= .2]
+    if live:
+        row["live"] = live
     return row
 
 
@@ -170,6 +185,8 @@ def markdown(rows: list[tuple[str, dict]]) -> str:
         lines.append("logos/warnings: " + ("; ".join(f"{o['what']} ({o['start']:g}-{o['end']:g} s)" for o in facts.get("logos") or []) or "none"))
         lines.append("screen text: " + ("; ".join(f"{o['what']} 「{o.get('text', '')}」 ({'fixed' if o.get('fixed') else 'in scene'}, "
                                                f"{o['start']:g}-{o['end']:g} s)" for o in facts.get("screen_text") or []) or "none"))
+        lines.append("live-action (not game, delivered from the original): " + ("; ".join(
+            f"{o['what']} ({o['start']:g}-{o['end']:g} s)" for o in facts.get("live_action") or []) or "none"))
         lines.append("hud: " + ("; ".join(f"{o['what']} {o.get('box')}" for o in facts.get("hud") or []) or "none"))
         problems = [c for c in facts.get("edits_check") or [] if c.get("verdict") != "ok"]
         if facts.get("edits_check"):

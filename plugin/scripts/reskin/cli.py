@@ -112,8 +112,12 @@ def cmd_plan(args) -> int:
     for source_id, row in plan["sources"].items():
         cuts = sum(1 for s in row["segments"] if s["seam"] == "cut")
         inner = sum(1 for s in row["segments"] if s["seam"] == "continuous")
+        live = [s for s in row["segments"] if s.get("live")]
         lines.append(f"{source_id}: keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, {len(row['segments'])} segments "
-                     f"({cuts} seams at cuts, {inner} inside shots), anchor {row['anchor']:.2f} s, "
+                     f"({cuts} seams at cuts, {inner} inside shots"
+                     + (f"; live-action from the original: {', '.join(f'{s['start']:.2f}-{s['end']:.2f} s' for s in live)}"
+                        if live else "")
+                     + f"), anchor {row['anchor']:.2f} s, "
                      f"remove: {describe(row['remove']) or 'nothing'}")
     if missing:
         lines.append(f"note: no edits for {', '.join(missing)} (defaults used: keep up to the end-card candidate)")
@@ -187,12 +191,18 @@ def cmd_render(args) -> int:
     runtime.ensure("media")
     from reskin import render as RENDER
     from reskin.common import job_lock
+    waits = RENDER.twin_waits(job, state, plan, selection(args.only))
     with job_lock(job, "render"):
         results = RENDER.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers,
-                                 gate=not args.no_gate)
+                                 gate=not args.no_gate, hold=set(waits))
     lines, failed = render_lines(job, results)
-    show(lines)
+    show(wait_lines(waits) + lines)
     return RULE_FAILURE if failed else 0
+
+
+def wait_lines(waits: dict[str, str]) -> list[str]:
+    return [f"{sid}: not rendered, {why} (like); --only {sid} renders it now, without fixes found later"
+            for sid, why in waits.items()]
 
 
 def cmd_assemble(args) -> int:
@@ -341,6 +351,9 @@ def cmd_redo(args) -> int:
         if not row or segment_id not in {s["id"] for s in row["segments"]}:
             raise ValueError(f"unknown segment {key}; segments look like S01:K02 (see reports/plan.md)")
         seg = next(s for s in row["segments"] if s["id"] == segment_id)
+        if seg.get("live"):
+            raise ValueError(f"{key} is live-action, delivered from the original (nothing is rendered there); if it "
+                             f"is game footage, change `live` in the edits and plan again")
         if args.keyframe and seg["seam"] == "continuous":
             head = next(s["id"] for s in reversed(row["segments"][:row["segments"].index(seg) + 1])
                         if s["seam"] != "continuous")
@@ -493,12 +506,13 @@ def cmd_run(args) -> int:
             return
         log(f"{source_id}: all segments ready; assembling and reviewing while the rest renders")
         futures.append(pool.submit(follow_up, source_id))
+    waits = RENDER.twin_waits(job, state, plan, only)
     with job_lock(job, "render"):
         results = RENDER.run_all(job, state, plan, style, only, workers=args.workers, gate=not args.no_gate,
-                                 on_source_done=done)
+                                 on_source_done=done, hold=set(waits))
     pool.shutdown(wait=True)
     lines, failed = render_lines(job, results)
-    lines = lines[:-1]
+    lines = wait_lines(waits) + lines[:-1]
     for source_id in plan["sources"]:
         lines += reports.get(source_id, [])
     lines.append(REVIEW_NEXT + "; held segments: look at their stills first (accept or redo); run again afterwards "
@@ -519,8 +533,8 @@ def cmd_status(args) -> int:
     elif not plan["sources"]:
         step = "plan --edits <edits.json>"
     for source_id, row in plan["sources"].items():
-        keys = [s["id"] for s in row["segments"]]
-        needed = ["anchor", *(s["id"] for s in row["segments"] if s["seam"] != "continuous")]
+        keys = [s["id"] for s in row["segments"] if not s.get("live")]
+        needed = ["anchor", *(s["id"] for s in row["segments"] if s["seam"] != "continuous" and not s.get("live"))]
         frames_ready = sum(1 for k in needed if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
         rendered, held = 0, []
         for k in keys:
@@ -624,7 +638,8 @@ def main() -> None:
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")
     redo.add_argument("--keyframe", action="store_true", help="the keyframe itself is wrong: make it again too")
     redo.add_argument("--replace-prompt", action="store_true",
-                      help="drop this segment's earlier corrective sentences first (one of them made things worse)")
+                      help="drop this segment's earlier corrective sentences first, those taken from a like twin "
+                           "included (one of them made things worse)")
     lint = command("lint", cmd_lint, help="Gemini lists what each source shows, checks the edits, drafts edits")
     lint.add_argument("--edits", type=Path, help="edits JSON to check")
     lint.add_argument("--only", nargs="*", help="source IDs")

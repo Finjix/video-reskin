@@ -9,7 +9,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `login [--timeout 300]` | Feishu QR login to Lumos (opens the QR image; refreshes it when it expires) | until scanned |
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
-| `lint [--edits <json>] [--only S01]` | Gemini lists objects (colours, times), logos and warning lines, screen-fixed text, HUD and the end card; checks the edits; drafts `config/edits.draft.json` → `catalog/lint.md`, `catalog/<id>-lint.jpg` | ~1 min per source |
+| `lint [--edits <json>] [--only S01]` | Gemini lists objects (colours, times), logos and warning lines, screen-fixed text, HUD, live-action stretches and the end card; checks the edits; drafts `config/edits.draft.json` → `catalog/lint.md`, `catalog/<id>-lint.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos, quality high, 2K) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
 | `preview --only S01 --at T [T...] [--redo]` | GPT Image previews of at most 4 moments of one source, with the texts the video prompt uses there and the segment's corrective sentences; only looked at → `sheets/<id>-preview.jpg` | ~1-2 min per image |
@@ -72,7 +72,10 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
                      {"what": "the game logo \"WHITEOUT SURVIVAL\" in the bottom-left corner", "start": 35, "end": 65.7, "box": [0.0, 0.85, 0.36, 1.0]}],
           "hud": [{"box": [0.0, 0.099, 0.28, 0.152], "what": "the coin counter at the top left"}],
           "anchor": 36.5},
-  "S02": {"keep": [0, 61.0], "style_from": "S01"}}}
+  "S02": {"keep": [0, 61.0], "style_from": "S01"},
+  "S03": {"like": "S01",
+          "remove": [{"what": "the game logo \"WHITEOUT SURVIVAL\" in the top-left corner", "box": [0.0, 0.0, 0.3, 0.06]}],
+          "hud": [{"box": [0.0, 0.05, 0.3, 0.09], "what": "the coin counter at the top left"}]}}}
 ```
 
 - `keep`: `[start, end]` seconds of the source to deliver. The end is the last moment before the end card (its
@@ -128,6 +131,23 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   <seconds, for a video>, "box": [x0, y0, x1, y1]}` (fractions; crop away logos, warning lines and objects that could
   be copied). Stored as `keyframes/<id>-styleref.png`; keyframes and segments follow the anchor.
 - `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
+- `live`: stretches that are not game footage (live-action video of real people, cars, landscapes or weather; real
+  photos; a real human face pasted onto a game object): `[{"start": s, "end": s, "what": text}]`, not overlapping,
+  timed to the hard cuts around them (an end within 0.25 s of a camera cut snaps onto it). Each becomes a segment of
+  its own (`"live": true` in the plan, hard cuts on both sides) whose frames `assemble` takes from the original; no
+  keyframe, no Seedance, no segment check, and the review leaves its issues and realism out. The anchor never lies in
+  one. Gameplay shorter than 4 s next to a live span is refused (Seedance takes 4 s at least): let the live span cover
+  it. `remove` items over a live span stay visible there (`reports/plan.md` notes them). A `like` twin takes `live`
+  too. To leave a live-action opening out of the delivery instead, start `keep` after it.
+- `like`: the same ad in another size (the portrait of a landscape source; a separate framing, not a crop). The
+  source takes the named twin's `keep`, `materials`, `extra`, `anchor`, `split_at`, `max_segment_seconds`,
+  `chain_prefix` and `live` (its own keys win; an inherited `keep` ends at its own length) and `style_from` the twin; `remove`,
+  `hud` and `overlays` are its own, since the boxes sit elsewhere in another framing. The twin must have its own edits,
+  no `like` and no `skip`; lengths more than 0.3 s apart need an own `keep` (another cut: check the times). Each
+  segment spanning the same seconds as one of the twin's (within 0.1 s, the same seam kind) also takes that segment's
+  corrective sentences (`redo --prompt`, listed first; `redo --replace-prompt` on the segment drops them).
+  `render` and `run` leave the source out until the twin's delivery is current, reviewed since its last change and has
+  no redo queued; `--only <id>` renders it anyway. `reports/plan.md` lists which segments take the twin's fixes.
 - `extra`: one short English sentence added to every prompt of the source (e.g. `The snow stays pure white.`).
 - `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment (keep a seam
   off an effect burst or a fast camera move). Inside a shot it is a chained seam like any other. Corrective

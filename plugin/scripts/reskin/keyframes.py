@@ -78,8 +78,9 @@ def tasks(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None
         rows.append({"key": f"{source_id}:anchor", "source": source_id, "path": sources[source_id]["path"], "fps": fps,
                      "frame": anchor_frame, "kind": "anchor", "row": row, "selected": wanted(f"{source_id}:anchor")})
         for seg in row["segments"]:
-            if seg["seam"] == "continuous":
-                continue        # chained: starts from the previous segment's result (render), no keyframe
+            if seg["seam"] == "continuous" or seg.get("live"):
+                continue        # chained: starts from the previous segment's result (render), no keyframe; live:
+                #                 delivered from the original
             rows.append({"key": f"{source_id}:{seg['id']}", "source": source_id, "path": sources[source_id]["path"],
                          "fps": fps, "frame": seg["render_frames"][0], "kind": "segment", "row": row,
                          "selected": wanted(f"{source_id}:{seg['id']}")})
@@ -157,7 +158,7 @@ def _safe(job, task, style, lock) -> dict:
 def sheet(job: Path, source_id: str, row: dict) -> Path | None:
     """Original | styled pairs (anchor first) for the agent to judge."""
     folder = job / "keyframes"
-    keys = ["anchor"] + [seg["id"] for seg in row["segments"] if seg["seam"] != "continuous"]
+    keys = ["anchor"] + [seg["id"] for seg in row["segments"] if seg["seam"] != "continuous" and not seg.get("live")]
     pairs = [(key, folder / f"{source_id}-{key}-src.png", folder / f"{source_id}-{key}.png") for key in keys]
     pairs = [p for p in pairs if p[1].is_file() and p[2].is_file()]
     if not pairs:

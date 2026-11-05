@@ -118,5 +118,97 @@ class EditsTests(unittest.TestCase):
                     plan.check_edits({"sources": {"S01": {"style_ref": bad}}}, {}, catalog)
 
 
+def twin_catalog(duration_b=60.0):
+    a = catalog_row(60.0, 30.0, cuts=(20.0,))
+    b = {**catalog_row(duration_b, 30.0, cuts=(20.0,)), "id": "S02"}
+    return {"sources": [a, b]}
+
+
+class LikeTests(unittest.TestCase):
+    TWIN = {"keep": [0, 59.9], "materials": ["whole tuna"], "extra": "The snow stays white.", "anchor": 30,
+            "split_at": [40], "remove": [{"what": "the logo top right", "box": [.7, 0, 1, .1]}],
+            "hud": [{"box": [0, 0, .2, .05]}]}
+
+    def edits(self, own, catalog=None):
+        catalog = catalog or twin_catalog()
+        edits = plan.check_edits({"sources": {"S01": dict(self.TWIN), "S02": own}}, {}, catalog)
+        return plan.source_edits(edits, "S02", catalog["sources"][1], {"default_materials": "x"})
+
+    def test_inherits_times_and_texts_not_boxes(self):
+        row = self.edits({"like": "S01", "remove": [{"what": "the logo bottom", "box": [0, .9, .4, 1]}]})
+        self.assertEqual(row["keep"], [0.0, 59.9])
+        self.assertEqual(row["materials"], ["whole tuna"])
+        self.assertEqual(row["extra"], "The snow stays white.")
+        self.assertEqual((row["anchor"], row["split_at"]), (30, [40]))
+        self.assertEqual(row["style_from"], "S01")
+        self.assertEqual(row["remove"], [{"what": "the logo bottom", "box": [0, .9, .4, 1]}])
+        self.assertEqual(row["hud"], [])
+        self.assertEqual(row["like"], "S01")
+
+    def test_own_fields_win(self):
+        row = self.edits({"like": "S01", "extra": "Own.", "anchor": 12, "style_from": None})
+        self.assertEqual((row["extra"], row["anchor"], row["style_from"]), ("Own.", 12, "S01"))
+
+    def test_inherited_keep_ends_with_the_shorter_twin(self):
+        row = self.edits({"like": "S01"}, twin_catalog(59.8))
+        self.assertEqual(row["keep"], [0.0, 59.8])
+
+    def test_rejected(self):
+        for own, catalog in (({"like": "S02"}, None), ({"like": "S09"}, None), ({"like": "S01"}, twin_catalog(55.0))):
+            with self.assertRaises(ValueError):
+                self.edits(own, catalog)
+        self.edits({"like": "S01", "keep": [0, 54]}, twin_catalog(55.0))
+        catalog = {"sources": [*twin_catalog()["sources"], {**catalog_row(), "id": "S03"}]}
+        with self.assertRaises(ValueError):
+            plan.check_edits({"sources": {"S01": {}, "S02": {"like": "S01"}, "S03": {"like": "S02"}}}, {}, catalog)
+        with self.assertRaises(ValueError):
+            plan.check_edits({"sources": {"S01": {"skip": True}, "S02": {"like": "S01"}}}, {}, catalog)
+
+    def test_segments_with_equal_spans_are_linked(self):
+        a = {"like": None, "segments": plan.segment(catalog_row(60.0, 30.0, cuts=(20.0,)), [0, 60], 30, [], [40])}
+        b = {"like": "S01", "segments": plan.segment(catalog_row(60.0, 30.0, cuts=(20.0,)), [0, 60], 30, [], [40])}
+        b["segments"][-1]["end"] += 1      # a span the twin does not have
+        value = {"sources": {"S01": a, "S02": b}}
+        plan.link_twins(value)
+        self.assertEqual([s.get("like") for s in b["segments"]], ["S01:K01", "S01:K02", None])
+        self.assertTrue(all("like" not in s for s in a["segments"]))
+
+    def test_corrections_carry_over_until_replaced(self):
+        import tempfile
+        from pathlib import Path
+        from reskin import render
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            render.bump(job, "S01:K02", "tree turned cartoon", "Keep the trees real.")
+            render.bump(job, "S02:K02", "logo", "Remove the logo.")
+            seg = {"id": "K02", "like": "S01:K02"}
+            self.assertEqual(render.corrections(job, "S02:K02", seg), "Keep the trees real.\nRemove the logo.")
+            self.assertEqual(render.corrections(job, "S02:K03", {"id": "K03"}), "")
+            render.bump(job, "S02:K02", "too much", "Only the logo.", replace=True)
+            self.assertEqual(render.corrections(job, "S02:K02", seg), "Only the logo.")
+
+    def test_twin_waits(self):
+        import tempfile
+        from pathlib import Path
+        try:
+            from reskin import render
+            render.twin_waits     # needs assemble/review (NumPy, Pillow)
+            import numpy, PIL     # noqa: F401
+        except ImportError:
+            self.skipTest("media packages missing")
+        from reskin.common import write
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            value = {"sources": {"S01": {"like": None, "segments": [{"id": "K01", "seam": "start", "seconds": 5}]},
+                                 "S02": {"like": "S01", "segments": [{"id": "K01", "seam": "start", "seconds": 5}]}}}
+            self.assertIn("delivered and reviewed", render.twin_waits(job, {}, value)["S02"])
+            self.assertEqual(render.twin_waits(job, {}, value, {"S02"}), {})
+            write(render.state_path(job, "S01:K01"), {"status": "done", "attempt": 1})
+            render.bump(job, "S01:K01", "seam", "Fix it.")
+            self.assertIn("redos of S01 (K01)", render.twin_waits(job, {}, value)["S02"])
+            self.assertEqual(render.plan_order(value, hold={"S02"})[0][0], "S01")
+            self.assertEqual(len(render.plan_order(value, hold={"S02"})), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

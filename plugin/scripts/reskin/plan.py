@@ -17,7 +17,14 @@ OVERLAP_SECONDS = 1.0     # a segment after a seam inside a shot renders this mu
 #                           frames); assemble joins inside it
 HEAD_SECONDS = 0.5        # ... and its clip starts with this much of the shot's opening (cut off again in assembly)
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "hud", "overlays", "style_ref", "chain_prefix"}
+             "hud", "overlays", "style_ref", "chain_prefix", "like", "live"}
+# `like`: the same ad in another framing (横版/竖版). The timeline and the texts are the twin's; boxes (remove, hud,
+# overlays) sit elsewhere in another framing, so the source names its own.
+LIKE_FIELDS = ("keep", "materials", "extra", "anchor", "split_at", "max_segment_seconds", "chain_prefix", "live")
+LIVE_SNAP = .25           # seconds: a live-action span's ends move onto a camera cut this close (they start and end
+#                           at hard cuts; a frame or two of the other footage on the wrong side would show)
+LIKE_SECONDS = .3         # twins differing more in length than this are different cuts: their times do not carry over
+LIKE_MATCH = .1           # seconds: a segment whose start and end lie this close to a twin segment's shares its fixes
 REMOVED_KEYS = {"midframes": "midframes were removed (extra preview references cost previews and carried their "
                              "colour mistakes into the video); leave the key out"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
@@ -70,6 +77,31 @@ def hud_problem(items) -> str | None:
     return None
 
 
+def live_problem(items, duration: float) -> str | None:
+    """`live`: stretches that are not game footage (live-action video, real people or places, a real face pasted
+    into the game): [{"start": s, "end": s, "what": text}], delivered from the original and never restyled."""
+    if not isinstance(items, list):
+        return "live must be a list"
+    spans = []
+    for item in items:
+        if (not isinstance(item, dict) or not set(item) <= {"start", "end", "what"}
+                or not all(isinstance(item.get(k), (int, float)) for k in ("start", "end"))
+                or not 0 <= item["start"] < item["end"] <= duration + .05
+                or not isinstance(item.get("what", ""), str)):
+            return (f"live item {item!r} must be {{\"start\": s, \"end\": s, \"what\": text}} inside "
+                    f"0-{duration:.2f} s")
+        spans.append((item["start"], item["end"]))
+    spans.sort()
+    for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+        if b0 < a1:
+            return f"live spans {a0:g}-{a1:g} s and {b0:g}-{b1:g} s overlap"
+    return None
+
+
+def in_live(row: dict, t: float) -> bool:
+    return any(item["start"] <= t < item["end"] for item in row.get("live") or [])
+
+
 def style_ref_problem(value) -> str | None:
     """`style_ref`: a texture reference for the anchor keyframe only: an image path, or {"path": image or video,
     "at": seconds (videos), "box": [x0, y0, x1, y1] (fractions; crop away its logos and text)}."""
@@ -92,6 +124,45 @@ def style_ref_problem(value) -> str | None:
     return None
 
 
+def resolved(sources: dict, source_id: str, duration: float | None = None) -> dict:
+    """A source's own edits with what it takes from its `like` twin: the twin's LIKE_FIELDS (its own keys win) and
+    the twin's look (`style_from`). An inherited `keep` ends no later than this source (`duration`)."""
+    row = dict(sources.get(source_id) or {})
+    twin_id = row.get("like")
+    twin = sources.get(twin_id) if isinstance(twin_id, str) else None
+    if not isinstance(twin, dict):
+        return row
+    merged = {**{k: twin[k] for k in LIKE_FIELDS if k in twin}, **row}
+    merged["style_from"] = row.get("style_from") or twin_id
+    keep = merged.get("keep")
+    if ("keep" not in row and duration is not None and isinstance(keep, list) and len(keep) == 2
+            and isinstance(keep[1], (int, float)) and keep[1] > duration):
+        merged["keep"] = [keep[0], duration]
+    return merged
+
+
+def like_problems(sources: dict, source_id: str, known: dict) -> list[str]:
+    row = sources[source_id]
+    twin_id = row.get("like")
+    if twin_id is None:
+        return []
+    if not isinstance(twin_id, str) or twin_id == source_id or twin_id not in sources or twin_id not in known:
+        return [f"{source_id}: like must name another source that has its own edits"]
+    twin = sources[twin_id]
+    problems = []
+    if twin.get("like"):
+        problems.append(f"{source_id}: like {twin_id}, which is itself like {twin['like']}: name {twin['like']} or "
+                        f"write {twin_id}'s edits out")
+    if twin.get("skip"):
+        problems.append(f"{source_id}: like {twin_id}, which is skipped")
+    gap = abs(known[source_id]["duration"] - known[twin_id]["duration"])
+    if gap > LIKE_SECONDS and "keep" not in row:
+        problems.append(f"{source_id}: {known[source_id]['duration']:.2f} s long, {twin_id} "
+                        f"{known[twin_id]['duration']:.2f} s: another cut whose times need not match; set keep (and "
+                        f"check anchor, split_at and timed materials) or write the edits out")
+    return problems
+
+
 def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     """Validate the edits file against the catalog; returns it normalised."""
     if not isinstance(value, dict) or not isinstance(value.get("sources", {}), dict):
@@ -106,13 +177,22 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     if defaults.get("style_ref") is not None and style_ref_problem(defaults["style_ref"]):
         problems.append(f"defaults: {style_ref_problem(defaults['style_ref'])}")
     out = {"defaults": defaults, "sources": {}}
-    for source_id, row in (value.get("sources") or {}).items():
+    raw = value.get("sources") or {}
+    styled_from = {}
+    for source_id, own in raw.items():
         if source_id not in known:
             problems.append(f"{source_id}: not a source of this job")
             continue
-        for key in set(row) - EDIT_KEYS:
+        if not isinstance(own, dict):
+            problems.append(f"{source_id}: its edits must be an object")
+            continue
+        for key in set(own) - EDIT_KEYS:
             problems.append(f"{source_id}: {REMOVED_KEYS.get(key, f'unknown key {key}')}")
+        like = like_problems(raw, source_id, known)
+        problems += like
         duration = known[source_id]["duration"]
+        # the checks below see what the source ends up with, its twin's fields included
+        row = own if like else resolved(raw, source_id, duration)
         keep = row.get("keep")
         if keep is not None:
             if (not isinstance(keep, list) or len(keep) != 2 or not all(isinstance(x, (int, float)) for x in keep)
@@ -132,6 +212,15 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: {overlay_problem(row['overlays'])}")
         if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
+        if "live" in row and live_problem(row["live"], duration):
+            problems.append(f"{source_id}: {live_problem(row['live'], duration)}")
+        elif row.get("live"):
+            if isinstance(row.get("anchor"), (int, float)) and in_live(row, row["anchor"]):
+                problems.append(f"{source_id}: anchor {row['anchor']:g} s lies in a live-action span; pick a game frame")
+            keep = row.get("keep") if isinstance(row.get("keep"), list) and len(row["keep"]) == 2 else [0, duration]
+            covered = sum(max(0.0, min(i["end"], keep[1]) - max(i["start"], keep[0])) for i in row["live"])
+            if covered >= keep[1] - keep[0] - .05:
+                problems.append(f"{source_id}: live covers the whole kept range; skip the source instead")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
             problems.append(f"{source_id}: style_from must name another source")
         if row.get("style_ref") is not None and style_ref_problem(row["style_ref"]):
@@ -140,8 +229,10 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: chain_prefix must be true or false")
         if "split_at" in row and not (isinstance(row["split_at"], list) and all(isinstance(x, (int, float)) for x in row["split_at"])):
             problems.append(f"{source_id}: split_at must be a list of times in seconds")
-        out["sources"][source_id] = row
-    chains = {sid: row.get("style_from") for sid, row in out["sources"].items() if row.get("style_from")}
+        if row.get("style_from"):
+            styled_from[source_id] = row["style_from"]
+        out["sources"][source_id] = own
+    chains = styled_from
     for sid in chains:
         seen, current = {sid}, chains.get(sid)
         while current:
@@ -159,7 +250,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
     """Edits for one source with defaults filled in."""
     defaults = edits.get("defaults") or {}
     row = {**{k: v for k, v in defaults.items() if k not in ("keep", "anchor", "split_at")},
-           **(edits.get("sources") or {}).get(source_id, {})}
+           **resolved(edits.get("sources") or {}, source_id, catalog_row["duration"])}
     card = catalog_row.get("end_card")
     keep = row.get("keep") or [0.0, card["start"] if card else catalog_row["duration"]]
     remove = []
@@ -171,7 +262,10 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
             "overlays": row.get("overlays") or [],
             "style_ref": ({"path": row["style_ref"]} if isinstance(row.get("style_ref"), str) else row.get("style_ref")),
-            "chain_prefix": row.get("chain_prefix"),
+            "chain_prefix": row.get("chain_prefix"), "like": row.get("like"),
+            "live": sorted(({"start": float(i["start"]), "end": float(i["end"]), "what": i.get("what", "")}
+                            for i in row.get("live") or [] if i["end"] > keep[0] and i["start"] < keep[1]),
+                           key=lambda i: i["start"]),
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
 
 
@@ -241,11 +335,62 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     return segments
 
 
-def auto_anchor(catalog_row: dict, keep: list[float], motion: list[float]) -> float:
+def segment_all(catalog_row: dict, keep: list[float], max_seconds: float, motion: list[float],
+                split_at: list[float], live: list[dict] | None = None) -> list[dict]:
+    """`segment` for the game stretches of the kept range; each live-action span is one segment of its own
+    (`live`: delivered from the original, nothing rendered), with hard cuts on both sides."""
+    if not live:
+        return segment(catalog_row, keep, max_seconds, motion, split_at)
+    fps = catalog_row["info"]["fps"]
+    first, last = round(keep[0] * fps), min(catalog_row["info"]["frames"], round(keep[1] * fps))
+    cuts = [s["frames"][0] for s in catalog_row["shots"]] + [catalog_row["info"]["frames"]]
+
+    def snap(t):
+        frame = round(t * fps)
+        near = min(cuts, key=lambda c: abs(c - frame))
+        return near if abs(near - frame) <= LIVE_SNAP * fps else frame
+    pieces, position = [], first
+    for item in live:
+        a, b = max(position, snap(item["start"]), first), min(last, snap(item["end"]))
+        if b <= a:
+            continue
+        if a > position:
+            pieces.append((position, a, None))
+        pieces.append((a, b, item))
+        position = b
+    if position < last:
+        pieces.append((position, last, None))
+    segments = []
+    for a, b, item in pieces:
+        if item is not None:
+            segments.append({"frames": [a, b], "render_frames": [a, b], "seam": "cut" if segments else "start",
+                             "inner_cuts": [c for c in cuts if a < c < b], "live": True, "what": item.get("what", "")})
+            continue
+        if b - a < round(MIN_SECONDS * fps):
+            raise ValueError(f"gameplay {a / fps:.2f}-{b / fps:.2f} s beside a live-action span is shorter than "
+                             f"{MIN_SECONDS:g} s, too short for Seedance: let the live span cover it (it is then "
+                             f"delivered unchanged) or move keep")
+        part = segment(catalog_row, [a / fps, b / fps], max_seconds, motion,
+                       [t for t in split_at if a / fps < t < b / fps])
+        if segments:
+            part[0]["seam"] = "cut"
+        segments += part
+    for number, seg in enumerate(segments, 1):
+        seg["id"] = f"K{number:02d}"
+        seg["start"], seg["end"] = round(seg["frames"][0] / fps, 3), round(seg["frames"][1] / fps, 3)
+        if seg.get("live"):
+            seg["seconds"] = 0.0
+    return segments
+
+
+def auto_anchor(catalog_row: dict, keep: list[float], motion: list[float], live: list[dict] | None = None) -> float:
     """Per the reference case: a frame from a lively stretch (much movement means much of the scene is shown),
-    inside the longest kept shot, which sets the look of most of the video."""
+    inside the longest kept shot, which sets the look of most of the video (never in a live-action span)."""
     fps = catalog_row["info"]["fps"]
     spans = [(max(s["start"], keep[0]), min(s["end"], keep[1])) for s in catalog_row["shots"]]
+    for item in live or []:
+        spans = [piece for a, b in spans
+                 for piece in ((a, min(b, item["start"])), (max(a, item["end"]), b)) if piece[1] > piece[0]]
     start, end = max((span for span in spans if span[1] > span[0]), key=lambda span: span[1] - span[0], default=keep)
     lo, hi = round((start + 1) * fps), round((end - 1) * fps)
     if not motion or hi - lo < fps:
@@ -270,14 +415,33 @@ def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_s
         motion_path = job / "catalog/motion" / f"{row['id']}.json"
         motion = read(motion_path) if motion_path.is_file() else []
         limit = min(30.0, settings["max_segment_seconds"] or max_seconds)
-        segments = segment(row, settings["keep"], limit, motion, settings["split_at"])
-        anchor = settings["anchor"] if settings["anchor"] is not None else auto_anchor(row, settings["keep"], motion)
+        try:
+            segments = segment_all(row, settings["keep"], limit, motion, settings["split_at"], settings["live"])
+        except ValueError as error:
+            raise ValueError(f"{row['id']}: {error}") from None
+        anchor = (settings["anchor"] if settings["anchor"] is not None
+                  else auto_anchor(row, settings["keep"], motion, settings["live"]))
         plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
                                       "width": row["info"]["width"], "height": row["info"]["height"],
                                       "segments": segments}
+    link_twins(plan)
     write(job / "config/plan.json", plan)
     write_text(job / "reports/plan.md", markdown(plan, catalog))
     return plan
+
+
+def link_twins(plan: dict) -> None:
+    """Each segment of a `like` source that spans the same seconds as one of its twin's gets `like`: that segment's
+    key, whose corrective sentences (`redo --prompt`) it then takes too (the sentences name seconds into the
+    segment, so only equal spans carry them)."""
+    for row in plan["sources"].values():
+        twin = plan["sources"].get(row.get("like") or "")
+        for seg in row["segments"]:
+            seg.pop("like", None)
+            match = twin and not seg.get("live") and next((t for t in twin["segments"] if abs(t["start"] - seg["start"]) <= LIKE_MATCH + 1e-6
+                                   and abs(t["end"] - seg["end"]) <= LIKE_MATCH + 1e-6 and t["seam"] == seg["seam"]), None)
+            if match:
+                seg["like"] = f"{row['like']}:{match['id']}"
 
 
 def markdown(plan: dict, catalog: dict) -> str:
@@ -287,6 +451,11 @@ def markdown(plan: dict, catalog: dict) -> str:
         lines.append(f"## {source_id} {names.get(source_id, '')}")
         lines.append(f"keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, anchor frame {row['anchor']:.2f} s"
                      + (f" (style from {row['style_from']})" if row["style_from"] else ""))
+        if row.get("like"):
+            shared = sum(1 for seg in row["segments"] if seg.get("like"))
+            lines.append(f"like {row['like']}: its keep, materials, extra, anchor and split times unless set here; "
+                         f"{shared} of {len(row['segments'])} segments span the same seconds as one of {row['like']}'s "
+                         f"and take its corrective sentences; renders once {row['like']} is delivered and reviewed")
         lines.append(f"materials: {describe(row['materials'])}")
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
         if row["extra"]:
@@ -295,9 +464,18 @@ def markdown(plan: dict, catalog: dict) -> str:
             ref = row["style_ref"]
             lines.append(f"style reference (anchor only): {ref['path']}" + (f" at {ref['at']:g} s" if "at" in ref else "")
                          + (f", box {ref['box']}" if ref.get("box") else ""))
+        live_removes = [i for i in row["remove"] if isinstance(i, dict) and any(
+            float(i.get("start", 0)) < span["end"] and float(i.get("end", 1e9)) > span["start"] for span in row["live"])]
+        if live_removes:
+            lines.append("note: live-action spans come from the original as they are, so "
+                         + "; ".join(i["what"] for i in live_removes) + " stays visible there")
         for seg in row["segments"]:
+            if seg.get("live"):
+                lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s live-action, delivered from the "
+                             f"original (not rendered){': ' + seg['what'] if seg.get('what') else ''}")
+                continue
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
             lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['seconds']:.2f} s), "
-                         f"seam before: {seg['seam']}{inner}")
+                         f"seam before: {seg['seam']}{inner}" + (f", fixes from {seg['like']}" if seg.get("like") else ""))
         lines.append("")
     return "\n".join(lines)

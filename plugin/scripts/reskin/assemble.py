@@ -36,7 +36,8 @@ def timeline(row: dict, out_fps: float) -> list[dict]:
     for seg in row["segments"]:
         a, b = seg["render_frames"]
         rows.append({"id": seg["id"], "seam": seg["seam"], "out": [position(a), position(b)],
-                     "body": [position(seg["frames"][0]), position(seg["frames"][1])]})
+                     "body": [position(seg["frames"][0]), position(seg["frames"][1])],
+                     **({"live": [a, b]} if seg.get("live") else {})})
     return rows
 
 
@@ -337,8 +338,35 @@ def output_spec(state: dict, row: dict) -> tuple[float, tuple[int, int]]:
             target_size(row["width"], row["height"], state["options"]["resolution"]))
 
 
+def live_clip(job: Path, source: dict, source_id: str, line: dict, out_fps: float,
+              size: tuple[int, int]) -> Path:
+    """A live-action segment: the original's own frames at the output rate and size (nothing is rendered)."""
+    frames = line["out"][1] - line["out"][0]
+    a, b = line["live"]
+    work = job / "work" / f"{source_id}-{line['id']}-live.mp4"
+    stamp = {"source": source.get("sha256"), "frames": [a, b], "count": frames, "fps": out_fps, "size": list(size)}
+    stamp_path = work.with_suffix(".json")
+    try:
+        if work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp:
+            return work
+    except ValueError:
+        pass
+    chain = (f"trim=start_frame={a}:end_frame={b},setpts=PTS-STARTPTS,fps={out_fps},"
+             f"scale={size[0]}:{size[1]}:flags=lanczos,setsar=1,tpad=stop_mode=clone:stop=4,"
+             f"trim=end_frame={frames},setpts=PTS-STARTPTS,format=yuv420p")
+    work.parent.mkdir(parents=True, exist_ok=True)
+    partial = work.with_name(work.stem + ".partial.mp4")
+    run([FFMPEG, "-v", "error", "-y", "-i", source["path"], "-vf", chain, "-an", "-c:v", "libx264", "-preset", "fast",
+         "-crf", "12", "-r", str(out_fps), partial])
+    partial.replace(work)
+    write(stamp_path, stamp)
+    return work
+
+
 def work_clip(job: Path, source_id: str, line: dict, out_fps: float, size: tuple[int, int]) -> Path:
     """The segment's Seedance result on the source clock (retimed, output size), made once per generation."""
+    if line.get("live"):
+        raise ValueError(f"{source_id}:{line['id']} is live-action: delivered from the original (live_clip)")
     ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
     record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
     record = read(record_path) if record_path.is_file() else {}
@@ -534,7 +562,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     info = video_info(Path(source["path"]))
     out_fps, size = output_spec(state, row)
     lines = timeline(row, out_fps)
-    clips = [work_clip(job, source_id, line, out_fps, size) for line in lines]
+    clips = [live_clip(job, source, source_id, line, out_fps, size) if line.get("live")
+             else work_clip(job, source_id, line, out_fps, size) for line in lines]
     cuts = lead_cuts(job, source_id, lines)
     corrections, colour, overlaps = match_colours(clips, lines, out_fps, cuts)
     # Where each clip is cut: a seam inside a shot switches at its best-matching overlap frame with a short blend
@@ -690,7 +719,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "wipes": wipes,
               "overlays": OVERLAY.summary(burned),
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
-                            "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
+                            "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3),
+                            **({"live": True} if line.get("live") else {})} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)
     log(f"{source_id}: assembled {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
     return result
