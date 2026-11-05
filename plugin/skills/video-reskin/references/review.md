@@ -113,7 +113,8 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
   the keyframe (wrong there too) or the segment with a `--prompt` naming it. After two failed redos report it as
   open; nothing is burned in.
 - Then `run` (only redone segments render, with their checks; assembly and review follow per source). Each review
-  round is numbered; after `review_rounds` (2) rounds deliver and list what is still open.
+  round is numbered; keep going until a round shows no visible flaw (no limit by default; a work order's
+  `review_rounds` caps it), then deliver and list the medium and low issues.
 
 ## Held segments (segment check)
 

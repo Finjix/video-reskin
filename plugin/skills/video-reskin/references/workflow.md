@@ -34,7 +34,7 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
  "output_root": "<optional folder; default: the user's Desktop>",
  "delivery_dir": "<optional: the exact folder the user named for the videos, instead of output_root>",
  "style": "realistic",
- "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 2}}
+ "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 0}}
 ```
 
 - `delivery_dir`: when the user names the folder the videos go to (`成片放 D:\成片`), the deliveries go exactly
@@ -48,7 +48,7 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 - Resolution is fixed: Seedance renders 1080p and the deliveries are 1080 on the short side (`options.resolution`
   accepts only `1080p`). `fps`: output frame rate, 12-30 (default 24, the rate Seedance renders at; never above the
   source). `max_segment_seconds`: 4-30 (default 30; fewer, longer segments mean fewer seams). `review_rounds`:
-  default 2. `chain_prefix`: default true (see Plan); false sends chained segments only the previous result's frame.
+  default 0, no limit: review and redo until no visible flaw is left; a positive number caps the rounds. `chain_prefix`: default true (see Plan); false sends chained segments only the previous result's frame.
 
 ## Catalog (`analyze`)
 

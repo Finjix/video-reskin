@@ -12,7 +12,8 @@ SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
 RESOLUTION = "1080p"       # Seedance renders and deliveries: one size for every job (the user's choice, 2026-11-05)
 DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
-            "review_rounds": 2, "chain_prefix": True}
+            "review_rounds": 0, "chain_prefix": True}
+# review_rounds 0: review and redo until no visible flaw is left (the user's rule of 2026-11-05); a positive number caps the rounds
 
 
 def presets() -> dict:
@@ -50,6 +51,8 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
         raise ValueError(f"options.resolution is fixed at {RESOLUTION} (leave it out)")
     if not 12 <= float(options["fps"]) <= 30:
         raise ValueError("options.fps must be between 12 and 30 (default 24, the rate Seedance renders at)")
+    if not isinstance(options["review_rounds"], int) or isinstance(options["review_rounds"], bool) or options["review_rounds"] < 0:
+        raise ValueError("options.review_rounds must be a whole number: 0 (default) reviews until no visible flaw is left, N caps the rounds")
     if not isinstance(options["chain_prefix"], bool):
         raise ValueError("options.chain_prefix must be true or false")
     if not 4 <= float(options["max_segment_seconds"]) <= 30:

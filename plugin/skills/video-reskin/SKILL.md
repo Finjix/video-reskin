@@ -104,7 +104,7 @@ cartoon original. Medium and low review issues go into the final summary, not in
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
 | Checking a seam yourself | the seam sheet (`sheets/<id>-seams.jpg`) shows, per seam, the frame before and the frame after at full size and a map of what changes between them; the review's pair sheet (`review/<id>-seam-<Kxx>-<t>-pair.jpg`) adds the original's two moments. Compare the two frames region by region (water colour and saturation, trees at the edges, ground, objects): GOF3D10012's 26.4 s seam passed every grey-level measure during a pan and was plain on the two full-size frames. A video with a seam whose look step or pair check is high is not done |
-| Issues remain after `review_rounds` (2) | deliver; list each remaining issue with its time. Never run a third round on your own |
+| A confirmed visible flaw remains after a review round | redo it and review again: there is no round limit (the user's rule of 2026-11-05); a video is done only when its last round shows no visible flaw. Medium and low issues never start another round. A flaw that comes back after two redos of the same segment: change the approach (materials wording, a timed item, `split_at`, `chain_prefix`) instead of repeating the same redo |
 
 Stop to ask only when nothing can continue: footage missing or unreadable, no key, or a Lumos QR code to scan (send
 it and stop; see Credentials). Say what you tried and the minimum you need.
@@ -146,7 +146,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    (`keyframes`, `preview`, `render`, `assemble`, `review` also run one by one.)
 6. Held segments first: look at their stills, `redo` or `accept`. Then confirm the high review issues on their stills
    (more moments: `frames --source <id> --at <t>`), `redo` only the confirmed flaws the table names, and `run` again:
-   only what changed renders, unchanged videos are not reviewed again. At most `review_rounds` (2) rounds. A video
+   only what changed renders, unchanged videos are not reviewed again. Repeat until the last round shows no visible flaw
+   (no round limit; `review_rounds` caps it only when the work order sets it). A video
    with a visible seam, a smeared corner or a kept logo or warning line unlike the original is not done.
 7. If the user asked for a comparison, `compare` (after the last `assemble`).
 8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed (if anything), the seam measurements, how real it looks (the realism timeline, reported plainly),

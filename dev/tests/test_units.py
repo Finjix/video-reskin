@@ -103,8 +103,8 @@ class DeliveryDirTests(unittest.TestCase):
             with mock.patch.object(JOB, "sha", return_value="h"):
                 _, state = JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "a")})
                 self.assertEqual({k: state["options"][k] for k in ("resolution", "fps", "review_rounds", "chain_prefix")},
-                                 {"resolution": "1080p", "fps": 24, "review_rounds": 2, "chain_prefix": True})
-                for options in ({"resolution": "720p"}, {"resolution": "480p"}, {"fps": 60}, {"chain_prefix": "yes"}):
+                                 {"resolution": "1080p", "fps": 24, "review_rounds": 0, "chain_prefix": True})
+                for options in ({"resolution": "720p"}, {"resolution": "480p"}, {"fps": 60}, {"chain_prefix": "yes"}, {"review_rounds": -1}, {"review_rounds": 1.5}):
                     with self.assertRaises(ValueError):
                         JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "b"), "options": options})
 

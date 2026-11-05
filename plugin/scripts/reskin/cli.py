@@ -280,7 +280,8 @@ def seam_lines(assembled: dict) -> list[str]:
 def review_lines(result: dict, limit: int) -> list[str]:
     from reskin import review as REVIEW
     high = sum(1 for i in result["issues"] if i["severity"] == "high")
-    lines = [f"{result['source']} round {result['round']} of {limit}: {result['verdict']}, {len(result['issues'])} issues "
+    of = f" of {limit}" if limit > 0 else ""
+    lines = [f"{result['source']} round {result['round']}{of}: {result['verdict']}, {len(result['issues'])} issues "
              f"({high} high): {result['summary']}"]
     if result.get("realism"):
         lines.append(f"  realism (5 = real footage): {REVIEW.realism_line(result['realism'])}")
@@ -322,7 +323,7 @@ def cmd_review(args) -> int:
             lines.append(f"{source_id}: not reviewed: {error}")
             failed = True
             continue
-        lines += review_lines(result, int(state["options"].get("review_rounds", 3)))
+        lines += review_lines(result, int(state["options"].get("review_rounds", 0)))
     show(lines + [f"reports: {job / 'reports/review'}", REVIEW_NEXT])
     return RULE_FAILURE if failed else 0
 
@@ -466,7 +467,7 @@ def cmd_run(args) -> int:
               "preview --only <id> --at <t> only for a moment the keyframes do not show); then run again (it "
               "renders once nothing new needs looking at)"])
         return 0
-    limit = int(state["options"].get("review_rounds", 3))
+    limit = int(state["options"].get("review_rounds", 0))
     reports: dict[str, list[str]] = {}
     lock = threading.Lock()
 
