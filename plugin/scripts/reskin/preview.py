@@ -39,14 +39,15 @@ def image_path(job: Path, source_id: str, moment: float) -> Path:
 
 def corrections(job: Path, source_id: str, row: dict, moment: float) -> str:
     """The corrective sentences (`redo --prompt`) of the segment that delivers `moment`, told which second of the
-    segment this frame is (the sentences name moments in segment seconds: "本段约16秒处...")."""
+    segment this frame is (the sentences name moments in segment seconds: "about 16 s into this segment...")."""
     path = job / "config/redo.json"
     redo = read(path) if path.is_file() else {}
     seg = segment_at(row, moment)
     text = redo.get(f"{source_id}:{seg['id']}", {}).get("prompt", "")
     if not text:
         return ""
-    return f"这张画面是本段第{moment - seg['render_frames'][0] / row['fps']:.0f}秒的画面（下面说的时间都按本段计）：{text}"
+    return (f"This picture is the frame {moment - seg['render_frames'][0] / row['fps']:.0f} s into its segment (the "
+            f"times below count from the segment's start): {text}")
 
 
 def make(job: Path, state: dict, source_id: str, row: dict, style: dict, moment: float, lock,

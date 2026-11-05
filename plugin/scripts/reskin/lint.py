@@ -58,15 +58,17 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
     lines = [
         "You prepare an AI restyle of a game advertising video: every cartoon material becomes a realistic real-world "
         "material while composition, objects, counts, colours and timing stay. List what the video shows, precisely, "
-        "with times in seconds from the start. Write every `what` in Chinese.",
+        "with times in seconds from the start. Write every `what` in English (it goes into the prompts).",
         f"Duration {catalog_row['duration']:.2f} s; camera shots: {shots}. Still regions found by the program "
         f"(boxes [x0, y0, x1, y1] as fractions of the frame): {overlays}.",
         "- objects: every prominent object, animal, character group and ground/water surface, each named as itself "
-        "with its colour (e.g. 黄色的黄鳍金枪鱼, 绿色的纸币堆, 黄色的缆绳, 积雪地面). Use names that cannot be confused with "
+        "with its colour (e.g. yellow yellowfin tuna, green stacks of banknotes, yellow ropes, snow-covered ground). "
+        "Use names that cannot be confused with "
         "another object (whole fish vs fish steaks, cash vs food). start/end = when it is on screen; always = on "
         "screen during the whole video. If an object changes colour, list each colour as its own item with its times.",
         "- logos: game logos, watermarks and warning or disclaimer lines, each `what` naming the element and its text "
-        "(e.g. 右上角的游戏logo「WHITEOUT SURVIVAL」, 画面底部的白色小字警示语), with times and a box [x0, y0, x1, y1] "
+        "(e.g. the game logo \"WHITEOUT SURVIVAL\" in the top-right corner, the small white warning text at the "
+        "bottom of the frame), with times and a box [x0, y0, x1, y1] "
         "(fractions). A logo that moves to another corner is two items.",
         "- screen_text: other text and flat UI: captions, labels, banners, buttons. fixed = true when it stays at one "
         "place on the screen while the scene moves (it does not move with the 3D scene); price tags standing on the "
@@ -85,7 +87,7 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
             "model draw it); wrong_time (shown only part of the time but untimed, or the times are wrong: give the "
             "right ones); wrong_colour; ambiguous (another object could be turned into it). Add `missing` items for "
             "prominent objects whose colour should be named, and logos or warning lines that are not in `remove`. "
-            "`suggestion` (Chinese) says what to write instead.",
+            "`suggestion` (in English, as it would go into the prompt) says what to write instead.",
         ]
     else:
         lines.append("- edits_check: an empty list.")

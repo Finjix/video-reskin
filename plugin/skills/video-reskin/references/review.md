@@ -2,7 +2,19 @@
 
 `review` sends Gemini (`gemini-3.8-flash`) one clip with the original and the restyled video side by side (left/right
 for vertical videos, top/bottom for horizontal ones), frame-synchronised, with the seam times and the removal list,
-then a 3-second close-up of every seam at 10 fps with one question: does the restyled scene change there? It adds the
+then a close-up of every seam at 10 fps (from 1.5 s before the switch to 1.5 s after the moment the later segment's
+own frames start) with one question: does the restyled scene change there? Every in-shot seam is then checked
+twice more, because a seam between two renders hides in a pan (GOF3D10012 at 26.4 s: the river less saturated, the
+fish bluer, a tree crown at the top edge in the game's cone shape; every grey-level measure and the 3 s close-up passed
+it):
+- `measured` look step (from `assemble`, `look` in the seam entry): for every pair of consecutive frames of the whole
+  video, the change of saturation and of colour after the camera's shift (from the original) is taken out and the
+  original's own change over the same pair subtracted; the seam's step is scored against the video's ordinary pairs
+  (robust z: 8 or more visible, 5 slight). 26.4 s scored saturation 2.31 against a usual 0.19 (z 9.4); of 1291
+  ordinary pairs of that video one reached z 8, in the original's own end-card flash.
+- `gemini-seam-pair`: the last frame before the seam and the first after it at full size, the original's two moments
+  below (`review/<id>-seam-<Kxx>-<t>-pair.jpg`), with the question which differences the original does not show.
+  Medium or high is a high issue; low is the flicker any frame pair has (an ordinary pair of the same video: low). It adds the
 seams `assemble` measured as `slight` (low: rarely visible in playback) or `visible` (high), and the wiped logo
 corners it measured as `soft` (low) or `smeared` (high). It draws the stills of every issue and asks Gemini once more,
 on those stills, whether each is visible and whether the original shows the same: the `triage` hint.
@@ -30,10 +42,10 @@ Issues come in nine categories:
 
 | Category | Means |
 | --- | --- |
-| `continuity` | 穿帮: something differs from the original (an object changes shape, colour or count, things appear or vanish, motion no longer matches) |
+| `continuity` | continuity error: something differs from the original (an object changes shape, colour or count, things appear or vanish, motion no longer matches) |
 | `artifact` | bug: morphing, melting, flicker, jitter, frozen frames, garbled HUD text or numbers, strong noise, a blurred or smeared patch where a logo was |
 | `added_text` | captions, warning lines, watermarks or garbled characters the original does not have |
-| `seam_color` | 拼接色差 / scene change at a seam: colour, brightness, texture, terrain, cable colours or realism jump; source `measured`, `gemini-seam` (close-up) or `gemini` |
+| `seam_color` | colour jump / scene change at a seam: colour, brightness, texture, terrain, cable colours or realism jump; source `measured`, `gemini-seam` (close-up) or `gemini` |
 | `leftover_overlay` | a logo, watermark or warning line still visible |
 | `end_card` | closing-card content still visible |
 | `style_drift` | the look changes between parts of the video |
@@ -58,17 +70,20 @@ hint is a second opinion only. Decide:
 
 ## Redo
 
-`redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective Chinese sentence>"] [--keyframe]`
+`redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective English sentence>"] [--keyframe]`
 
 Redo only what a viewer sees at once: a visible seam, a smeared or leftover logo, garbled or added text, an object
 that morphs, vanishes or appears, a prominent object in the wrong colour.
 
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
-  confirmed flaw, e.g. `鱼的形状和数量与原视频保持一致，不要变形`, `整体颜色与前一段保持一致，雪地为白色`.
+  confirmed flaw, describing the look wanted, e.g. `The fish keep the shape and number they have in the original video.`,
+  `The colours match the previous segment; the snow is white.`.
 - Name only the part that changes and what must stay, with the moment in seconds into the segment (the segment's
-  start is in `reports/plan.md`). Colour words leak onto whatever is nearby: `机械抓斗吊臂由蓝色变为红色` turned the
-  tuna the arm was holding red; `本段约16秒处金色升级闪光过后，只有机械抓斗吊臂的金属立柱和横臂换成红色涂装；被抓起和河里的金枪鱼始终保持原本的蓝白色和银色鱼身，绝不变红。`
-  fixed it.
+  start is in `reports/plan.md`). Colour words leak onto whatever is nearby: `the grab arm turns from blue to red` turned the
+  tuna the arm was holding red; `About 16 s into this segment, after the golden upgrade flash, only the grab arm's
+  metal post and boom turn to red paint; the tuna being lifted and those in the river keep their blue-white and silver
+  bodies.` fixed it. Describe the look wanted, never the look to avoid: naming cartoon tree crowns to forbid them made
+  Seedance draw them.
 - Corrective sentences accumulate over attempts. When one made things worse, `redo ... --replace-prompt --prompt
   "<new sentence>"` drops the earlier ones (never edit `config/redo.json` by hand).
 - `--keyframe` when the keyframe already shows the flaw (wrong objects, logo kept, colour cast): run
@@ -82,8 +97,9 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
   consistent: check whether the original itself changes abruptly there (an effect bursting, a stack of bills flying
   off, a flash). The measure counts that motion as a jump. Confirm it on `frames --source <id> --at <seam time>`;
   if so, dismiss it with that reason.
-- A smeared logo corner: `"wipe": "none"` on that `remove` item (Seedance is then told to remove the logo itself),
-  `plan`, redo the segments it spans. If the logo stays, put the wipe back and report the corner as open.
+- A smeared logo corner (an item with `"wipe": "before"`): drop the `wipe` (Seedance is then told to remove the logo
+  itself), `plan`, redo the segments it spans. A logo Seedance kept: redo once with a `--prompt` naming the corner.
+  A warning line along the bottom edge it always keeps: cropping the source is the fix (ask the user first).
 - Garbled screen-fixed text or UI needs no render: an `overlays` item over it (`box`/`poly`, no `colors`), `plan`,
   `assemble`.
 - Then `run` (only redone segments render, with their checks; assembly and review follow per source). Each review

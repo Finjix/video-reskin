@@ -15,6 +15,7 @@ from reskin.prompts import describe
 MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
 OVERLAP_SECONDS = 1.0     # a segment after a seam inside a shot renders this much more (the earlier result's last
 #                           frames); assemble joins inside it
+HEAD_SECONDS = 0.5        # ... and its clip starts with this much of the shot's opening (cut off again in assembly)
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
              "hud", "overlays", "style_ref", "chain_prefix"}
 REMOVED_KEYS = {"midframes": "midframes were removed (extra preview references cost previews and carried their "
@@ -29,10 +30,11 @@ def box_problem(box) -> bool:
 
 
 def items_problem(items, name: str) -> str | None:
-    """`remove` (and `materials` when not one text) is a list of Chinese descriptions, each a string or
+    """`remove` (and `materials` when not one text) is a list of English descriptions (they go into the prompts),
+    each a string or
     {"what": ..., "start": s, "end": s} for something on screen only part of the time; a `remove` item may add
-    "box": [x0, y0, x1, y1] (fractions) for a screen-fixed logo or warning line, wiped letter by letter from the clip
-    Seedance gets (`"wipe": "none"`: left in the clip and named in the prompt for the model to remove)."""
+    "box": [x0, y0, x1, y1] (fractions) for a screen-fixed logo or warning line: named in the prompt for the model
+    to remove (`"wipe": "before"`: wiped letter by letter from the clip Seedance gets instead)."""
     if not isinstance(items, list):
         return f"{name} must be a list"
     for item in items:
@@ -41,7 +43,7 @@ def items_problem(items, name: str) -> str | None:
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
                 and set(item) <= {"what", "start", "end", *(("box", "wipe") if name == "remove" else ())}
                 and ("box" not in item or not box_problem(item["box"]))
-                and item.get("wipe", "before") in ("before", "none")
+                and item.get("wipe", "none") in ("before", "none")
                 and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
@@ -198,7 +200,8 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     camera = {c for c in (s["frames"][0] for s in catalog_row["shots"]) if first < c < last}
     cuts = sorted(camera | {c for c in (round(t * fps) for t in split_at) if first < c < last})
     minimum, maximum = round(MIN_SECONDS * fps), int(max_seconds * fps)
-    overlap = round(OVERLAP_SECONDS * fps)
+    overlap = round(OVERLAP_SECONDS * fps) + round(HEAD_SECONDS * fps)   # what a chained clip adds within the limit
+    lead = round(OVERLAP_SECONDS * fps)
     window = int(2 * fps)
     # Walk forward: end each segment at the latest camera cut that fits, else at the stillest moment near the
     # limit inside the shot (that segment then also renders the overlap before its start).
@@ -229,10 +232,12 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
                 for a, b, kind in spans]
     for number, row in enumerate(segments, 1):
         row["id"] = f"K{number:02d}"
-        lead = overlap if row["seam"] == "continuous" else 0
-        row["render_frames"] = [max(first, row["frames"][0] - lead), row["frames"][1]]
+        chained = row["seam"] == "continuous"
+        row["render_frames"] = [max(first, row["frames"][0] - (lead if chained else 0)), row["frames"][1]]
         row["start"], row["end"] = round(row["frames"][0] / fps, 3), round(row["frames"][1] / fps, 3)
-        row["seconds"] = round((row["render_frames"][1] - row["render_frames"][0]) / fps, 3)
+        # what Seedance gets (and is paid for): the chained clip's opening included
+        row["seconds"] = round((row["render_frames"][1] - row["render_frames"][0]
+                                + (round(HEAD_SECONDS * fps) if chained else 0)) / fps, 3)
     return segments
 
 

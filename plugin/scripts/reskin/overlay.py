@@ -58,7 +58,7 @@ def problem(items) -> str | None:
         if item.get("ai", "remove") not in ("remove", "keep"):
             return f"overlay {item.get('what')!r}: ai must be remove (the models leave it out) or keep"
         if not isinstance(item.get("what"), str) or not item["what"].strip():
-            return f"overlay {item!r}: needs what, the element in Chinese (the models are told to leave it out)"
+            return f"overlay {item!r}: needs what, the element in English (the models are told to leave it out)"
         poly = item.get("poly")
         if poly is not None:
             if (not isinstance(poly, list) or len(poly) < 3

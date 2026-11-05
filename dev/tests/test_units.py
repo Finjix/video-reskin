@@ -12,15 +12,16 @@ from reskin.common import read, PROMPTS
 class PromptTests(unittest.TestCase):
     def test_compose_fills_every_placeholder(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        row = {"materials": "真实的冰块", "remove": ["游戏logo", "底部警示语"], "extra": "雪地洁白"}
+        row = {"materials": "real ice", "remove": ["the game logo", "the warning line"], "extra": "the snow stays white"}
         for kind in ("anchor", "keyframe", "video"):
-            text = prompts.compose(style, kind, row, extra="鱼不要变形")
+            text = prompts.compose(style, kind, row, extra="the fish keep their shape")
             self.assertNotIn("{", text)
-            self.assertIn("真实的冰块", text)
-            self.assertIn("游戏logo、底部警示语", text)
-            self.assertIn("雪地洁白", text)
-            self.assertIn("鱼不要变形", text)
-        self.assertTrue(prompts.compose(style, "video", row).startswith("编辑视频"))
+            self.assertIn("real ice", text)
+            self.assertIn("leaving no trace: the game logo and the warning line.", text)
+            self.assertIn("the snow stays white", text)
+            self.assertIn("the fish keep their shape", text)
+            self.assertIsNone(__import__("re").search("[\u4e00-\u9fff]", text))       # English only
+        self.assertTrue(prompts.compose(style, "video", row).startswith("Edit the video"))
 
     def test_timed_removals_only_where_on_screen(self):
         items = ["游戏logo", {"what": "底部警示语", "start": 0, "end": 10}, {"what": "右上角水印", "start": 30}]
@@ -31,10 +32,11 @@ class PromptTests(unittest.TestCase):
 
     def test_timed_materials(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        row = {"materials": ["积雪地面", {"what": "蓝色皮卡车", "start": 50, "end": 66}], "remove": []}
-        self.assertNotIn("皮卡车", prompts.compose(style, "video", row, span=(0, 11)))
-        self.assertIn("积雪地面、蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
-        self.assertIn("积雪地面", prompts.compose(style, "video", {"materials": "积雪地面"}, span=(0, 1)))
+        row = {"materials": ["snow-covered ground", {"what": "a blue pickup truck", "start": 50, "end": 66}], "remove": []}
+        self.assertNotIn("pickup", prompts.compose(style, "video", row, span=(0, 11)))
+        self.assertIn("snow-covered ground; a blue pickup truck", prompts.compose(style, "video", row, span=(48, 60)))
+        self.assertIn("snow-covered ground", prompts.compose(style, "video", {"materials": "snow-covered ground"},
+                                                             span=(0, 1)))
 
     def test_shapes_stay_and_style_reference(self):
         style = read(PROMPTS)["presets"]["realistic"]
@@ -42,16 +44,16 @@ class PromptTests(unittest.TestCase):
         for kind in ("anchor", "keyframe", "video"):
             text = prompts.compose(style, kind, row)
             # materials become real; shapes, proportions and designs stay (no redesign of objects or characters)
-            self.assertIn("风格不变", text)
-            self.assertIn("造型、比例", text)
-            self.assertNotIn("重构", text)
-            self.assertNotIn("质感参考", text)
-        self.assertIn("图2是写实质感参考", prompts.compose(style, "anchor", row, style_ref=True))
+            self.assertIn("keeping the style unchanged", text)
+            self.assertIn("shape, proportions", text)
+            self.assertNotIn("rebuild", text)
+            self.assertNotIn("reference for realistic texture", text)
+        self.assertIn("Image 2 is a reference for realistic texture", prompts.compose(style, "anchor", row, style_ref=True))
 
     def test_no_removal_clause_when_empty(self):
         style = read(PROMPTS)["presets"]["realistic"]
         text = prompts.compose(style, "anchor", {"materials": "x", "remove": []})
-        self.assertNotIn("删除", text)
+        self.assertNotIn("Remove these elements", text)
 
 
 class ImageRetryTests(unittest.TestCase):
@@ -101,8 +103,8 @@ class DeliveryDirTests(unittest.TestCase):
             with mock.patch.object(JOB, "sha", return_value="h"):
                 _, state = JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "a")})
                 self.assertEqual({k: state["options"][k] for k in ("resolution", "fps", "review_rounds", "chain_prefix")},
-                                 {"resolution": "720p", "fps": 24, "review_rounds": 2, "chain_prefix": True})
-                for options in ({"resolution": "1080p"}, {"resolution": "480p"}, {"fps": 60}, {"chain_prefix": "yes"}):
+                                 {"resolution": "1080p", "fps": 24, "review_rounds": 2, "chain_prefix": True})
+                for options in ({"resolution": "720p"}, {"resolution": "480p"}, {"fps": 60}, {"chain_prefix": "yes"}):
                     with self.assertRaises(ValueError):
                         JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "b"), "options": options})
 

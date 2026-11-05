@@ -126,7 +126,9 @@ def masks(job: Path, source_id: str, source: Path, row: dict, size: tuple[int, i
     found = {}
     keep_start, keep_end = row["keep"]
     for n, item in enumerate(row.get("remove") or []):
-        if not is_wiped(item):
+        # every boxed item: wiped ones are filled with it; the others (`"wipe": "none"`) are painted into the lead
+        # frames of a chained clip (render.lead_logos) and their corners checked
+        if not (isinstance(item, dict) and item.get("box")):
             continue
         start = max(keep_start, float(item.get("start", keep_start)))
         end = min(keep_end, float(item.get("end", keep_end)))
@@ -156,6 +158,9 @@ def load(path: str) -> np.ndarray:
 
 def wipe(frame: np.ndarray, rect: list[int], soft: np.ndarray) -> None:
     """Fill the masked pixels of `frame` (RGB uint8, in place) inside `rect` from the scene around them.
+
+    (Adding the fine detail of the scene beside the box, so the patch is not smooth, copied ghost outlines of fence
+    posts into a wiped warning line; a smooth fill Seedance keeps as a blurred patch. Hence prompt removal by default.)
 
     (Filling them first from a plate of the scene seen in other frames, the camera motion tracked around the box,
     rebuilt icons and fences under the letters in calm stretches, but pasted stale or misaligned scene wherever

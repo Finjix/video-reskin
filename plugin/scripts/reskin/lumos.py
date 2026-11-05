@@ -170,7 +170,7 @@ def submit(path: str, body: dict, *, media_id: str, generation_type: str, patien
         time.sleep(60)
 
 
-def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = "720p",
+def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = "1080p",
                       model: str = VIDEO_MODEL, log=None) -> dict:
     # In video_edit mode Seedance takes the output ratio and length from the input clip, so the ratio stays adaptive.
     body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
@@ -181,7 +181,7 @@ def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolutio
 
 
 def submit_image_to_image(images: list[dict], prompt: str, *, model: str, aspect_ratio: str,
-                          resolution: str = "1K", quality: str = "high", log=None) -> dict:
+                          resolution: str = "2K", quality: str = "high", log=None) -> dict:
     body = {"reference_images": images, "prompt": prompt, "aspect_ratio": aspect_ratio, "resolution": resolution,
             "quality": quality, "output_format": "png", "background": "opaque", "output_compression": 100,
             "sample_count": 1, "model": model}

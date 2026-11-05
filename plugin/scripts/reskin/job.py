@@ -10,7 +10,7 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-RESOLUTION = "720p"        # Seedance renders and deliveries: one size for every job (cost and speed over detail)
+RESOLUTION = "1080p"       # Seedance renders and deliveries: one size for every job (the user's choice, 2026-11-05)
 DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
             "review_rounds": 2, "chain_prefix": True}
 

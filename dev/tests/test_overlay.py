@@ -43,16 +43,16 @@ class PromptTests(unittest.TestCase):
     def test_burned_items_are_left_out_by_the_models(self):
         style = read(PROMPTS)["presets"]["realistic"]
         row = {"materials": "积雪地面", "remove": ["游戏logo"],
-               "overlays": [{"what": "底部字幕「钓到大鱼」", "box": [.1, .1, .2, .2], "start": 2, "end": 4},
+               "overlays": [{"what": "the caption \"Big catch!\" at the bottom", "box": [.1, .1, .2, .2], "start": 2, "end": 4},
                             {"what": "需求气泡", "box": [.5, .5, .6, .6], "ai": "keep"}]}
         during = prompts.compose(style, "video", row, span=(1, 3))
-        self.assertIn("底部字幕「钓到大鱼」", during)
-        self.assertIn("由程序原样叠加", during)
+        self.assertIn("the caption \"Big catch!\" at the bottom", during)
+        self.assertIn("overlaid exactly by a program", during)
         self.assertNotIn("需求气泡", during)
-        self.assertNotIn("由程序原样叠加", prompts.compose(style, "video", row, span=(5, 8)))
+        self.assertNotIn("overlaid exactly by a program", prompts.compose(style, "video", row, span=(5, 8)))
         for kind in ("anchor", "keyframe", "video"):
             self.assertNotIn("{", prompts.compose(style, kind, row, span=(2, 2)))
-            self.assertIn("写实", prompts.compose(style, kind, row, span=(2, 2)))
+            self.assertIn("realistic materials", prompts.compose(style, kind, row, span=(2, 2)))
 
 
 class PictureTests(unittest.TestCase):

@@ -73,6 +73,23 @@ class JoinTests(unittest.TestCase):
             self.assertEqual(assemble.inside_jump(jumped, 24, 24.0)["jump"], "visible")
 
 
+class LookTests(unittest.TestCase):
+    def test_a_look_step_at_a_seam_stands_out(self):
+        rng = np.random.default_rng(5)
+        scan = {"fps": 24.0, "saturation": np.abs(rng.normal(.2, .1, 600)), "colour": np.abs(rng.normal(.5, .2, 600))}
+        scan["saturation"][299] = 2.3          # the pair ending at 12.5 s (GOF3D10012's 26.4 s seam: 2.31 vs 0.19)
+        verdict = assemble.look_verdict(scan, 12.5, [12.5])
+        self.assertEqual(verdict["jump"], "visible")
+        self.assertGreater(verdict["saturation"]["z"], 8)
+        self.assertEqual(assemble.look_verdict(scan, 20.0, [12.5, 20.0])["jump"], "clean")   # an ordinary moment
+
+    def test_phase_shift_finds_a_pan(self):
+        rng = np.random.default_rng(6)
+        a = rng.uniform(0, 255, (64, 48)).astype(np.float32)
+        b = np.roll(np.roll(a, 3, axis=0), -2, axis=1)
+        self.assertEqual(assemble._phase_shift(a, b), (3, -2))
+
+
 class HudTests(unittest.TestCase):
     def test_hud_boxes(self):
         self.assertIsNone(plan.hud_problem([{"box": [0, .1, .28, .15], "what": "金币"}]))

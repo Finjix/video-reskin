@@ -24,8 +24,10 @@ class ChainTests(unittest.TestCase):
             job = Path(folder)
             r = dict(row(), chain_prefix=source_says)
             state = {"sources": [{"id": "S01", "sha256": "x"}],
-                     "options": {"resolution": "720p", "chain_prefix": prefix}}
+                     "options": {"resolution": "1080p", "chain_prefix": prefix}}
             write(job / "config/redo.json", {"S01:K03": {"attempt": 2, "prompt": "纠正语句。"}})
+            (job / "keyframes").mkdir()
+            (job / "keyframes/S01-K01.png").write_bytes(b"shot keyframe")      # the shot's first segment
             style = read(PROMPTS)["presets"]["realistic"]
             with self.assertRaises(ValueError):          # the segment before it is not rendered yet
                 render.inputs_for(job, state, r, "S01", r["segments"][2], style, None)
@@ -35,14 +37,30 @@ class ChainTests(unittest.TestCase):
         inputs = self.inputs(True)
         self.assertEqual(inputs["chain"], "g1")
         self.assertEqual(inputs["lead"], 15)               # K03 renders 15 frames before its own part
-        self.assertIn("视频开头约0.5秒已经是上一段做好的写实画面", inputs["prompt"])
+        # the clip opens with the shot's first 0.5 s (its keyframe is the reference picture): Seedance reads the edit
+        # from that pair; with the lead first it read "change nothing" (GOF3D10012 K02: cartoon trees at 26.4 s)
+        self.assertEqual(inputs["head"], [0, 15])
+        self.assertIn("keyframe", inputs)
+        self.assertIn("The first 0.5 s of the video are an earlier moment of this shot", inputs["prompt"])
+        self.assertIn("its first 0.5 s are already the finished realistic picture of the previous segment",
+                      inputs["prompt"])
         self.assertTrue(inputs["prompt"].rstrip().endswith("纠正语句。"))
         plain = self.inputs(False)
         self.assertNotIn("lead", plain)
         self.assertNotIn("lead", self.inputs(True, source_says=False))     # the edits of one source switch it off
-        self.assertIn("图片1就是上一段视频在本段第一帧这一刻的画面", plain["prompt"])
-        # switching the prefix on for a rendered segment renders it again (a plan change)
-        self.assertEqual(render.cause_of({"digest": "old", "inputs": render.core_inputs(plain)}, inputs, {}), "plan")
+        self.assertIn("image 1 is the previous video's frame at the first moment of this segment", plain["prompt"])
+        # switching the prefix on for a rendered segment renders it again (its reference picture changes)
+        self.assertEqual(render.cause_of({"digest": "old", "inputs": render.core_inputs(plain)}, inputs, {}), "keyframe")
+
+    def test_logos_left_to_seedance_stay_in_the_lead(self):
+        r = row()
+        r["remove"] = [{"what": "左上角logo", "start": 0, "end": 65.7, "box": [0, 0, .2, .05]},
+                       {"what": "右上角logo", "start": 0, "end": 30, "box": [.7, 0, 1, .1], "wipe": "before"},
+                       {"what": "右下角logo", "start": 46, "end": 65.7, "box": [.7, .9, 1, 1]}]
+        masks = {0: {"hash": "a"}, 1: {"hash": "b"}, 2: {"hash": "c"}}
+        k03 = r["segments"][2]                    # lead 45.13-45.63 s
+        self.assertEqual(render.lead_logos(r, k03, masks), [[0.0, 0.0, 0.2, 0.05, 0.0, 0.5, "keep:a"]])
+        self.assertEqual(render.lead_logos(r, r["segments"][0], masks), [])      # no lead
 
     def test_lead_count(self):
         segs = row()["segments"]
@@ -53,7 +71,7 @@ class ChainTests(unittest.TestCase):
             job = Path(folder)
             write(job / "config/redo.json", {"S01:K02": {"attempt": 2, "prompt": "黄鳍金枪鱼保持金黄色。"}})
             text = preview.corrections(job, "S01", row(), 40.0)
-            self.assertTrue(text.startswith("这张画面是本段第18秒"))
+            self.assertTrue(text.startswith("This picture is the frame 18 s into its segment"))
             self.assertTrue(text.endswith("黄鳍金枪鱼保持金黄色。"))
             self.assertEqual(preview.corrections(job, "S01", row(), 10.0), "")
 
@@ -227,14 +245,15 @@ class IdentityTests(unittest.TestCase):
 
 class WipeTests(unittest.TestCase):
     def test_boxes_for_the_clip(self):
-        r = {"remove": ["底部警示语", {"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15]},
-                        {"what": "左下角logo", "start": 37.5, "end": 55.2, "box": [0.03, 0.85, 0.3, 0.92]},
-                        {"what": "右下角logo", "start": 0, "end": 55.2, "box": [0.7, 0.85, 1, 0.92], "wipe": "none"}]}
+        r = {"remove": ["底部警示语", {"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15],
+                                       "wipe": "before"},
+                        {"what": "左下角logo", "start": 37.5, "end": 55.2, "box": [0.03, 0.85, 0.3, 0.92], "wipe": "before"},
+                        {"what": "右下角logo", "start": 0, "end": 55.2, "box": [0.7, 0.85, 1, 0.92]}]}       # default: prompt
         logos = {1: {"hash": "a1"}, 2: {"hash": "b2"}}
         self.assertEqual(render.clean_boxes(r, 10.0, 30.0, logos), [[0.7, 0.08, 0.97, 0.15, 0.0, 6.5, "glyph:a1"]])
         self.assertEqual(render.clean_boxes(r, 30.0, 50.0, logos), [[0.03, 0.85, 0.3, 0.92, 7.5, 20.0, "glyph:b2"]])
         # a rounding sliver of overlap does not count
-        self.assertEqual(render.clean_boxes({"remove": [{"what": "x", "start": 10.33, "end": 24.5,
+        self.assertEqual(render.clean_boxes({"remove": [{"what": "x", "start": 10.33, "end": 24.5, "wipe": "before",
                                                          "box": [0.7, 0.9, 1, 1]}]}, 0.0, 10.333), [])
         with self.assertRaises(ValueError):          # a wipe never runs without its mask
             render.clean_boxes(r, 0.0, 10.0, {})
@@ -245,8 +264,9 @@ class WipeTests(unittest.TestCase):
             self.assertIsNotNone(plan.items_problem([bad], "remove"))
 
     def test_clip_size_follows_the_job_resolution(self):
-        self.assertEqual(render.clip_size(1080, 1920), (720, 1280))
-        self.assertEqual(render.clip_size(1920, 1080), (1280, 720))
+        self.assertEqual(render.clip_size(1080, 1920), (1080, 1920))
+        self.assertEqual(render.clip_size(2160, 3840), (1080, 1920))
+        self.assertEqual(render.clip_size(1280, 720, "720p"), (1280, 720))
         self.assertEqual(render.clip_size(540, 960), (540, 960))         # never larger than the source
 
     def test_logo_mask_is_the_still_letters(self):
@@ -373,23 +393,24 @@ class WipeTests(unittest.TestCase):
     def test_wiped_items_are_named_by_position_only(self):
         from reskin import prompts
         style = read(PROMPTS)["presets"]["realistic"]
-        r = {"materials": "x", "remove": [{"what": "右上角logo甲", "box": [.7, .02, .98, .1]},
-                                          {"what": "底部警示语乙", "box": [.08, .93, .92, .995], "start": 0, "end": 20},
-                                          {"what": "左下角logo丙", "box": [0, .89, .28, .945], "wipe": "none"}]}
+        r = {"materials": "x", "remove": [{"what": "logo A", "box": [.7, .02, .98, .1], "wipe": "before"},
+                                          {"what": "warning line B", "box": [.08, .93, .92, .995], "start": 0, "end": 20,
+                                           "wipe": "before"},
+                                          {"what": "logo C", "box": [0, .89, .28, .945]}]}
         video = prompts.compose(style, "video", r, span=(0.0, 10.0))
-        self.assertNotIn("右上角logo甲", video)       # wiped by the program: never named for Seedance
-        self.assertNotIn("底部警示语乙", video)
-        self.assertIn("画面右上角、底部有被抹平的模糊色块", video)
-        self.assertIn("左下角logo丙", video)          # left in the clip: the model is told to remove it
+        self.assertNotIn("logo A", video)       # wiped by the program: never named for Seedance
+        self.assertNotIn("warning line B", video)
+        self.assertIn("blurred patches at the top-right corner and bottom edge of the picture", video)
+        self.assertIn("leaving no trace: logo C.", video)          # left in the clip: the model is told to remove it
         later = prompts.compose(style, "video", r, span=(30.0, 40.0))
-        self.assertIn("画面右上角有被抹平的模糊色块", later)
+        self.assertIn("blurred patches at the top-right corner of the picture", later)
         # GPT Image sees the original frame with the logo: it is told to remove every one
         keyframe = prompts.compose(style, "keyframe", r, span=(5.0, 5.0))
-        self.assertIn("右上角logo甲", keyframe)
-        self.assertNotIn("模糊色块", keyframe)
+        self.assertIn("logo A", keyframe)
+        self.assertNotIn("blurred patches", keyframe)
         self.assertEqual([prompts.where(b) for b in ([0, 0, .21, .05], [.71, .085, .97, .15], [.08, .93, .92, .995],
                                                      [0, .4, .2, .6], [.4, .4, .6, .6])],
-                         ["左上角", "右上角", "底部", "左侧", "中间"])
+                         ["top-left corner", "top-right corner", "bottom edge", "left side", "middle"])
 
     def test_smear_is_measured(self):
         import numpy as np

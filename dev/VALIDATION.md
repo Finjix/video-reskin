@@ -131,3 +131,89 @@ patch 21, experiment 20) for 9 videos of about 500 s, and 529 Gemini calls (324 
   does not name the logo, the delivery is 720x1280 at 24 fps, the seam measures clean (switch 0.52, inside clean).
 - Not verified on Lumos yet: whether Seedance keeps the 1 s lead as given and continues it without a step, whether
   the position sentence makes it paint scene over the wiped letters, and how 720p looks. Try one source first.
+
+## 2026-11-05 (later): GOF3D10012 repaired at 720p (`D:\720P成片`)
+
+- Wipe + position sentence (the default of the morning): K01 held by the segment check, every wiped corner smeared
+  again (detail 0.17-0.25), and Seedance drew the exact 「无尽冬日」 logo into the top-right corner for the first 0.3 s
+  although the clip was wiped from frame 0 and the reference picture was clean. A texture fill (push-pull colour plus
+  the fine detail beside the box) copied ghost fence posts into the warning line offline, so it was dropped.
+- 5 s probe, logos left in the clip and named: both top logos removed cleanly; the bottom warning line kept crisp.
+- Full run on a source copy with the bottom 6% cropped (rows 0-1805 of 1920, width 1016 centred, scaled back), all
+  logos named: K01 removed every logo; K02 (a chained segment) kept all three, because its lead second came from K01
+  without logos and the logos "appeared" with its own frames. The lead frames now get the source's logo pixels
+  painted back (`render.lead_logos`); the redone K02 removed every logo.
+- `身穿棕色皮毛大衣的渔民雇工` (17.5-42 s) was named in all of K01 and turned the white protagonist brown from 0.2 s;
+  contrasting wording fixed it (one K01 redo, K02 upstream).
+- Final: seam at 25.46 s clean at the switch (6.95 vs motion 11.58) and where K02's own frames start (9.87 vs 9.54;
+  18.3 vs 8.91 before the fixes); review round 2 pass (one medium identity note at 18.5 s); no leftover logo, no
+  blur, no warning line on the wipe sheets. Spend: 6 images, 146.3 s of 720p Seedance (first try 28.9, probe 5.0,
+  final job 112.4 with one redo and its upstream); the old 1080p version of this video took 50 images and 238.9 s.
+- The run process died once at about 15 minutes when the shell that started it ended; the next `run` picked the
+  generation up from Lumos without paying again.
+
+## 2026-11-05 (evening): the 26.4 s jump in the repaired GOF3D10012
+
+- The user found a jump at 26.4 s (where K02's own frames start): the trees at the top back to the game's cartoon
+  cones, the river lighter. The frame-to-frame measure called it clean (9.87 vs 9.54 during a fast pan), the
+  3 s Gemini close-up was centred on the switch (25.46 s) and missed it, the review passed. A region-distance measure
+  (restyled vs original per region) was no use either: ordinary action elsewhere scored higher.
+- Cause: Seedance reads its edit from the clip's first frame and the reference picture. K02's clip began with K01's
+  result and its reference was a copy of that frame, so it read "change nothing" and kept the source's look in its own
+  part (trees; earlier the logos; the protagonist's source colour).
+- Three 5 s probes across the boundary (15.5 s): P1 lead + the shot's keyframe as reference: trees fine, the logo
+  kept (switch local 28.3, visible); P2 the shot's first 0.5 s + lead + own frames, reference the shot's keyframe:
+  trees fine, logo removed, switch 4.65 vs 11.75 (clean), own-frames step 10.85 vs 11.42 (clean); P3 no lead:
+  switch 11.98, another render. P2 is now how chained clips are built (`render.opening`, `head_frames` in the render
+  record, the opening dropped in `assemble.work_clip`, 1.5 s added within the 30 s limit).
+- A Gemini stills check of every in-shot seam (restyled 0.5 s before, at and after the switch and the own-frames
+  moment, the original above) flagged the 26.4 s change on the faulty video ("雪松从写实的松针细节突然突变为原版低多边形卡通风格");
+  any change there is now a high issue.
+- K02 rendered again with the opening pair (30.0 s; keep shortened by 0.3 s to 54.87 s so the split, and K01, stay):
+  25-28 s continuous on stills (realistic cedars, same river), switch 5.8 vs 11.71, own frames 12.31 vs 10.25, the
+  stills check consistent, every logo removed, review round 3 pass. GOF3D10012 total: 6 images, 191.8 s of 720p Seedance
+  (first try 28.9, logo probe 5.0, chain probes 15.5, renders 142.4).
+
+- The user then saw the river change colour at 26 s and change back, "as if a piece were inserted": per-frame river
+  colour was K01 [90,106,123] to 25.45 s, K02's copy of the lead [94,104,116] from the switch at 25.46 s to 26.37 s,
+  then K02's own part [76,98,117]. Seedance keeps the lead's shapes but re-grades its colours. Grey-level measures,
+  a per-region distance and a colour-window measure all missed it. Assembly now plays the earlier segment through
+  the shared second and cuts to the later one's own frames, colours matched on 12 frames each side
+  (`assemble.cut_join`, ASSEMBLY_VERSION 6): re-assembled without a render, the river runs [82,99,117] -> [78,97,116]
+  across the cut, step 10.12 vs motion 11.05 (clean). Left: K02's own part draws one tree crown entering at the
+  top-left edge in the game's light-blue cone shape for 26.38-26.9 s.
+- A K02 redo (30 s) for that tree crown with `画面顶部边缘进入画面的每一棵树都是挂满积雪的写实雪松……绝不能出现浅蓝色圆锥形的
+  卡通树冠` drew the game's cone trees across the whole top band from 26.38 s (the cut then 15.68 vs 10.95, slight).
+  Naming the unwanted look drew it. The earlier generation (ec33d004) was downloaded again and put back (the redo's
+  file kept as `ai/S01-K02-b84ed051-rejected.mp4`); delivered: the cut clean (10.12 vs 11.05), review round 5 with 0
+  high issues (four medium ones dismissed on the stills). The small tree crown at 26.38-26.9 s stays. GOF3D10012
+  total: 6 images, 221.8 s of 720p Seedance.
+
+## 2026-11-05 (night): seam review strengthened
+
+- The user still saw the 26.4 s seam (river saturation, fish colour, a tree crown, small scene changes) after the
+  cut-based assembly measured it clean (10.12 vs motion 11.05). A per-region motion-compensated residual did not single
+  it out (4.6 against ordinary action up to 17.2). Saturation and colour steps after the original's camera shift is
+  taken out did: saturation 2.31 at the cut, the top of the 14-36 s window, usual 0.19 (z 9.4 over the whole video;
+  1 of 1291 ordinary pairs at z >= 8, the original's end-card flash at 54 s). Built in as `assemble.look_scan` /
+  `look_verdict` (ASSEMBLY_VERSION 7): the seam is now `visible`.
+- Gemini on the two consecutive frames at full size (original below): at the cut `medium` (the low-poly tree crown,
+  fish and water jumping); an ordinary pair at 20 s `low` (fish highlights, spray). Built in as `gemini-seam-pair`
+  (medium or high -> high issue), replacing the 0.5 s stills.
+- Review round 6 of GOF3D10012: both report the 26.4 s seam high, so the video fails, as the user judged it. The
+  seam sheet shows the two frames at full size with a change map and the final verdict.
+
+## 2026-11-05 (late): every prompt in English
+
+At the user's request every text sent to the models is English: the preset templates and the chain, removal, wipe and
+burn sentences (`assets/prompts.json`), positions and lists built by `prompts.py`, the preview prefix, the Chinese
+labels and examples inside the Gemini prompts, `lint` drafting `materials`/`remove` and its suggestions in English,
+and the skill telling the agent to write `materials`, `remove`, `extra`, overlay `what` and `--prompt` in English.
+Gemini still writes report texts (issue descriptions, summaries) in Chinese for the user. Not yet rendered with the
+English prompts.
+
+## 2026-11-05 (late): back to 1080p renders and 2K images
+
+At the user's request Seedance renders 1080p again (`job.RESOLUTION`, `lumos.submit_video_edit`; clips sent at 1080
+on the short side, deliveries 1080p at 24 fps) and GPT Image runs at 2K (`lumos.submit_image_to_image`), quality high.
+Existing jobs keep the resolution stored in their job.json. Not yet rendered at these settings.

@@ -1,10 +1,10 @@
 # video-reskin
 
-版本 `0.0.1`（见 `plugin/plugin.json`）。批量把视频转换画风的 OpenAI 插件，主要面向 ChatGPT / Codex 的本地执行环境，支持 Windows 10/11 x64。默认风格是“写实版材质，风格不变”，成片固定为 720p、24fps，会去掉游戏 logo、底部警示语和片尾尾板，保留原声。工作流以“画面稳定、接缝无跳变、成本低”为先，写实程度适度即可。
+版本 `0.0.1`（见 `plugin/plugin.json`）。批量把视频转换画风的 OpenAI 插件，主要面向 ChatGPT / Codex 的本地执行环境，支持 Windows 10/11 x64。默认风格是“写实版材质，风格不变”，成片固定为 1080p、24fps，会去掉游戏 logo、底部警示语和片尾尾板，保留原声。工作流以“画面稳定、接缝无跳变、成本低”为先，写实程度适度即可。
 
 ## 工作流
 
-AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
+AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作。所有发给模型的提示词（GPT Image、Seedance、Gemini）统一用英文：模板、程序拼出的句子，以及 edits 里的材质、去除项、`extra` 和 `redo --prompt` 的纠正语句；报告和给用户的说明仍用中文。
 
 ```powershell
 & "plugin/scripts/video_reskin.cmd" --help
@@ -16,18 +16,18 @@ AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
 
 1. **分析**（`analyze`）：识别镜头切换，找出尾板起点候选和静止叠加物（logo、警示语、HUD），生成联系表。AI 看图后写 edits 文件，内容包括保留区间、画面里的真实材质、要去除的元素、需要保留原样的 HUD 框、由程序烧录的文字/UI（`overlays`）和锚点帧。
 2. **分段**（`plan`）：Seedance 2.5 能一次编辑 4–30 秒，30 秒内画质保持稳定，所以分段尽量少、尽量长，优先在硬切处断开。超长镜头会平均切分，断点选在画面最静止的位置，后一段多渲染 1 秒作为重叠区。
-3. **关键帧**（`keyframes`）：写实预设只把材质、纹理和光影换成真实世界的样子，物体和角色的造型、比例、布局、位置、数量、动作和固有颜色都不变（Q版人物仍是Q版造型，只是衣服、皮肤和头发变成真实材质）。用户给了参考图或参考视频时，edits 里的 `style_ref`（视频某一帧，可裁掉 logo 和警示语）作为锚点的第二张图，只学习它的质感，不复制内容。参考飞书案例，先用 `gpt-image-2.5-sunburst` 把锚点帧“转化为写实版材质，风格不变”，再以锚点为参考，生成每个镜头首段的首帧。图片统一走 Lumos 图生图接口（用 Lumos 登录态，不用 Winky key），质量 `high`、分辨率 1K（720p 成片用不到更高）。
-4. **视频编辑**（`render`）：在 Lumos 上逐段调用 Seedance 2.5（`doubao-seedance-2-5-260628`），模式是 `video_edit`，分辨率固定 720p，送去的片段也是 720p。同一镜头内的各段串成一条链：首段以关键帧作参考；后面每段的输入片段开头 1 秒直接是上一段 AI 结果的最后 1 秒（按原片时钟拉伸回去），参考图是其中第一帧，所以 Seedance 是接着上一段已经画好的画面往下画，而不是只看一张图重新“想象”一遍。1080p 那批只给参考图，13 个镜头内接缝里有 8 个按现在的标准测出明显跳变（GOF3D10374 在 33.6 秒处原木、水面和纹理都变了）。带 `box` 的 logo 和警示语在送去的片段里由程序按字母抹掉，视频提示词不点名 logo，只说“画面右上角有被抹平的模糊色块”，让 Seedance 在那里画出连贯的场景（1080p 那批没有这句话，S01、S09 的每个角落都留下了模糊块）；角落仍然糊时改用 `"wipe": "none"`：logo 留在片段里，由提示词让 Seedance 自己删。不同镜头、不同视频之间并行，可以断点续跑。
+3. **关键帧**（`keyframes`）：写实预设只把材质、纹理和光影换成真实世界的样子，物体和角色的造型、比例、布局、位置、数量、动作和固有颜色都不变（Q版人物仍是Q版造型，只是衣服、皮肤和头发变成真实材质）。用户给了参考图或参考视频时，edits 里的 `style_ref`（视频某一帧，可裁掉 logo 和警示语）作为锚点的第二张图，只学习它的质感，不复制内容。参考飞书案例，先用 `gpt-image-2.5-sunburst` 把锚点帧“转化为写实版材质，风格不变”，再以锚点为参考，生成每个镜头首段的首帧。图片统一走 Lumos 图生图接口（用 Lumos 登录态，不用 Winky key），质量 `high`、分辨率 2K。
+4. **视频编辑**（`render`）：在 Lumos 上逐段调用 Seedance 2.5（`doubao-seedance-2-5-260628`），模式是 `video_edit`，分辨率固定 1080p，送去的片段也是 1080p。同一镜头内的各段串成一条链：首段以关键帧作参考；后面每段的输入片段依次是：这个镜头开头 0.5 秒的原片（参考图是这个镜头的关键帧，Seedance 从“第一帧 → 参考图”这一对里读出要做的改动）、上一段 AI 结果的最后 1 秒（按原片时钟拉伸回去），再是本段自己的原片；拼接时去掉开头那 0.5 秒，前一段一直播到这 1 秒结束，再直接切到本段自己的画面，颜色按切点两侧的画面匹配（Seedance 会给复制的那 1 秒重新调色，在里面切换会多出一段颜色不同的画面）。只把上一段结果放在最前面、参考图也用它时，Seedance 读出的改动是“什么都不改”，GOF3D10012 在 26.4 秒处树又变回卡通、河水变浅，logo 也没删。1080p 那批只给参考图，13 个镜头内接缝里有 8 个按现在的标准测出明显跳变（GOF3D10374 在 33.6 秒处原木、水面和纹理都变了）。logo 默认留在送去的片段里，由提示词让 Seedance 删除：GOF3D10012 在 720p 下所有角落都删干净了，没有模糊块。链式的后一段开头那 1 秒来自上一段结果（已经没有 logo），程序会把原片的 logo 像素贴回这 1 秒，让 logo 从第一帧起就在，否则 Seedance 会把中途“出现”的 logo 当成新内容保留。程序先抹掉字母再送（`"wipe": "before"`）的做法，Seedance 每次都留下模糊块（还有一次自己重新画出了游戏 logo），不再用于 logo。画面最底边的警示语无论点名还是抹掉都会保留，干净的去法只有把原片副本的底边裁掉（约 6% 放大），需要先征得用户同意。不同镜头、不同视频之间并行，可以断点续跑。
 5. **拼接**（`assemble`）：
    - Seedance 返回 24fps 视频，时长比原片段略短，每段按原时长精确拉伸。
    - 同一镜头内的接缝先做最小二乘调色，再在共享的那 1 秒里找两版最相近的一帧，用 2 帧切换，不做淡入淡出（两版不同时，长一点的过渡看起来就是渐变）。每个接缝都测两处：切换点两版的差异，以及后一段自己的画面开始处的逐帧变化；结果分为 clean、slight、visible 三档，标准比以前严（差异超过画面自身运动 2.2 倍也算明显），并生成接缝对照图。
    - 每个去 logo 的角落都会测一次：被抹掉的字母区域里剩下的细节和周围场景相比的比例，低于 0.4 判为 `smeared`（模糊涂抹块），低于 0.6 判为 `soft`。1080p 那批糊掉的角落测得 0.1–0.38，干净的约 1.05。
    - HUD 框内“镜头移动时始终静止”的像素（图标、底框和其中的数字）逐帧从原片贴回，数字始终正确。
    - 屏幕固定的平面 2D 文字和 UI（字幕、标签、横幅、按钮）用 `overlays` 由程序烧录：模型在关键帧和视频里不画这些元素，拼接时再逐帧从原片贴回（可按矩形、椭圆、多边形或颜色抠出），或者由程序直接绘制文字，保证内容准确。场景里的 UI（地面价格牌、角色头顶气泡等透视元素）和复杂动效文字仍交给模型：贴图跟不上镜头运动。
-   - 最后铺上原片对应区间的音频，输出 720p、24fps 的 H.264。
+   - 最后铺上原片对应区间的音频，输出 1080p、24fps 的 H.264。
 6. **质检**（`review`）：
    - 把原片和成片并排同步交给 `gemini-3.8-flash` 全片审查：穿帮、bug、新增文字、拼接色差、残留 logo/文字、尾板。
-   - 再对每个接缝前后 3 秒以 10fps 单独近看；程序测得的接缝跳变和模糊的去 logo 角落也作为问题加进报告。
+   - 再对每个接缝以 10fps 单独近看（覆盖切换点和后一段自己的画面开始处）。另外两道接缝检查：程序对整条视频逐帧算“观感变化”（扣除原片算出的镜头位移和原片自身的变化后，饱和度和颜色的变化），接缝处的变化和这条视频平时的变化比，明显超出就判为跳变；再把接缝前后相邻两帧按原尺寸并排（下面附原片同两刻）交给 Gemini 逐区域比对，medium 以上都算 high。GOF3D10012 26.4 秒的接缝（河水饱和度、鱼的颜色、顶部边缘的树），灰度测量和视频近看都漏掉了，这两道都抓到了。接缝对照图也改为原尺寸的前后两帧加一张变化热图。程序测得的模糊去 logo 角落也作为问题加进报告。
    - 写实度只作为时间线报告（5 分像真实相机实拍），2 分及以下才算 medium 问题；不再为写实度返工。
    - 一致性检查（`identity`）只在审片时做一次：反复出现的主体（主角、顾客、车辆、机器）和风格关键帧逐对比较。
    - 去 logo 区域检查（`gemini-wipe`）：每个带 `box` 的去除项按时间抽 8 个时刻，原片和成片的该角落上下对照，Gemini 找残留字母、复制进来的物体和糊斑。
@@ -39,7 +39,7 @@ AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
 
 1080p 那批 9 条视频（约 500 秒）生了 427 张图（393 张是预览图），提交了 87 次 Seedance、共 1952 秒（首次 547 秒，其余是返工、改计划、链式连带、改 logo 框和补丁）。现在的做法：
 
-- **固定 720p、24fps**：Seedance 按 720p 渲染，成片 720p、24fps（就是 Seedance 的帧率）；GPT Image 质量从 `max` 改为 `high`、分辨率 1K。
+- **固定 1080p、24fps**：Seedance 按 1080p 渲染，成片 1080p、24fps（就是 Seedance 的帧率）；GPT Image 质量 `high`（不用 `max`）、分辨率 2K。
 - **不再自动出预览图**：`run` 只做关键帧（每个源一个锚点加每个镜头的首帧）。`preview --only S01 --at T` 只在关键帧看不到的时刻有疑问时用，每次最多 4 张。
 - **去掉 midframes 和局部补丁**：预览图不再作为参考图交给 Seedance（它把预览图的颜色错误带进视频）；`patch` 已删除（每个补丁多两个接缝）。
 - **写实度适度**：只换材质、不改造型，不追求“更真实”，不为写实度返工；身份一致性检查只在审片时做一次。
@@ -65,8 +65,8 @@ AI 阅读 `plugin/skills/video-reskin/SKILL.md` 后通过统一入口操作：
 | --- | --- |
 | 登录 | `POST /marauders-map/lumos-auth/refresh`（携带 Cookie `lumos_refresh_token`）→ `lumos_access_token`，请求头为 `Authorization: LumosBearer …` |
 | 上传 | `POST /legil/server/input-media-url` → PUT 到 OSS 签名地址 → `POST /legil/server/upload-callback`（`file_id`）→ `POST /legil/server/output-media-url` |
-| 视频编辑 | `POST /legil/server/generations/video-to-video`，参数 `generation_mode: video_edit`、`resolution: 720p`、`model: doubao-seedance-2-5-260628`、`reference_videos`、`reference_images`；轮询 `GET /legil/server/generations/{id}` |
-| 图生图（关键帧） | `POST /legil/server/generations/image-to-image`，参数 `model: gpt-image-2.5-sunburst`、`quality: high`、`resolution: 1K` |
+| 视频编辑 | `POST /legil/server/generations/video-to-video`，参数 `generation_mode: video_edit`、`resolution: 1080p`、`model: doubao-seedance-2-5-260628`、`reference_videos`、`reference_images`；轮询 `GET /legil/server/generations/{id}` |
+| 图生图（关键帧） | `POST /legil/server/generations/image-to-image`，参数 `model: gpt-image-2.5-sunburst`、`quality: high`、`resolution: 2K` |
 | 审片 | `POST https://lumos.diandian.info/winky/gemini/v1/models/gemini-3.8-flash:generateContent`（`inlineData` 视频 + `videoMetadata.fps` + `responseSchema`） |
 
 Lumos 的接口是从网页的实际请求中整理出来的，网页改版后可能需要跟着调整。

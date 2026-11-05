@@ -64,8 +64,10 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
     reasons = []
     if seg["seam"] == "continuous" and index > 0:
         before = assemble.work_clip(job, source_id, lines[index - 1], out_fps, size)
-        seam = assemble.measure_seam(before, clip, lines[index - 1], lines[index], out_fps, assemble.ignore_boxes(row))
-        verdict["seam"] = {k: seam[k] for k in ("mismatch", "motion", "local", "jump")}
+        cut = bool((record.get("inputs") or {}).get("lead"))
+        seam = assemble.measure_seam(before, clip, lines[index - 1], lines[index], out_fps, assemble.ignore_boxes(row),
+                                     cut=cut)
+        verdict["seam"] = {k: seam.get(k) for k in ("mismatch", "motion", "local", "colour", "jump")}
         verdict["seam"]["inside"] = seam["inside"]
         if seam["jump"] == "visible":
             reasons.append(f"visible seam to {row['segments'][index - 1]['id']} (switch: jump {seam['mismatch']} vs "

@@ -13,14 +13,14 @@ from reskin.common import FFMPEG, digest, log, read, run, video_info, write, wri
 from reskin.prompts import describe
 
 CATEGORIES = {
-    "continuity": "穿帮: the restyled side shows something the original does not (cartoon material left over, an object or "
+    "continuity": "continuity error: the restyled side shows something the original does not (cartoon material left over, an object or "
                   "character changing identity, shape, colour or count, things appearing or vanishing, motion that no "
                   "longer matches)",
     "artifact": "bug: morphing, melting, warping, flicker, jitter, frozen or repeated frames, garbled UI text or numbers, "
                 "broken limbs, smeared detail, strong noise or a fragmented look",
     "added_text": "text the original does not have: captions, warning lines, watermarks or garbled characters drawn "
                   "anywhere (look along the bottom and top edges in particular)",
-    "seam_color": "拼接色差: a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
+    "seam_color": "seam: a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
                   "especially at the listed seam times",
     "leftover_overlay": "a logo, watermark or warning/disclaimer text that should have been removed is still visible",
     "end_card": "closing-card content (big logo, store badges, call to action) is visible",
@@ -365,7 +365,8 @@ def detect_prompt(count: int) -> str:
             "look must stay the same through the video: always the player character (the one the player controls: "
             f"it walks around, fishes, carries and sells things), and up to {SUBJECTS - 1} more that show in several "
             "frames (e.g. the customers of a queue, a vehicle, a machine, an animal). Name each in Chinese in `name` "
-            "(`主角`, `排队的顾客`, ...) and describe it in `description`. For every frame list the box of each "
+            "(e.g. the player character, the queueing customers) and describe it in `description`. For every frame list "
+            "the box of each "
             "subject visible in it: box_2d = [ymin, xmin, ymax, xmax], normalised to 0-1000 on that frame; for a "
             "group (a queue) box the nearest two or three members. Leave a subject out of a frame it is not in.")
 
@@ -440,7 +441,8 @@ PAIR_PROMPT = (
     "build (people and animals: realistic = real adult proportions, bulky winter clothes and a view from above "
     "included; stylized = toy-like proportions (oversized head or hands) but not chibi; "
     "chibi = big head, short limbs, doll or figurine; objects: not_a_figure), rendering (photo_real = looks filmed; "
-    "game_cg = a 3D game model or CG render; cartoon), colours (the main colours in Chinese, e.g. 深蓝外套、灰色毛领). "
+    "game_cg = a 3D game model or CG render; cartoon), colours (the main colours in Chinese, e.g. a navy coat and a "
+    "grey fur collar). "
     "same_colours = the MIDDLE keeps the LEFT's colours. original_changes_too = the ORIGINAL bottom differs from the "
     "ORIGINAL top in the same way (then a colour change is intended). difference (your overall verdict): none; "
     "low = small; "
@@ -838,21 +840,108 @@ def seam_prompt(seam: dict, layout: str) -> str:
 
 
 def seam_checks(job: Path, source_id: str, assembled: dict, clip: Path, layout: str) -> list[dict]:
-    """Gemini close-up of every join: 3 s around it at 10 fps, one question each."""
+    """Gemini close-up of every join at 10 fps, one question each: from SEAM_WINDOW before the switch to SEAM_WINDOW
+    after the moment the later segment's own frames start (a chained segment changed its look there, 0.9 s after
+    the switch, at the edge of a window centred on the switch: GOF3D10012 at 26.4 s)."""
     found = []
     for seam in assembled["seams"]:
-        start = max(0.0, seam["time"] - SEAM_WINDOW)
+        inside = (seam.get("inside") or {}).get("time", seam["time"])
+        start = max(0.0, min(seam["time"], inside) - SEAM_WINDOW)
+        length = max(seam["time"], inside) + SEAM_WINDOW - start
         piece = job / "review" / f"{source_id}-seam-{seam['segment'].replace(':', '-')}.mp4"
-        run([FFMPEG, "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{2 * SEAM_WINDOW:.3f}", "-i", clip,
+        run([FFMPEG, "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", clip,
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-an", piece])
         part = winky.inline(piece, "video/mp4")
         part["videoMetadata"] = {"fps": 10}
-        answer = winky.gemini([part, {"text": seam_prompt({**seam, "time": seam["time"] - start}, layout)}],
+        answer = winky.gemini([part, {"text": seam_prompt({**seam, "time": seam["time"] - start}, layout)
+                                       + (f" The later part's own frames start at {inside - start:.1f} s: watch that "
+                                          "moment as closely as the join." if inside != seam["time"] else "")}],
                               schema=SEAM_SCHEMA)
         ledger.add(job, kind="gemini", purpose="seam", key=f"{source_id}:{seam['segment']}", seconds=2 * SEAM_WINDOW)
         found.append({**seam, "answer": answer})
         log(f"{source_id}: seam {seam['segment']} at {seam['time']:.2f} s: "
             + ("consistent" if answer.get("consistent") else f"changes ({', '.join(answer.get('changed') or [])})"))
+    return found
+
+
+PAIR_SCHEMA_SEAM = {
+    "type": "OBJECT",
+    "properties": {
+        "changed": {"type": "BOOLEAN"},
+        "severity": {"type": "STRING", "enum": ["high", "medium", "low", "none"]},
+        "differences": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "description": {"type": "STRING"}},
+    "required": ["changed", "severity", "differences", "description"]}
+STILLS_SPAN = .5        # kept for the issue sheets of seam findings
+PAIR_PROMPT_SEAM = (
+    "A and B are two CONSECUTIVE frames (1/24 s apart) of one continuous camera shot of an AI-restyled video; below "
+    "them the same two moments of the ORIGINAL game footage. In 1/24 s only the camera moves a little and objects move "
+    "slightly, exactly as the ORIGINAL pair shows. Compare A with B very closely, region by region (water colour and "
+    "saturation, snow, trees and their shape, ground texture, every object, people, the edges of the frame) and list "
+    "every difference that the ORIGINAL pair does not show: other colours, brightness, saturation, textures, a tree or "
+    "object drawn differently or in the game's cartoon look, something appearing or vanishing. changed = true for any "
+    "such difference; severity: low = the flicker any frame pair of such a video has (fish highlights, spray), medium "
+    "or high = a viewer would see the picture jump. Write `differences` and `description` in Chinese.")
+
+
+def _frame(path: str, t: float, width: int, height: int) -> Image.Image:
+    raw = run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, t):.4f}", "-i", path, "-frames:v", "1", "-vf",
+               f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
+    return Image.frombytes("RGB", (width, height), raw[: width * height * 3])
+
+
+def seam_pair_sheet(source_path: str, offset: float, result_path: str, at: float, fps: float,
+                    size: tuple[int, int], output: Path) -> Path:
+    """The frame before `at` and the frame at `at` of the restyled video at full size (A | B), the original's two
+    moments below at half size."""
+    width, height = size
+    a, b = _frame(result_path, at - 1 / fps, width, height), _frame(result_path, at + .001, width, height)
+    sa = _frame(source_path, offset + at - 1 / fps, width // 2, height // 2)
+    sb = _frame(source_path, offset + at + .001, width // 2, height // 2)
+    canvas = Image.new("RGB", (2 * width, height + height // 2 + 60), "white")
+    draw = ImageDraw.Draw(canvas)
+    label = font(18)
+    canvas.paste(a, (0, 30))
+    canvas.paste(b, (width, 30))
+    canvas.paste(sa, (width // 4, height + 60))
+    canvas.paste(sb, (width + width // 4, height + 60))
+    draw.text((6, 4), f"A: RESTYLED {at - 1 / fps:.3f} s", fill="black", font=label)
+    draw.text((width + 6, 4), f"B: RESTYLED {at:.3f} s (next frame)", fill="black", font=label)
+    draw.text((width // 4 + 6, height + 34), "ORIGINAL at A", fill="black", font=label)
+    draw.text((width + width // 4 + 6, height + 34), "ORIGINAL at B", fill="black", font=label)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output, quality=92)
+    return output
+
+
+def seam_stills(job: Path, source_id: str, source_path: str, assembled: dict) -> list[dict]:
+    """Every in-shot seam: its two consecutive frames at full size, the original's below, with one question: does any
+    region change beyond what the original changes? (Stills 0.5 s apart at a third of the size passed GOF3D10012's
+    26.4 s seam; this pair found its cartoon tree crown, while an ordinary pair of the video got only `low`.) Chained
+    seams with a blended switch are asked about the switch and the moment the later segment's own frames start."""
+    found = []
+    for seam in assembled["seams"]:
+        if seam.get("seam") != "continuous":
+            continue
+        moments = [seam["time"]]
+        inside = (seam.get("inside") or {}).get("time")
+        if inside is not None and abs(inside - seam["time"]) > .02:
+            moments.append(inside)
+        for at in moments:
+            sheet = seam_pair_sheet(source_path, assembled["keep"][0], assembled["output"], at, assembled["fps"],
+                                    tuple(assembled["size"]),
+                                    job / "review" / f"{source_id}-seam-{seam['segment']}-{at:06.2f}-pair.jpg")
+            try:
+                answer = winky.gemini([winky.inline(sheet, "image/jpeg"), {"text": PAIR_PROMPT_SEAM}],
+                                      schema=PAIR_SCHEMA_SEAM)
+            except (RuntimeError, ValueError) as error:
+                log(f"{source_id}: seam pair {seam['segment']} at {at:.2f} s skipped ({error})")
+                continue
+            ledger.add(job, kind="gemini", purpose="seam", key=f"{source_id}:{seam['segment']}:pair", seconds=0)
+            found.append({**seam, "answer": {**answer, "areas": answer.get("differences") or []}, "sheet": str(sheet),
+                          "until": at, "time": at})
+            log(f"{source_id}: seam pair {seam['segment']} at {at:.2f} s: {answer.get('severity')}"
+                + (f" ({'; '.join(answer.get('differences') or [])})" if answer.get("changed") else ""))
     return found
 
 
@@ -989,7 +1078,15 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     # Measured: how far the two versions differ where the video switches from one to the other. A slight jump alone
     # is low (it rarely shows in playback); it counts when the Gemini close-up sees a change there too.
     for seam in assembled["seams"]:
-        if seam.get("jump") in ("visible", "slight"):
+        look = seam.get("look") or {}
+        if look.get("jump") in ("visible", "slight"):
+            add(start=seam["time"], end=seam["time"], category="seam_color",
+                severity="high" if look["jump"] == "visible" else "medium", where="whole frame", source="measured",
+                description=f"接缝 {seam['segment']} 处画面观感突变：饱和度变化 {look['saturation']['step']}（平时 "
+                            f"{look['saturation']['usual']}，z {look['saturation']['z']}），颜色变化 {look['colour']['step']}"
+                            f"（平时 {look['colour']['usual']}，z {look['colour']['z']}），已扣除镜头运动和原片自身的变化",
+                segments=[seam["segment"]])
+        if seam.get("jump") in ("visible", "slight") and look.get("jump") != seam.get("jump"):
             inside = seam.get("inside") or {}
             add(start=seam["time"], end=max(seam["time"], inside.get("time", seam["time"])), category="seam_color",
                 severity="high" if seam["jump"] == "visible" else "low", where="whole frame", source="measured",
@@ -1035,6 +1132,15 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
                 severity=reply.get("severity", "medium"), where="whole frame", source="gemini-seam",
                 description=f"接缝 {seam['segment']}：{reply.get('description', '')}"
                             + (f"（变化：{'、'.join(reply['changed'])}）" if reply.get("changed") else ""),
+                segments=[seam["segment"]])
+    for seam in seam_stills(job, source_id, source["path"], assembled):
+        reply = seam["answer"]
+        # low is the flicker every frame pair has; anything above it at a seam is a jump a viewer sees: high
+        if reply.get("changed") and reply.get("severity") in ("medium", "high"):
+            add(start=round(seam["time"] - 1 / assembled["fps"], 2), end=round(seam["time"], 2),
+                category="seam_color", severity="high", where="whole frame", source="gemini-seam-pair",
+                description=f"接缝 {seam['segment']}：{reply.get('description', '')}"
+                            + (f"（变化：{'、'.join(reply['areas'])}）" if reply.get("areas") else ""),
                 segments=[seam["segment"]])
     verdict = "fail" if answer.get("verdict") == "fail" or judge(issues) == "fail" else "pass"
     rounds_path = job / "state/review" / f"{source_id}.json"

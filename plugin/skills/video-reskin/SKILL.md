@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle videos (by default into realistic materials with the style unchanged, "写实版材质，风格不变") into 720p / 24 fps deliverables without game logos, warning lines or end cards: GPT Image keyframes, Seedance 2.5 video editing on Lumos, reassembly on the source clock with the original audio, and a Gemini review loop with frame-checked redos.
+description: Batch-restyle videos (by default into realistic materials with the style unchanged, "写实版材质，风格不变") into 1080p / 24 fps deliverables without game logos, warning lines or end cards: GPT Image keyframes, Seedance 2.5 video editing on Lumos, reassembly on the source clock with the original audio, and a Gemini review loop with frame-checked redos.
 ---
 
 # Video reskin
@@ -32,7 +32,9 @@ description: Batch-restyle videos (by default into realistic materials with the 
 - The scripts do all media work, segmentation, colour matching and calls to the models. Your part is editorial:
   where each video stops, what is on screen, what to remove, judging keyframes, and confirming review findings on
   stills. Never write scripts that call Lumos, Winky or FFmpeg yourself.
-- Files you write (work order, edits) are JSON; prompt texts inside them are Chinese. Reply in the user's language.
+- Files you write (work order, edits) are JSON. Every text in them that goes into a prompt (`materials`, `remove`,
+  `extra`, `overlays` `what`, `--prompt` sentences) is English, like every prompt the plugin sends. Reply in the
+  user's language.
 
 ## Credentials (first)
 
@@ -52,7 +54,7 @@ Run `auth`. It shows the stored Winky key and whether the Lumos login works.
 Confirm once, at the start, in one message, and only what you cannot work out: the footage (files or folders), and
 the style if it is not the default realistic material look. By default every video loses its end card, game logos and
 bottom warning text (the user's standing request); keep HUD numbers, icons and buttons. Every job renders and
-delivers 720p at 24 fps (fixed; there is no resolution option). When the user asks to see the result next to the
+delivers 1080p at 24 fps (fixed; there is no resolution option). When the user asks to see the result next to the
 original (对比, 并排, 左右对比), `compare` after the last `assemble` writes `<name>_写实_对比.mp4` beside the delivery
 (original left, restyled right; `--layout top` stacks them); never build it with FFmpeg yourself. When the user asks
 to redo a delivered video and compare versions (原版-旧版-新版), start a new job (`init`) so the old delivery stays,
@@ -72,22 +74,23 @@ cartoon original. Medium and low review issues go into the final summary, not in
 | Situation | Default |
 | --- | --- |
 | End card start unclear | the last frame before the transition into it (wipe, flash, blur, logo zoom); judge from `<id>-end.jpg` |
-| A logo or warning line on the sheets | a `remove` item per position and time with a `box` from the catalog's still overlays (check it on a frame): the program wipes its letters (the pixels that stay still while the scene moves) from the clip Seedance gets, and the video prompt only says where the wiped patch is so Seedance paints scene there. GPT keyframes see the original frame and are told to remove it by name. Without boxes, Seedance kept the Chinese logos and the warning line it was told to remove |
-| `assemble`, a held segment or the review shows `wiped corner ... smeared` (or soft) | the corner came back as a blurred patch (measured: fine detail inside the wiped letters against the scene around them; the blurred corners of the 1080p batch scored 0.1-0.38, the clean ones about 1.05). Look at `review/<id>-wipes-r<n>-<k>.jpg`. Smeared: set `"wipe": "none"` on that item (the logo stays in the clip and the prompt names it for Seedance to remove, which removed GOF3D10374's logo cleanly), `plan`, `redo` the segments it spans, `run`. If the logo then stays visible, put the wipe back and report the corner as open. A video with a smeared corner is not done |
-| The review's wipe check shows leftover letters | the box or its times miss the logo: step through stills where it moves (`frames`), fix the box/times, `plan`, `redo` the segments it spans |
+| A logo on the sheets | a `remove` item per position and time with a `box` from the catalog's still overlays (check it on a frame). By default the logo stays in the clip and the prompts name it: Seedance removed every logo of GOF3D10012 that way (720p), corners clean, the HUD icon under one rebuilt; GPT keyframes remove it too. In a chained segment the lead frames (the previous result's last second) get the source's logo pixels painted back in, so the logo never 'appears' mid-clip: without that, Seedance kept every logo of K02 as new content. `"wipe": "before"` (the program wipes the letters first) is not for logos: Seedance kept each wiped corner as a blurred patch (detail 0.1-0.38 of the scene around it) and once redrew the game's logo over one |
+| A warning line along the bottom edge (广告创意仅供参考…, 健康游戏忠告) | Seedance keeps it however it is handled (named: kept crisp; wiped: a blurred band), like any screen-fixed layer. The only clean removal is cropping it off a copy of the source (GOF3D10012: rows 0-1805 of 1920, width 1016 centred, scaled back to 1080x1920, a 6.3% zoom). That changes the framing: stop and ask the user before cropping, and report it. Leave the warning line out of `remove` for a cropped source |
+| `assemble`, a held segment or the review shows `wiped corner ... smeared` (or soft) | only items with `"wipe": "before"` are measured: the wipe came back as a blurred patch. Drop `"wipe"` (the default names it for Seedance instead), `plan`, `redo` the segments it spans. A video with a smeared corner is not done |
+| The review's wipe check shows leftover letters | look at `review/<id>-wipes-r<n>-<k>.jpg`: the box or its times miss the logo (step through stills where it moves; fix, `plan`, `redo` the segments it spans), or Seedance kept it: `redo` the segment once with `--prompt` naming the corner (`the game logo "…" in the bottom-right corner is removed; paint the surrounding scene there`) |
 | A segment check or the review finds a logo the model drew anyway | make sure its item has a `box` that covers where the model drew it, then `redo` the segment |
 | A logo that flies from one corner to another | one boxed item per corner, each a second longer than the logo rests there: the logo is still on its way (and seen by the model) for about a second after it leaves a corner |
 | A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes Seedance draw garbled text there |
-| A segment comes back with its first seconds still in the game's look (then turns real) | `redo` with `--prompt 本段从第一帧起就是和图片1一样的写实画面，整段都不能出现原视频的卡通画面。`: Seedance now and then returns the start of a clip unrestyled |
-| Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`整条的金枪鱼`, `绿色的纸币堆`) and leave out materials that are not on screen |
-| An object comes out in another colour than in the original | name its colour in `materials` (`黄色的缆绳`), with its lightness when it came out darker (`亮蓝色派克大衣（和原画面一样的亮蓝色，不是深色或灰色）`), timed when the original changes it (`蓝色的金属吊机` until the upgrade, `红色的金属吊机` after) |
+| A segment comes back with its first seconds still in the game's look (then turns real) | `redo` with `--prompt "From its first frame to its last, this segment has the realistic look of image 1."`: Seedance now and then returns the start of a clip unrestyled |
+| Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`whole tuna`, `green stacks of banknotes`) and leave out materials that are not on screen |
+| An object comes out in another colour than in the original | name its colour in `materials` (`yellow ropes`), with its lightness when it came out darker (`a bright blue parka, the same bright blue as in the original`), timed when the original changes it (`the blue metal crane` until the upgrade, `the red metal crane` after) |
 | An object changes colour during a shot (an upgrade turns a blue crane red) | two timed `materials` items split at the change; a segment spanning the change can still keep the old colour: then `redo` it with a `--prompt` naming only the part that changes and the moment in seconds into the segment |
-| A crowd in one colour | name only that colour and say everyone wears it (`每一个人都穿亮黄色羽绒服……没有一个人穿红色或其他颜色的衣服`); a crowd with two looks: one item per look, each timed to when it shows |
-| Food on plates, a stack of plates (any object resting on another) | one item each, both colours named (`每片鱼排都放在一个亮蓝色的盘子上`, `一根亮蓝色盘子柱`) |
-| Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too |
+| A crowd in one colour | name only that colour and say everyone wears it (`every single person in the queue wears a bright yellow down jacket`); a crowd with two looks: one item per look, each timed to when it shows |
+| Food on plates, a stack of plates (any object resting on another) | one item each, both colours named (`every fish steak lies on a bright blue plate`, `a column of bright blue plates`) |
+| Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too. A timed item is named in the whole prompt of every segment it overlaps, and its colours leak onto look-alikes: the hired fishermen in brown fur coats from 17.5 s turned GOF3D10012's white protagonist into a brown fur figure from 0.2 s. Name the protagonist and the others apart (`the protagonist always wears a light blue-white winter coat`, `only these hired hands wear brown coats; the protagonist stays light blue-white`) |
 | A coin counter, timer or other screen-fixed HUD with changing numbers | a `hud` box around it: it is copied back from the original frame by frame, so the digits are always right |
 | Screen-fixed, flat text or UI (captions, labels, banners, buttons) comes out garbled or changed | an `overlays` item for each (a `box` or `poly` hugging it): the models leave it out and the program burns the original's pixels (or the drawn `text`) back. Already rendered: add it, `plan`, `assemble` (nothing renders again) |
-| The user wants it more realistic | name each prominent object's real material in `materials` (`挂着积雪的真实云杉树`, `被积雪半覆盖的岩石`); keep its shape. Tell the user that stronger realism (redesigned shapes, realistic adults for chibi figures) made seams and characters drift in the 1080p batch |
+| The user wants it more realistic | name each prominent object's real material in `materials` (`real spruce trees laden with snow`, `rocks half covered in snow`); keep its shape. Tell the user that stronger realism (redesigned shapes, realistic adults for chibi figures) made seams and characters drift in the 1080p batch |
 | The user gives a reference picture or video for the look | `style_ref` in the edits: `{"path": <video>, "at": <seconds>, "box": [x0, y0, x1, y1]}` (or an image path), cropped away from logos and warning lines. The anchor keyframe learns its texture (never its content); check the anchor for copied objects |
 | Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
 | A keyframe changes the layout, adds objects, keeps a logo, changes colours or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
@@ -95,12 +98,13 @@ cartoon original. Medium and low review issues go into the final summary, not in
 | `lint` suggests a change | it is Gemini's reading of the video: check it on the sheets; take what the sheets confirm |
 | A segment is held by the segment check | it is held only for a visible seam, a smeared logo corner or a high Gemini finding. Look at its stills (`review/gate/<id>-<Kxx>-p1.jpg`): confirmed -> `redo` it; a false alarm -> `accept --segment <key> --reason <why>` (later checks and the review are told); then `run` again |
 | A confirmed flaw of the kinds above | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` (inside a shot this also renders the later segments of that shot again). Never redo for realism scores, a slightly different texture or a medium/low issue |
-| Writing a corrective `--prompt` | name only the part that changes and what stays, e.g. `只有吊臂的金属立柱和横臂换成红色涂装；金枪鱼保持蓝白色鱼身，绝不变红`: a bare colour change turned the tuna it held red too. Sentences accumulate; one that made things worse: `redo --segment <key> --reason R --replace-prompt --prompt <new sentence>` |
-| A visible seam (measured or Gemini) | look at `sheets/<id>-seams.jpg`. A chained segment starts with the last second of the previous result, so the switch shows the same frames; a jump "where its own frames start" means Seedance restyled that segment's own part differently from the lead: `redo` that segment once. If it stays, set `"chain_prefix": false` for the source in the edits (one reference picture only, as before) or `split_at` a stiller moment, `plan`, `redo` |
+| Writing a corrective `--prompt` | describe only the look you want, never the look to avoid: `... never light-blue cone-shaped cartoon tree crowns` made Seedance draw exactly those cartoon trees across the top of GOF3D10012's K02 (a redo wasted; the earlier generation was put back). Name only the part that changes and what stays, e.g. `only the arm's metal post and boom turn to red paint; the tuna keep their blue-white bodies`: a bare colour change turned the tuna it held red too. Sentences accumulate; one that made things worse: `redo --segment <key> --reason R --replace-prompt --prompt <new sentence>` |
+| A visible seam (measured, Gemini or `gemini-seam-stills`) | look at `sheets/<id>-seams.jpg` and `review/<id>-seam-<Kxx>-stills.jpg` (restyled 0.5 s before, at and after the switch and where the segment's own frames start, the original above). A chained segment's clip opens with its shot's first 0.5 s and then the previous result's last second, and `assemble` cuts from the earlier segment's last frame to the later one's first own frame (colours matched there); a change at that cut (an area turning back to the cartoon, the water changing colour) means Seedance restyled its own part differently: `redo` that segment once. If it stays, set `"chain_prefix": false` for the source in the edits (one reference picture only, as before) or `split_at` a stiller moment, `plan`, `redo` |
 | A seam measured `visible` while the seam sheet shows the same scene and the Gemini close-up calls it consistent | check the original at the seam (`frames`): an effect bursting there (flying bills, a flash) is counted as a jump. Dismiss it with that reason and report it; no redo |
 | `segment check failed (...); continuing unchecked` | the next segment renders anyway; after assembly look at that segment's frames yourself (`frames`) |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
+| Checking a seam yourself | the seam sheet (`sheets/<id>-seams.jpg`) shows, per seam, the frame before and the frame after at full size and a map of what changes between them; the review's pair sheet (`review/<id>-seam-<Kxx>-<t>-pair.jpg`) adds the original's two moments. Compare the two frames region by region (water colour and saturation, trees at the edges, ground, objects): GOF3D10012's 26.4 s seam passed every grey-level measure during a pan and was plain on the two full-size frames. A video with a seam whose look step or pair check is high is not done |
 | Issues remain after `review_rounds` (2) | deliver; list each remaining issue with its time. Never run a third round on your own |
 
 Stop to ask only when nothing can continue: footage missing or unreadable, no key, or a Lumos QR code to scan (send
@@ -127,16 +131,16 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    `sheets/<id>-keyframes.jpg`: same layout, objects and colours as the original, real materials, no logo or warning
    text, no strong noise or fragmented look. Fix the edits or redo keyframes before rendering: a whole shot follows
    its keyframe. Preview a later moment only when the table says so.
-5. `run` again renders every segment with Seedance 2.5 on Lumos at 720p, chaining the segments of each shot (each
+5. `run` again renders every segment with Seedance 2.5 on Lumos at 1080p, chaining the segments of each shot (each
    later segment's clip starts with the previous result's last second), and checks each segment that has a
    successor before the successor starts. As soon as all segments of a source are done it assembles and reviews that
    source while the rest renders:
    - `assemble` retimes each segment to its source duration, matches colours, switches between segments at their
      best-matching frame inside that shared second, copies the `hud` back from the original, burns in the `overlays`,
-     joins everything with the source audio and writes `<name>_写实.mp4` (720p, 24 fps) into the delivery folder. It
+     joins everything with the source audio and writes `<name>_写实.mp4` (1080p, 24 fps) into the delivery folder. It
      measures every seam (`clean`, `slight`, `visible`: the switch, and where the later segment's own frames start),
      draws `sheets/<id>-seams.jpg`, and measures every wiped logo corner (`clean`, `soft`, `smeared`, `plain`).
-   - `review` has Gemini compare the video with its original (穿帮, bugs, 拼接色差, leftover logos/text, realism
+   - `review` has Gemini compare the video with its original (continuity errors, bugs, seam colour jumps, leftover logos/text, realism
      reported as a timeline), checks that recurring characters and objects keep their keyframe look, looks at every
      seam and wiped corner close up, adds the measured seams and corners, draws the stills of every issue
      (`review/issues/<id>-r<n>-p<k>.jpg`) and lets Gemini triage them (a hint, not a verdict).

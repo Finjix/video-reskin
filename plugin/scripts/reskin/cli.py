@@ -259,7 +259,9 @@ def seam_lines(assembled: dict) -> list[str]:
         lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s: " + (
             f"{seam['jump']} (switch: jump {seam['mismatch']} vs motion {seam['motion']}, local {seam.get('local', 0)}"
             + (f"; own frames from {inside['time']:.2f} s: {inside['jump']}, step {inside['mismatch']} vs "
-               f"{inside['motion']}" if inside else "") + ")" if seam.get("jump") else "hard cut"))
+               f"{inside['motion']}" if inside else "")
+            + (f"; look step: saturation z {seam['look']['saturation']['z']}, colour z {seam['look']['colour']['z']} "
+               f"-> {seam['look']['jump']}" if seam.get("look") else "") + ")" if seam.get("jump") else "hard cut"))
     for wipe in assembled.get("wipes") or []:
         lines.append(f"  wiped corner {wipe['what']} {wipe['start']:.1f}-{wipe['end']:.1f} s: {wipe['verdict']}"
                      + (f" (detail {wipe['share']} of the scene around it)" if wipe.get("share") is not None else ""))

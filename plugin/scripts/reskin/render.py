@@ -51,9 +51,9 @@ def chains(plan_row: dict) -> list[list[dict]]:
 
 
 def clean_boxes(plan_row: dict, start: float, end: float, logos: dict[int, dict] | None = None) -> list[list]:
-    """`remove` items wiped from the clip Seedance gets during [start, end) of the source, as
-    [x0, y0, x1, y1, a, b, "glyph:<mask hash>"] with a, b in seconds into the clip (masks from logos.masks). At 1080p
-    Seedance kept a game logo and the warning line it was told to remove; what it never sees, it cannot draw."""
+    """`remove` items with `"wipe": "before"`, wiped from the clip Seedance gets during [start, end) of the source, as
+    [x0, y0, x1, y1, a, b, "glyph:<mask hash>"] with a, b in seconds into the clip (masks from logos.masks). Not the
+    default: Seedance kept every wiped corner as a blurred patch."""
     boxes = []
     for n, item in enumerate(plan_row.get("remove") or []):
         if not is_wiped(item):
@@ -65,6 +65,28 @@ def clean_boxes(plan_row: dict, start: float, end: float, logos: dict[int, dict]
             boxes.append([*[float(v) for v in item["box"]], round(a - start, 3), round(b - start, 3),
                           f"glyph:{logos[n]['hash']}"])
     return boxes
+
+
+def lead_logos(plan_row: dict, seg: dict, logos: dict[int, dict] | None) -> list[list]:
+    """Boxed `remove` items left for Seedance to remove (the default, `"wipe": "none"`) on screen during a chained
+    segment's lead (its first frames, taken from the previous result, which has them removed): their original pixels
+    are painted into those frames, [x0, y0, x1, y1, a, b, "keep:<mask hash>"] with a, b in seconds into the clip.
+    Without them the logo 'appeared' where the clip's own part starts and Seedance kept it as new content
+    (GOF3D10012 K02, all three corners); in a first segment, where the logo shows from the first frame and the
+    reference picture has none, it removed every one."""
+    fps = plan_row["fps"]
+    start, end = seg["render_frames"][0] / fps, seg["frames"][0] / fps
+    found = []
+    for n, item in enumerate(plan_row.get("remove") or []):
+        if not (isinstance(item, dict) and item.get("box")) or is_wiped(item):
+            continue
+        a, b = max(start, float(item.get("start", 0))), min(end, float(item.get("end", float("inf"))))
+        if b - a >= MIN_WIPE:
+            if not logos or n not in logos:
+                raise ValueError(f"remove item {n} ({item.get('what', '')}): its logo mask is missing")
+            found.append([*[float(v) for v in item["box"]], round(a - start, 3), round(b - start, 3),
+                          f"keep:{logos[n]['hash']}"])
+    return found
 
 
 def clip_size(width: int, height: int, resolution: str = RESOLUTION) -> tuple[int, int]:
@@ -94,29 +116,58 @@ def lead_frames(previous: Path, span: int, count: int, fps: float, size: tuple[i
 
 def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: int, output: Path,
              clean: list[list] | None = None, logos: dict[int, dict] | None = None,
-             lead: dict | None = None, resolution: str = RESOLUTION) -> Path:
+             lead: dict | None = None, resolution: str = RESOLUTION, keep: list[list] | None = None,
+             head: list[int] | None = None, head_clean: list[list] | None = None) -> Path:
     """The segment as a clean H.264 clip (no audio) at the clip size, with the `clean` boxes wiped frame by frame
     (masks in `logos`). `lead` ({"path", "span", "frames"}): the clip's first frames come from the previous segment's
-    result instead of the source (see lead_frames)."""
+    result instead of the source (see lead_frames), with the source's pixels of the `keep` boxes painted in. `head`:
+    source frames [a, b) put before everything (the shot's opening; `head_clean` its wipes, on its own clock)."""
     import subprocess
     import numpy as np
     from reskin import logos as LOGOS
     size = clip_size(width, height, resolution)
     total = frames[1] - frames[0]
     ahead = int(lead["frames"]) if lead else 0
-    first = frames[0] + ahead
     scale = ["-vf", f"scale={size[0]}:{size[1]}:flags=lanczos"] if size != (width, height) else []
-    decode = [FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, (first - .5) / fps):.6f}", "-i", source,
-              "-frames:v", str(total - ahead), *scale, "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    decode = [FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, (frames[0] - .5) / fps):.6f}", "-i", source,
+              "-frames:v", str(total), *scale, "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     encode = ["-c:v", "libx264", "-preset", "fast", "-crf", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
     by_hash = {entry["hash"]: entry for entry in (logos or {}).values()}
     wipes = []
     for box in clean or []:
-        entry = by_hash.get(str(box[6]).split(":", 1)[1])
+        entry = by_hash.get(str(box[6]).rpartition(":")[2])
         if entry is None:
             raise ValueError(f"logo mask {box[6]} is missing")
         wipes.append((LOGOS.load(entry["path"]), entry["region"], round(box[4] * fps), round(box[5] * fps)))
-    head = lead_frames(Path(lead["path"]), int(lead["span"]), ahead, fps, size) if ahead else b""
+    kept = []
+    for box in keep or []:
+        entry = by_hash.get(str(box[6]).rpartition(":")[2])
+        if entry is None:
+            raise ValueError(f"logo mask {box[6]} is missing")
+        kept.append((LOGOS.load(entry["path"]), entry["region"], round(box[4] * fps), round(box[5] * fps)))
+    leading = lead_frames(Path(lead["path"]), int(lead["span"]), ahead, fps, size) if ahead else b""
+    opening_frames = []
+    if head:
+        raw = run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, (head[0] - .5) / fps):.6f}", "-i", source, "-frames:v",
+                   str(head[1] - head[0]), *scale, "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
+        count = len(raw) // (size[0] * size[1] * 3)
+        if count < head[1] - head[0]:
+            raise RuntimeError(f"the shot's opening gave {count} of {head[1] - head[0]} frames")
+        opening_wipes = []
+        for box in head_clean or []:
+            entry = by_hash.get(str(box[6]).rpartition(":")[2])
+            if entry is None:
+                raise ValueError(f"logo mask {box[6]} is missing")
+            opening_wipes.append((LOGOS.load(entry["path"]), entry["region"], round(box[4] * fps), round(box[5] * fps)))
+        for index in range(count):
+            data = raw[index * size[0] * size[1] * 3:(index + 1) * size[0] * size[1] * 3]
+            live = [w for w in opening_wipes if w[2] <= index < w[3]]
+            if live:
+                frame = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3).copy()
+                for soft, rect, _, _ in live:
+                    LOGOS.wipe(frame, rect, soft)
+                data = frame.tobytes()
+            opening_frames.append(data)
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
     flags = 0x08000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -131,13 +182,26 @@ def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: in
                                                     "-an", *encode, partial]],
                                   stdin=subprocess.PIPE, stderr=errors, creationflags=flags)
         try:
-            if head:
-                writer.stdin.write(head)
-                written += ahead
-            for index in range(ahead, total):
+            for data in opening_frames:
+                writer.stdin.write(data)
+            for index in range(total):
                 data = reader.stdout.read(frame_bytes)
                 if len(data) < frame_bytes:
                     break
+                if index < ahead:
+                    # a lead frame: the previous result, with the source's logos that Seedance removes itself
+                    made = leading[index * frame_bytes:(index + 1) * frame_bytes]
+                    live = [k for k in kept if k[2] <= index < k[3]]
+                    if live:
+                        frame = np.frombuffer(made, np.uint8).reshape(size[1], size[0], 3).astype(np.float32)
+                        original = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3).astype(np.float32)
+                        for soft, (x0, y0, x1, y1), _, _ in live:
+                            alpha = soft[..., None]
+                            frame[y0:y1, x0:x1] = frame[y0:y1, x0:x1] * (1 - alpha) + original[y0:y1, x0:x1] * alpha
+                        made = np.clip(frame + .5, 0, 255).astype(np.uint8).tobytes()
+                    writer.stdin.write(made)
+                    written += 1
+                    continue
                 if wipes:
                     frame = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3).copy()
                     for soft, rect, a, b in wipes:
@@ -161,15 +225,26 @@ def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: in
 
 
 def chain_frame(job: Path, source_id: str, previous: dict, prev_seg: dict, seg: dict, fps: float) -> Path:
-    """The previous result's frame at the moment this segment starts (its clip is a uniformly compressed copy)."""
-    offset = (seg["render_frames"][0] - prev_seg["render_frames"][0]) / fps
-    length = (prev_seg["render_frames"][1] - prev_seg["render_frames"][0]) / fps
+    """The previous result's frame at the moment this segment starts (its clip is a uniformly compressed copy, its
+    own opening frames first when it had them)."""
+    head = int(previous.get("head_frames") or 0)
+    offset = (head + seg["render_frames"][0] - prev_seg["render_frames"][0]) / fps
+    length = (head + prev_seg["render_frames"][1] - prev_seg["render_frames"][0]) / fps
     moment = offset * previous["ai"]["duration"] / length
     output = job / "keyframes" / f"{source_id}-{seg['id']}-chain.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     run([FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, moment - .5 / previous['ai']['fps']):.6f}",
          "-i", previous["output"], "-frames:v", "1", output])
     return output
+
+
+def opening(plan_row: dict, seg: dict) -> tuple[dict, list[int]]:
+    """The first segment of `seg`'s shot and the source frames of its opening (HEAD_SECONDS from its first frame,
+    the frame its keyframe was made from)."""
+    from reskin.plan import HEAD_SECONDS
+    first = next(group[0] for group in chains(plan_row) if any(s["id"] == seg["id"] for s in group))
+    a = first["render_frames"][0]
+    return first, [a, a + round(HEAD_SECONDS * plan_row["fps"])]
 
 
 def lead_count(seg: dict) -> int:
@@ -196,8 +271,20 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
         texts = read(PROMPTS)
         prefix = plan_row.get("chain_prefix")
         if (state["options"].get("chain_prefix", True) if prefix is None else prefix) and lead_count(seg):
-            sentence = texts["chain_prefix"].format(seconds=f"{lead_count(seg) / plan_row['fps']:.1f}")
-            lead = {"lead": lead_count(seg)}
+            # The clip: the shot's opening (its keyframe is the reference picture, so Seedance reads the whole edit
+            # from that pair), the previous result's last second, then this segment's own frames.
+            first, head = opening(plan_row, seg)
+            keyframe = job / "keyframes" / f"{source_id}-{first['id']}.png"
+            if not keyframe.is_file():
+                raise ValueError(f"{key}: keyframe {keyframe.name} of its shot is missing; run keyframes first")
+            fps = plan_row["fps"]
+            sentence = texts["chain_prefix"].format(head=f"{(head[1] - head[0]) / fps:.1f}",
+                                                    seconds=f"{lead_count(seg) / fps:.1f}")
+            masks = logo_masks(job, state, plan_row, source_id)
+            kept = lead_logos(plan_row, seg, masks)
+            wiped_head = clean_boxes(plan_row, head[0] / fps, head[1] / fps, logos=masks)
+            lead = {"lead": lead_count(seg), "head": head, "keyframe": sha(keyframe),
+                    **({"lead_logos": kept} if kept else {}), **({"head_clean": wiped_head} if wiped_head else {})}
         else:
             sentence = texts["chain"]
         extra = " ".join(part for part in (sentence, extra) if part)
@@ -251,7 +338,7 @@ def cause_of(record: dict, inputs: dict, redo: dict) -> str:
         return "keyframe"
     if old.get("clean") != inputs.get("clean"):
         return "wipe"
-    if old.get("lead") != inputs.get("lead"):
+    if any(old.get(k) != inputs.get(k) for k in ("lead", "lead_logos", "head", "head_clean")):
         return "plan"
     if old.get("resolution") != inputs["resolution"]:
         return "resolution"
@@ -276,25 +363,33 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     if not resume:
         cause = cause_of(record, inputs, redo_log(job).get(key, {}))
         lead = ({"path": previous["output"], "frames": inputs["lead"],
-                 "span": prev_seg["render_frames"][1] - prev_seg["render_frames"][0]} if inputs.get("lead") else None)
+                 "span": int(previous.get("head_frames") or 0) + prev_seg["render_frames"][1] - prev_seg["render_frames"][0]}
+                if inputs.get("lead") else None)
         cut_clip(source, seg["render_frames"], plan_row["fps"], plan_row["width"], plan_row["height"], clip,
                  clean=inputs.get("clean"), logos=logo_masks(job, state, plan_row, source_id), lead=lead,
-                 resolution=inputs["resolution"])
+                 resolution=inputs["resolution"], keep=inputs.get("lead_logos"), head=inputs.get("head"),
+                 head_clean=inputs.get("head_clean"))
         video = lumos.upload(clip, "video-to-video")
-        picture = (chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"]) if "chain" in inputs
-                   else job / "keyframes" / f"{source_id}-{seg['id']}.png")
+        if inputs.get("head"):
+            picture = job / "keyframes" / f"{source_id}-{opening(plan_row, seg)[0]['id']}.png"
+        elif "chain" in inputs:
+            picture = chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"])
+        else:
+            picture = job / "keyframes" / f"{source_id}-{seg['id']}.png"
         submitted = lumos.submit_video_edit(video, [lumos.upload(picture, "video-to-video")], inputs["prompt"],
                                             resolution=inputs["resolution"], log=lambda text: log(f"{key}: {text}"))
         record = {"digest": want, "inputs": core_inputs(inputs), "generation_id": submitted["generation_id"],
                   "status": "submitted", "attempt": inputs["attempt"], "prompt": inputs["prompt"],
-                  "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
+                  "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S"),
+                  "head_frames": (inputs["head"][1] - inputs["head"][0]) if inputs.get("head") else 0}
         write(record_path, record)
         ledger.add(job, kind="video", event="submit", key=key, seconds=seg["seconds"],
                    resolution=inputs["resolution"], cause=cause, attempt=inputs["attempt"],
                    generation_id=submitted["generation_id"], model=inputs["model"])
         log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, {cause}, from {picture.name}"
-            + (f", its clip starting with the previous result's last {inputs['lead']} frames" if inputs.get("lead")
-               else "") + ")")
+            + (f", its clip: the shot's opening, the previous result's last {inputs['lead']} frames, its own"
+               if inputs.get("head") else f", its clip starting with the previous result's last {inputs['lead']} frames"
+               if inputs.get("lead") else "") + ")")
 
     def on_poll(value):
         status = value.get("status")
@@ -311,7 +406,7 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     from reskin import net
     net.download(lumos.result_urls(finished)[0], output, timeout=300)
     info = video_info(output)
-    expected = seg["seconds"]
+    expected = seg["seconds"]              # the clip's whole length, its opening included
     problems = []
     if not .8 < info["duration"] / expected < 1.2:
         problems.append(f"length {info['duration']:.2f} s for a {expected:.2f} s clip")
