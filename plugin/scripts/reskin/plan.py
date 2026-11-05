@@ -1,8 +1,8 @@
 """The agent's edits (kept range, materials, what to remove, anchor frame) and the segment plan built from them.
 
 Seedance edits clips of 4-30 s, so each kept range is cut into as few segments as possible: at camera cuts where
-possible (a hard cut hides the seam), otherwise inside a shot at its stillest moment, with a 0.5 s overlap in which
-`assemble` switches at the best-matching frame.
+possible (a hard cut hides the seam), otherwise inside a shot at its stillest moment, with a 1 s overlap: the later
+segment's clip starts with the earlier result's last second, and `assemble` switches at the best-matching frame in it.
 """
 from __future__ import annotations
 
@@ -13,9 +13,12 @@ from reskin.overlay import problem as overlay_problem
 from reskin.prompts import describe
 
 MIN_SECONDS = 4.0         # Seedance video editing rejects clips under 4 s; shorter pieces are merged into a neighbour
-OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more; assemble joins inside it
+OVERLAP_SECONDS = 1.0     # a segment after a seam inside a shot renders this much more (the earlier result's last
+#                           frames); assemble joins inside it
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "hud", "overlays", "style_ref", "midframes"}
+             "hud", "overlays", "style_ref", "chain_prefix"}
+REMOVED_KEYS = {"midframes": "midframes were removed (extra preview references cost previews and carried their "
+                             "colour mistakes into the video); leave the key out"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -28,23 +31,22 @@ def box_problem(box) -> bool:
 def items_problem(items, name: str) -> str | None:
     """`remove` (and `materials` when not one text) is a list of Chinese descriptions, each a string or
     {"what": ..., "start": s, "end": s} for something on screen only part of the time; a `remove` item may add
-    "box": [x0, y0, x1, y1] (fractions) for a screen-fixed logo or warning line, wiped from the clip Seedance gets
-    (letter by letter by default; `"fill": "mirror"` fills the whole box with a mirrored neighbouring strip)."""
+    "box": [x0, y0, x1, y1] (fractions) for a screen-fixed logo or warning line, wiped letter by letter from the clip
+    Seedance gets (`"wipe": "none"`: left in the clip and named in the prompt for the model to remove)."""
     if not isinstance(items, list):
         return f"{name} must be a list"
     for item in items:
         if isinstance(item, str) and item.strip():
             continue
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end", *(("box", "wipe", "fill") if name == "remove" else ())}
+                and set(item) <= {"what", "start", "end", *(("box", "wipe") if name == "remove" else ())}
                 and ("box" not in item or not box_problem(item["box"]))
-                and item.get("wipe", "both") in ("both", "after")
-                and item.get("fill", "glyph") in ("glyph", "mirror")
+                and item.get("wipe", "before") in ("before", "none")
                 and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return (f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds"
-                + (", \"box\": [x0, y0, x1, y1], \"fill\": \"glyph\" or \"mirror\"" if name == "remove" else "")
+                + (", \"box\": [x0, y0, x1, y1], \"wipe\": \"before\" or \"none\"" if name == "remove" else "")
                 + "}")
     return None
 
@@ -96,7 +98,7 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     defaults = value.get("defaults") or {}
     problems = []
     for key in set(defaults) - EDIT_KEYS:
-        problems.append(f"defaults: unknown key {key}")
+        problems.append(f"defaults: {REMOVED_KEYS.get(key, f'unknown key {key}')}")
     if "remove" in defaults and items_problem(defaults["remove"], "remove"):
         problems.append(f"defaults: {items_problem(defaults['remove'], 'remove')}")
     if defaults.get("style_ref") is not None and style_ref_problem(defaults["style_ref"]):
@@ -107,7 +109,7 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: not a source of this job")
             continue
         for key in set(row) - EDIT_KEYS:
-            problems.append(f"{source_id}: unknown key {key}")
+            problems.append(f"{source_id}: {REMOVED_KEYS.get(key, f'unknown key {key}')}")
         duration = known[source_id]["duration"]
         keep = row.get("keep")
         if keep is not None:
@@ -130,12 +132,10 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
             problems.append(f"{source_id}: style_from must name another source")
-        mids = row.get("midframes")
-        if mids is not None and mids != "auto" and not (
-                isinstance(mids, list) and all(isinstance(t, (int, float)) and 0 <= t < duration for t in mids)):
-            problems.append(f"{source_id}: midframes must be \"auto\" or a list of source times in seconds")
         if row.get("style_ref") is not None and style_ref_problem(row["style_ref"]):
             problems.append(f"{source_id}: {style_ref_problem(row['style_ref'])}")
+        if "chain_prefix" in row and not isinstance(row["chain_prefix"], bool):
+            problems.append(f"{source_id}: chain_prefix must be true or false")
         if "split_at" in row and not (isinstance(row["split_at"], list) and all(isinstance(x, (int, float)) for x in row["split_at"])):
             problems.append(f"{source_id}: split_at must be a list of times in seconds")
         out["sources"][source_id] = row
@@ -169,7 +169,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "hud": row.get("hud") or [],
             "overlays": row.get("overlays") or [],
             "style_ref": ({"path": row["style_ref"]} if isinstance(row.get("style_ref"), str) else row.get("style_ref")),
-            "midframes": row.get("midframes"),
+            "chain_prefix": row.get("chain_prefix"),
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
 
 
@@ -286,8 +286,6 @@ def markdown(plan: dict, catalog: dict) -> str:
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
         if row["extra"]:
             lines.append(f"extra: {row['extra']}")
-        if row.get("midframes"):
-            lines.append(f"midframes (previews sent to Seedance as realism references): {row['midframes']}")
         if row.get("style_ref"):
             ref = row["style_ref"]
             lines.append(f"style reference (anchor only): {ref['path']}" + (f" at {ref['at']:g} s" if "at" in ref else "")

@@ -1,5 +1,6 @@
-"""Realism upkeep: midframes (previews sent to Seedance as references), previews carrying corrective sentences, the
-realism timeline of the checks and accepted findings passed on to later checks."""
+"""Chained segments that start with the previous result's frames, previews carrying corrective sentences, the realism
+timeline of the checks, accepted findings passed on to later checks, identity close-ups and the logo wipes (mask,
+fill, prompt sentence and the measured smear check)."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,36 +9,44 @@ from reskin import preview, render, review
 from reskin.common import PROMPTS, read, write
 
 
-def row(midframes=None):
+def row():
     fps = 30.0
     segs = [{"id": "K01", "frames": [0, 688], "render_frames": [0, 688], "seam": "start", "seconds": 22.93},
             {"id": "K02", "frames": [688, 1369], "render_frames": [673, 1369], "seam": "continuous", "seconds": 23.2},
             {"id": "K03", "frames": [1369, 1971], "render_frames": [1354, 1971], "seam": "continuous", "seconds": 20.57}]
     return {"fps": fps, "keep": [0.0, 65.7], "segments": segs, "materials": ["积雪地面"], "remove": [],
-            "midframes": midframes, "width": 1080, "height": 1920}
+            "width": 1080, "height": 1920}
 
 
-class MidframeTests(unittest.TestCase):
-    def test_none_by_default(self):
-        self.assertEqual(preview.midframes(row(), row()["segments"][2]), [])
+class ChainTests(unittest.TestCase):
+    def inputs(self, prefix: bool, source_says=None):
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            r = dict(row(), chain_prefix=source_says)
+            state = {"sources": [{"id": "S01", "sha256": "x"}],
+                     "options": {"resolution": "720p", "chain_prefix": prefix}}
+            write(job / "config/redo.json", {"S01:K03": {"attempt": 2, "prompt": "纠正语句。"}})
+            style = read(PROMPTS)["presets"]["realistic"]
+            with self.assertRaises(ValueError):          # the segment before it is not rendered yet
+                render.inputs_for(job, state, r, "S01", r["segments"][2], style, None)
+            return render.inputs_for(job, state, r, "S01", r["segments"][2], style, {"generation_id": "g1"})
 
-    def test_explicit_times_inside_their_segment(self):
-        r = row([10.0, 46.0, 50.65, 57.5, 60.68])
-        k03 = r["segments"][2]
-        # 46.0 is within MIDFRAME_LEAD of K03's first rendered frame (45.13 s)
-        self.assertEqual(preview.midframes(r, k03), [50.65, 57.5, 60.68])
-        self.assertEqual(preview.midframes(r, r["segments"][0]), [10.0])
-        self.assertIn(57.5, preview.moments(r))
+    def test_chained_segment_starts_with_the_previous_result(self):
+        inputs = self.inputs(True)
+        self.assertEqual(inputs["chain"], "g1")
+        self.assertEqual(inputs["lead"], 15)               # K03 renders 15 frames before its own part
+        self.assertIn("视频开头约0.5秒已经是上一段做好的写实画面", inputs["prompt"])
+        self.assertTrue(inputs["prompt"].rstrip().endswith("纠正语句。"))
+        plain = self.inputs(False)
+        self.assertNotIn("lead", plain)
+        self.assertNotIn("lead", self.inputs(True, source_says=False))     # the edits of one source switch it off
+        self.assertIn("图片1就是上一段视频在本段第一帧这一刻的画面", plain["prompt"])
+        # switching the prefix on for a rendered segment renders it again (a plan change)
+        self.assertEqual(render.cause_of({"digest": "old", "inputs": render.core_inputs(plain)}, inputs, {}), "plan")
 
-    def test_auto_takes_regular_moments_and_caps(self):
-        r = row("auto")
-        for seg in r["segments"]:
-            mids = preview.midframes(r, seg)
-            self.assertLessEqual(len(mids), preview.MIDFRAME_LIMIT)
-            for t in mids:
-                self.assertEqual(preview.segment_at(r, t)["id"], seg["id"])
-        r = row([float(t) for t in range(47, 65)])
-        self.assertEqual(len(preview.midframes(r, r["segments"][2])), preview.MIDFRAME_LIMIT)
+    def test_lead_count(self):
+        segs = row()["segments"]
+        self.assertEqual([render.lead_count(s) for s in segs], [0, 15, 15])
 
     def test_preview_carries_corrections(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -48,31 +57,6 @@ class MidframeTests(unittest.TestCase):
             self.assertTrue(text.endswith("黄鳍金枪鱼保持金黄色。"))
             self.assertEqual(preview.corrections(job, "S01", row(), 10.0), "")
 
-    def test_video_prompt_names_midframes(self):
-        with tempfile.TemporaryDirectory() as folder:
-            job = Path(folder)
-            r = row([50.65, 57.5])
-            state = {"sources": [{"id": "S01", "sha256": "x"}], "options": {"resolution": "480p"}}
-            write(job / "config/redo.json", {"S01:K03": {"attempt": 2, "prompt": "纠正语句。"}})
-            style = read(PROMPTS)["presets"]["realistic"]
-            previous = {"generation_id": "g1"}
-            with self.assertRaises(ValueError):
-                render.inputs_for(job, state, r, "S01", r["segments"][2], style, previous)
-            for t in (50.65, 57.5):
-                path = preview.image_path(job, "S01", t)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"png")
-            inputs = render.inputs_for(job, state, r, "S01", r["segments"][2], style, previous)
-            self.assertEqual(inputs["midframes"], [50.65, 57.5])
-            self.assertIn("图片2是本段约第6秒", inputs["prompt"])
-            self.assertIn("图片3是本段约第12秒", inputs["prompt"])
-            self.assertTrue(inputs["prompt"].rstrip().endswith("纠正语句。"))
-            plain = render.inputs_for(job, state, row(), "S01", row()["segments"][2], style, previous)
-            self.assertNotIn("midframes", plain)
-            # adding midframes to a rendered segment counts like a new keyframe
-            self.assertEqual(render.cause_of({"digest": "old", "inputs": render.core_inputs(plain)}, inputs, {}),
-                             "keyframe")
-
 
 class RealismTests(unittest.TestCase):
     def test_low_scores_become_issues(self):
@@ -82,12 +66,13 @@ class RealismTests(unittest.TestCase):
             {"start": 15, "end": 22, "score": 2, "cartoonish": ["皮卡车", "顾客"]}]}, offset=45.0)
         self.assertEqual(ranges[1]["start"], 55.0)
         found = review.realism_issues(ranges, [])
-        self.assertEqual([i["severity"] for i in found], ["medium", "high"])
-        self.assertIn("皮卡车、顾客", found[1]["description"])
-        covered = [{"category": "not_realistic", "start": 56.0, "end": 57.0}]
-        self.assertEqual(len(review.realism_issues(ranges, covered)), 1)
+        # 3 (prominent objects still game-like) is only reported now; 2 or lower is a medium issue, never high
+        self.assertEqual([i["severity"] for i in found], ["medium"])
+        self.assertIn("皮卡车、顾客", found[0]["description"])
+        covered = [{"category": "not_realistic", "start": 61.0, "end": 62.0}]
+        self.assertEqual(review.realism_issues(ranges, covered), [])
         self.assertIn("3/5 (雪堆)", review.realism_line(ranges))
-        flat = review.realism_ranges({"realism": [{"start": t, "end": t + 10, "score": 3, "cartoonish": ["人物", x]}
+        flat = review.realism_ranges({"realism": [{"start": t, "end": t + 10, "score": 2, "cartoonish": ["人物", x]}
                                                   for t, x in ((0, "钞票"), (10, "鱼肉"), (20, "钞票"))]})
         merged = review.realism_issues(flat, [])
         self.assertEqual(len(merged), 1)
@@ -242,39 +227,27 @@ class IdentityTests(unittest.TestCase):
 
 class WipeTests(unittest.TestCase):
     def test_boxes_for_the_clip(self):
-        r = {"remove": ["底部警示语", {"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15],
-                                       "fill": "mirror"},
-                        {"what": "左下角logo", "start": 37.5, "end": 55.2, "box": [0.03, 0.85, 0.3, 0.92],
-                         "fill": "mirror"}]}
-        self.assertEqual(render.clean_boxes(r, 10.0, 30.0), [[0.7, 0.08, 0.97, 0.15, 0.0, 6.5]])
-        self.assertEqual(render.clean_boxes(r, 30.0, 50.0), [[0.03, 0.85, 0.3, 0.92, 7.5, 20.0]])
-        graph, label = render.wipe_graph([[0.0, 0.0, 1.0, 0.05, 0.0, 6.5], [0.1, 0.93, 0.9, 1.0, 2.0, 3.0]], 1080, 1920)
-        self.assertEqual(label, "w1")
-        self.assertIn("crop=1080:118:0:118,vflip", graph)        # top box (grown by the feather): from below
-        self.assertIn("crop=908:156:86:1608,vflip", graph)       # bottom box: from above
-        import numpy as np
-        frame = np.full((1920, 1080, 3), 200, dtype=np.uint8)
-        frame[1450:1920, 760:1080] = np.random.default_rng(1).integers(0, 255, (470, 320, 3))   # busy fence above and below
-        chosen = render.wipe_sources([[0.71, 0.85, 0.97, 0.915, 0, 1]], 1080, 1920, frame)
-        self.assertEqual(chosen[0][2], "hflip")                    # the plain snow beside it wins
-        self.assertIn("overlay=86:1764:enable='between(t,2.000,3.000)'", graph)
-        with_masks, _ = render.wipe_graph([[0.0, 0.0, 1.0, 0.05, 0.0, 6.5]], 1080, 1920, masks=[1])
-        self.assertIn("[1:v]format=gray[w0m];[w0p][w0m]alphamerge[w0q]", with_masks)
+        r = {"remove": ["底部警示语", {"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15]},
+                        {"what": "左下角logo", "start": 37.5, "end": 55.2, "box": [0.03, 0.85, 0.3, 0.92]},
+                        {"what": "右下角logo", "start": 0, "end": 55.2, "box": [0.7, 0.85, 1, 0.92], "wipe": "none"}]}
+        logos = {1: {"hash": "a1"}, 2: {"hash": "b2"}}
+        self.assertEqual(render.clean_boxes(r, 10.0, 30.0, logos), [[0.7, 0.08, 0.97, 0.15, 0.0, 6.5, "glyph:a1"]])
+        self.assertEqual(render.clean_boxes(r, 30.0, 50.0, logos), [[0.03, 0.85, 0.3, 0.92, 7.5, 20.0, "glyph:b2"]])
         # a rounding sliver of overlap does not count
         self.assertEqual(render.clean_boxes({"remove": [{"what": "x", "start": 10.33, "end": 24.5,
                                                          "box": [0.7, 0.9, 1, 1]}]}, 0.0, 10.333), [])
-
-    def test_glyph_boxes_carry_their_mask(self):
-        r = {"remove": [{"what": "右上角logo", "start": 0, "end": 16.5, "box": [0.7, 0.08, 0.97, 0.15]},
-                        {"what": "左下角logo", "start": 0, "end": 9, "box": [0.03, 0.85, 0.3, 0.92], "fill": "mirror"}]}
-        logos = {0: {"hash": "abc123", "path": "m.png", "region": [0, 0, 10, 10]}}
-        self.assertEqual(render.clean_boxes(r, 0.0, 10.0, logos),
-                         [[0.7, 0.08, 0.97, 0.15, 0.0, 10.0, "glyph:abc123"], [0.03, 0.85, 0.3, 0.92, 0.0, 9.0]])
-        with self.assertRaises(ValueError):          # a letter-by-letter wipe never runs without its mask
+        with self.assertRaises(ValueError):          # a wipe never runs without its mask
             render.clean_boxes(r, 0.0, 10.0, {})
         from reskin import plan
         self.assertIsNone(plan.items_problem(r["remove"], "remove"))
-        self.assertIsNotNone(plan.items_problem([{"what": "x", "box": [0, 0, .2, .2], "fill": "blur"}], "remove"))
+        for bad in ({"what": "x", "box": [0, 0, .2, .2], "fill": "mirror"},
+                    {"what": "x", "box": [0, 0, .2, .2], "wipe": "after"}):
+            self.assertIsNotNone(plan.items_problem([bad], "remove"))
+
+    def test_clip_size_follows_the_job_resolution(self):
+        self.assertEqual(render.clip_size(1080, 1920), (720, 1280))
+        self.assertEqual(render.clip_size(1920, 1080), (1280, 720))
+        self.assertEqual(render.clip_size(540, 960), (540, 960))         # never larger than the source
 
     def test_logo_mask_is_the_still_letters(self):
         """A static logo (two white bars) over a scene that pans: the mask covers the bars, not the scene."""
@@ -369,54 +342,70 @@ class WipeTests(unittest.TestCase):
             Image.fromarray(np.full((40, 60), 255, np.uint8)).save(mask)
             logos = {0: {"hash": "h1", "path": str(mask), "region": [10, 400, 70, 440]}}
             out = render.cut_clip(source, [0, 45], 30.0, 270, 480, Path(folder) / "clip.mp4",
-                                  clean=[[0.7, 0.08, 0.97, 0.15, 0.0, 1.0], [0.0, 0.85, 0.3, 0.95, 0.0, 1.5, "glyph:h1"]],
-                                  logos=logos)
-            self.assertTrue(out.is_file() and out.stat().st_size > 0)
+                                  clean=[[0.0, 0.85, 0.3, 0.95, 0.0, 1.5, "glyph:h1"]], logos=logos)
             from reskin.common import video_info
             self.assertEqual(round(video_info(out)["duration"] * 30), 45)
 
-    def test_wiped_clip_renders(self):
+    def test_chained_clip_starts_with_the_previous_result(self):
+        """The clip of a chained segment: the previous result's last frames (stretched back to the source clock),
+        then the source."""
         import subprocess
-        from reskin.common import FFMPEG
+        import numpy as np
+        from reskin.assemble import frames_rgb
+        from reskin.common import FFMPEG, video_info
         if not Path(FFMPEG).is_file():
             self.skipTest("no FFmpeg in the runtime cache")
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "src.mp4"
-            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc=size=270x480:rate=30",
-                            "-t", "2", "-pix_fmt", "yuv420p", str(source)], check=True)
-            out = render.cut_clip(source, [0, 45], 30.0, 270, 480, Path(folder) / "clip.mp4",
-                                  clean=[[0.7, 0.08, 0.97, 0.15, 0.0, 1.0], [0.0, 0.9, 1.0, 1.0, 0.5, 1.5]])
-            self.assertTrue(out.is_file() and out.stat().st_size > 0)
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "color=c=blue:size=270x480:rate=30",
+                            "-t", "3", "-pix_fmt", "yuv420p", str(source)], check=True)
+            previous = Path(folder) / "previous.mp4"       # a Seedance result: 24 fps, a little shorter (60 frames)
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "color=c=red:size=270x480:rate=24",
+                            "-t", "1.87", "-pix_fmt", "yuv420p", str(previous)], check=True)
+            out = render.cut_clip(source, [45, 90], 30.0, 270, 480, Path(folder) / "clip.mp4",
+                                  lead={"path": str(previous), "span": 60, "frames": 15})
+            self.assertEqual(round(video_info(out)["duration"] * 30), 45)
+            frames = frames_rgb(out, 0, 45, 30.0, width=32)
+            self.assertGreater(float(frames[:14, ..., 0].mean()), 180)       # red: the previous result
+            self.assertGreater(float(frames[16:, ..., 2].mean()), 180)       # blue: the source
+            self.assertLess(float(frames[16:, ..., 0].mean()), 60)
 
-    def test_after_only_boxes_do_not_touch_the_render(self):
-        r = {"remove": [{"what": "logo", "start": 0, "end": 15, "box": [0, 0, .27, .05], "wipe": "after"}]}
-        self.assertEqual(render.clean_boxes(r, 0.0, 28.0), [])
-        from reskin import plan
-        self.assertIsNone(plan.items_problem(r["remove"], "remove"))
-        self.assertIsNotNone(plan.items_problem([{"what": "x", "box": [0, 0, .2, .2], "wipe": "never"}], "remove"))
-
-    def test_after_items_stay_out_of_prompts(self):
+    def test_wiped_items_are_named_by_position_only(self):
         from reskin import prompts
         style = read(PROMPTS)["presets"]["realistic"]
-        r = {"materials": "x", "remove": [{"what": "角落logo甲", "box": [0, 0, .2, .1], "wipe": "after"},
-                                          {"what": "底部警示语乙", "box": [0, .9, 1, 1]}]}
-        text = prompts.compose(style, "video", r)
-        self.assertNotIn("角落logo甲", text)      # wiped by the program: never named
-        self.assertNotIn("底部警示语乙", text)
-        r["remove"].append("右上角水印丙")
-        self.assertIn("右上角水印丙", prompts.compose(style, "video", r))      # no box: the model is told
+        r = {"materials": "x", "remove": [{"what": "右上角logo甲", "box": [.7, .02, .98, .1]},
+                                          {"what": "底部警示语乙", "box": [.08, .93, .92, .995], "start": 0, "end": 20},
+                                          {"what": "左下角logo丙", "box": [0, .89, .28, .945], "wipe": "none"}]}
+        video = prompts.compose(style, "video", r, span=(0.0, 10.0))
+        self.assertNotIn("右上角logo甲", video)       # wiped by the program: never named for Seedance
+        self.assertNotIn("底部警示语乙", video)
+        self.assertIn("画面右上角、底部有被抹平的模糊色块", video)
+        self.assertIn("左下角logo丙", video)          # left in the clip: the model is told to remove it
+        later = prompts.compose(style, "video", r, span=(30.0, 40.0))
+        self.assertIn("画面右上角有被抹平的模糊色块", later)
+        # GPT Image sees the original frame with the logo: it is told to remove every one
+        keyframe = prompts.compose(style, "keyframe", r, span=(5.0, 5.0))
+        self.assertIn("右上角logo甲", keyframe)
+        self.assertNotIn("模糊色块", keyframe)
+        self.assertEqual([prompts.where(b) for b in ([0, 0, .21, .05], [.71, .085, .97, .15], [.08, .93, .92, .995],
+                                                     [0, .4, .2, .6], [.4, .4, .6, .6])],
+                         ["左上角", "右上角", "底部", "左侧", "中间"])
 
-    def test_feather_mask_is_opaque_at_the_frame_border(self):
+    def test_smear_is_measured(self):
         import numpy as np
-        from PIL import Image
-        with tempfile.TemporaryDirectory() as folder:
-            path = render.feather_mask(86, 1764, 908, 156, 1080, 1920, Path(folder) / "m.png")
-            with Image.open(path) as image:
-                mask = np.asarray(image)
-        self.assertEqual(int(mask[-1, mask.shape[1] // 2]), 255)    # bottom edge on the frame border: opaque
-        self.assertEqual(int(mask[mask.shape[0] // 2, mask.shape[1] // 2]), 255)
-        self.assertLess(int(mask[0, mask.shape[1] // 2]), 60)          # top edge into the scene: soft
-        self.assertLess(int(mask[mask.shape[0] // 2, 0]), 60)
+        from reskin import logos
+        rng = np.random.default_rng(4)
+        region = rng.integers(40, 200, (60, 90, 3)).astype(np.uint8)       # textured water or snow
+        soft = np.zeros((60, 90), np.float32)
+        soft[20:40, 20:70] = 1
+        self.assertEqual(logos.verdict(logos.detail_share(region, soft)), "clean")
+        smeared = region.copy()
+        smeared[20:40, 20:70] = 120                                          # the smooth fill came back
+        share = logos.detail_share(smeared, soft)
+        self.assertLess(share, logos.SMEARED)
+        self.assertEqual(logos.verdict(share), "smeared")
+        plain = np.full((60, 90, 3), 230, np.uint8)                          # fresh snow: nothing to tell
+        self.assertEqual(logos.verdict(logos.detail_share(plain, soft)), "plain")
 
     def test_remove_box_is_validated(self):
         from reskin import plan

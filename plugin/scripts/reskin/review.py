@@ -29,10 +29,9 @@ CATEGORIES = {
                 "colours, headwear, body proportions, face, species, material, realism level) while the original keeps "
                 "it the same: compare across the whole clip, the first seconds with the last, not only neighbouring "
                 "moments; a gradual drift counts",
-    "not_realistic": "an object or area on the restyled side still looks like a game or cartoon instead of real camera "
-                     "footage: smooth rounded blob shapes, toy-like or plastic vehicles and machines, doll, chibi or "
-                     "figurine people, plastic, clay or candy-coloured surfaces, flat fills, simple gradients, outlines, "
-                     "oversaturated colours (name the objects)",
+    "not_realistic": "a large area of the restyled side kept the original's flat cartoon rendering (outlines, flat colour "
+                     "fills, plastic or clay surfaces) instead of real materials; shapes and proportions that stay "
+                     "as in the original are intended and do not count (name the areas)",
 }
 REALISM_SCORES = ("5 = looks like real camera footage throughout; 4 = real, with small game-like traces; 3 = mixed: "
                   "prominent objects still look like a game; 2 = mostly a game or CG look with real textures; "
@@ -136,12 +135,12 @@ def _rules() -> list[str]:
     return [
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "
         "Do not report flaws that the original shows identically (game physics, clipping already in the original), "
-        "and do not report the intended material change itself, nor objects rebuilt as their real-world counterparts "
-        "(new shape details, proportions and surfaces are wanted) as long as position, count, colour and motion match.",
-        "Realism is part of the check: the restyle must look like footage filmed by a real camera, more real than a "
-        "good game render. Judge the RESTYLED side against real-world footage, not against the original. Report each "
-        "object or area that still looks game-like as not_realistic (high when a large or prominent object or most "
-        "of the frame looks like a game, medium otherwise). HUD, icons, price tags, bubbles and other UI are exempt.",
+        "and do not report the intended material change itself.",
+        "The goal is realistic MATERIALS with the original's shapes, proportions and character designs kept (stylised "
+        "or chibi figures stay stylised, with real cloth, skin and hair). What matters most is a stable video: no "
+        "jumps, dissolves or changes at the seam times, no flicker, morphing, vanishing or added objects, no leftover "
+        "or garbled text, no blurred or smeared patches. Report not_realistic only where a large area still shows the "
+        "original's flat cartoon rendering (medium at most). HUD, icons, price tags, bubbles and other UI are exempt.",
         f"Also rate the realism over time in `realism`: consecutive ranges covering the whole clip, each at most "
         f"10 seconds long (rate each range on its own: realism often fades later in a clip); score {REALISM_SCORES}. `cartoonish` lists (in Chinese) the objects that still "
         "look game-like in that range (empty at 5).",
@@ -171,9 +170,9 @@ def segment_prompt(state: dict, plan_row: dict, layout: str, known: list[str] | 
     """For the check right after one segment renders (before the next segment of its shot starts from it)."""
     lines = [*_goal(state, plan_row, layout, "clip of one segment"),
              "This is one separately rendered segment, checked before the rest of the shot is rendered from it: look "
-             "hardest for wrong or vanished objects, changed colours, leftover cartoon look (in its later seconds too: "
-             "what comes into view later must be as real as the first frame), garbled or added text, leftover logos "
-             "and warning lines, and morphing.", *_rules(), *_known(known)]
+             "hardest for wrong or vanished objects, changed colours of prominent objects, garbled or added text, "
+             "leftover logos and warning lines, blurred patches, sudden changes and morphing. Use high only for what "
+             "a casual viewer notices at once.", *_rules(), *_known(known)]
     return "\n".join(lines)
 
 
@@ -188,10 +187,14 @@ def realism_ranges(answer: dict, offset: float = 0.0) -> list[dict]:
     return ranges
 
 
+REALISM_ISSUE = 2       # a stretch rated this or lower becomes a (medium) not_realistic issue; 3 is only reported
+#                         (the 1080p batch chased realism with redos, midframes and identity checks and paid for it in
+#                         seams and renders)
+
+
 def realism_issues(ranges: list[dict], issues: list[dict]) -> list[dict]:
-    """A stretch rated 3 or lower that no not_realistic issue covers becomes one (3: medium, 1-2: high), so a segment
-    that drifts back to the game look is held like any other flaw. Neighbouring ranges with the same score make one
-    issue (the timeline keeps the detail)."""
+    """A stretch rated REALISM_ISSUE or lower that no not_realistic issue covers becomes a medium one: the video kept
+    the game look there. Neighbouring ranges with the same score make one issue (the timeline keeps the detail)."""
     merged = []
     for item in sorted(ranges, key=lambda r: r["start"]):
         last = merged[-1] if merged else None
@@ -202,14 +205,14 @@ def realism_issues(ranges: list[dict], issues: list[dict]) -> list[dict]:
             merged.append(dict(item, cartoonish=list(item["cartoonish"])))
     found = []
     for item in merged:
-        if item["score"] > 3 or item["end"] - item["start"] < .5:
+        if item["score"] > REALISM_ISSUE or item["end"] - item["start"] < .5:
             continue
         if any(i["category"] == "not_realistic" and i["start"] <= item["end"] and item["start"] <= i["end"]
                for i in issues):
             continue
         objects = "、".join(item["cartoonish"][:6]) or "画面"
         found.append({"start": item["start"], "end": item["end"], "category": "not_realistic",
-                      "severity": "medium" if item["score"] == 3 else "high", "where": objects,
+                      "severity": "medium", "where": objects,
                       "description": f"写实度 {item['score']}/5：{objects}仍有游戏/卡通感"})
     return found
 
@@ -987,11 +990,23 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     # is low (it rarely shows in playback); it counts when the Gemini close-up sees a change there too.
     for seam in assembled["seams"]:
         if seam.get("jump") in ("visible", "slight"):
-            add(start=seam["time"], end=seam["time"], category="seam_color",
+            inside = seam.get("inside") or {}
+            add(start=seam["time"], end=max(seam["time"], inside.get("time", seam["time"])), category="seam_color",
                 severity="high" if seam["jump"] == "visible" else "low", where="whole frame", source="measured",
                 description=f"接缝 {seam['segment']} 处两段画面差异 {seam['mismatch']}（局部 {seam.get('local', 0)}），画面自身运动只有 {seam['motion']}"
-                            f"（{'明显跳变' if seam['jump'] == 'visible' else '轻微跳变'}）",
+                            + (f"；本段自己的画面开始处（{inside['time']:.2f} s）逐帧变化 {inside['mismatch']}，平时 {inside['motion']}"
+                               if inside.get("jump") in ("visible", "slight") else "")
+                            + f"（{'明显跳变' if seam['jump'] == 'visible' else '轻微跳变'}）",
                 segments=[seam["segment"]])
+    # Measured: corners a logo was wiped from that came back as a smooth patch (see logos.quality).
+    for wipe in assembled.get("wipes") or []:
+        if wipe.get("verdict") in ("smeared", "soft"):
+            moments = wipe.get("smeared_at") or [wipe["start"]]
+            add(start=moments[0], end=moments[-1], category="artifact",
+                severity="high" if wipe["verdict"] == "smeared" else "low", where=wipe["what"], source="measured",
+                description=f"去logo区域（{wipe['what']}）{'留下模糊的涂抹色块' if wipe['verdict'] == 'smeared' else '偏模糊'}："
+                            f"细节只有周围场景的 {wipe['share']}",
+                segments=segment_for(moments[0], moments[-1], assembled))
     # The same characters and objects from the first second to the last (stills beside the styled keyframes).
     source = next(r for r in state["sources"] if r["id"] == source_id)
     number = len((read(job / "state/review" / f"{source_id}.json") if (job / "state/review" / f"{source_id}.json").is_file()

@@ -21,7 +21,10 @@ def aspect_for(width: int, height: int, aspects: dict[str, float] = ASPECTS) -> 
     return name if abs(aspects[name] / ratio - 1) <= ASPECT_TOLERANCE else "adaptive"
 
 
-def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = "max",
+QUALITY = "high"            # GPT Image quality ("max" doubled the price for keyframes a 720p video cannot show)
+
+
+def edit(images: list[Path], prompt: str, output: Path, *, width: int, height: int, quality: str = QUALITY,
          model: str = IMAGE_MODEL, job: Path | None = None, key: str = "", purpose: str = "keyframe") -> dict:
     """Edit the first image (later images are references); writes `output` and returns the generation. With `job`
     the call goes into the spend ledger."""

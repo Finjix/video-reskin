@@ -2,15 +2,15 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "video-reskin",
   "version": "0.0.1",
-  "description": "Batch-restyle videos (mainly into realistic materials) on Windows: GPT Image style keyframes, Seedance 2.5 1080p video editing on Lumos, seamless reassembly with the original audio, and a Gemini review loop. Requires a Lumos login and a Winky API key.",
+  "description": "Batch-restyle videos (mainly into realistic materials) on Windows: GPT Image style keyframes, Seedance 2.5 720p video editing on Lumos, seamless reassembly with the original audio, and a Gemini review loop. Requires a Lumos login and a Winky API key.",
   "author": {"name": "钟丰骏-实习生"},
   "extensions": {
     "com.openai": {
       "requires_local_executor": true,
       "interface": {
         "displayName": "视频批量换画风",
-        "shortDescription": "批量把视频转为写实材质的1080p成片",
-        "longDescription": "把游戏广告等视频批量转换画风（默认写实版材质，风格不变）：自动拆分镜头、去掉尾板，用 GPT Image 生成风格关键帧，在 Lumos 上用 Seedance 2.5 逐段视频编辑并去除游戏 logo 和警示语，按原时长拼接并保留原声，输出 1080p 成片；最后由 Gemini 审片，问题经抽帧确认后自动回炉重做。需要 Windows 10/11 64 位、飞书扫码登录 Lumos 和一个 Winky API key。首次使用时自动下载运行依赖。",
+        "shortDescription": "批量把视频转为写实材质的720p成片",
+        "longDescription": "把游戏广告等视频批量转换画风（默认写实版材质，风格不变）：自动拆分镜头、去掉尾板，用 GPT Image 生成风格关键帧，在 Lumos 上用 Seedance 2.5 逐段视频编辑并去除游戏 logo 和警示语，按原时长拼接并保留原声，输出 720p、24fps 成片；最后由 Gemini 审片，问题经抽帧确认后自动回炉重做。需要 Windows 10/11 64 位、飞书扫码登录 Lumos 和一个 Winky API key。首次使用时自动下载运行依赖。",
         "developerName": "钟丰骏-实习生",
         "websiteURL": "https://github.com/Finjix/video-reskin",
         "category": "视频",

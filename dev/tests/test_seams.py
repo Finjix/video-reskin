@@ -46,8 +46,31 @@ class JoinTests(unittest.TestCase):
 
     def test_jump_verdicts(self):
         self.assertEqual(assemble.jump_verdict({"mismatch": 20.6, "motion": .56}), "visible")
-        self.assertEqual(assemble.jump_verdict({"mismatch": 9.0, "motion": 2.0}), "slight")
+        # GOF3D10374 at 33.6 s (other logs, water and textures; it passed as slight under the old limits)
+        self.assertEqual(assemble.jump_verdict({"mismatch": 12.42, "motion": 4.81, "local": 19.51}), "visible")
+        self.assertEqual(assemble.jump_verdict({"mismatch": 9.0, "motion": 2.0}), "visible")
+        self.assertEqual(assemble.jump_verdict({"mismatch": 5.0, "motion": 1.5, "local": 13.0}), "slight")
         self.assertEqual(assemble.jump_verdict({"mismatch": 6.0, "motion": 4.0}), "clean")
+        self.assertEqual(assemble.worst("clean", None, "slight"), "slight")
+
+    def test_inside_jump_sees_a_step_where_the_own_frames_start(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from reskin.common import FFMPEG
+        if not Path(FFMPEG).is_file():
+            self.skipTest("no FFmpeg in the runtime cache")
+        with tempfile.TemporaryDirectory() as folder:
+            smooth = Path(folder) / "smooth.mp4"
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x160:rate=24", "-t", "2",
+                            "-pix_fmt", "yuv420p", str(smooth)], check=True)
+            self.assertEqual(assemble.inside_jump(smooth, 24, 24.0)["jump"], "clean")
+            jumped = Path(folder) / "jumped.mp4"         # the same motion, but from frame 24 on in other colours
+            graph = ("[0:v]split[a][b];[a]trim=end_frame=24[a1];[b]trim=start_frame=24,setpts=PTS-STARTPTS,"
+                     "lutrgb=r='val*0.6':g='255-val'[b1];[a1][b1]concat=n=2:v=1[v]")
+            subprocess.run([str(FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x160:rate=24", "-t", "2",
+                            "-filter_complex", graph, "-map", "[v]", "-pix_fmt", "yuv420p", str(jumped)], check=True)
+            self.assertEqual(assemble.inside_jump(jumped, 24, 24.0)["jump"], "visible")
 
 
 class HudTests(unittest.TestCase):

@@ -102,3 +102,32 @@ cross-fade blended two different pictures.
 - The user asked for the original beside the result; `compare` now makes `<name>_写实_对比.mp4` (2160x1920 here).
 - `cost`: Seedance 154.2 s (new 66.7, redo 67.0, upstream 20.6); GPT Image 13; Gemini 16. Wall time ~78 min, of
   which ~48 min Seedance waits; the two avoidable redos took ~16 min.
+
+## 2026-11-05: stability and cost over realism (offline checks only, no paid run)
+
+The user found blurred patches where logos and the warning line were removed (S01/S09 of the 1080p batch in
+`D:\1080P成片`), a dissolve at GOF3D10374's 33.6 s seam, and the cost too high. The batch's ledger: 427 images (393
+previews, 34 keyframes), 87 Seedance submissions for 1952 s (new 547, redo 661, plan 308, upstream 268, wipe 128,
+patch 21, experiment 20) for 9 videos of about 500 s, and 529 Gemini calls (324 identity).
+
+- Wiped corners measured on those deliveries with `logos.quality` (fine detail inside the wiped letters against the
+  scene around them): the blurred corners 0.10-0.38 (S01 four of five, its bottom-left one soft at 0.52; S09 all six;
+  S02 top right; S03 bottom left; S08 top right over water), the clean ones 1.04-1.07 (S03 top right among trees, S08
+  bottom right). Thresholds:
+  smeared < 0.4, soft < 0.6. The review had reported the smears (`gemini-wipe`, medium) and the skill called them a
+  known limit, so they were delivered. Where only the prompt removed a logo (S08 0-10 s, no box), it came out clean.
+- The 13 in-shot seams re-measured: the old verdicts called 4 visible (delivered anyway), the new ones (excess over
+  motion > 6, local > 24, or a mismatch above 8 and 2.2 times the motion) 8, among them S08:K03 at 33.6 s (12.42 vs
+  motion 4.81, local 19.5: other logs, water texture, small objects; old verdict slight). A chained segment with only
+  the previous result's frame as reference does not reproduce that result.
+- Changes: chained segments start with the previous result's last second (1 s overlap, `chain_prefix`), a 2-frame
+  switch, the step where the later segment's own frames start measured too (`inside`); the video prompt names wiped
+  corners by position only; wipe quality measured in the gate, `assemble` and the review; 720p clips and renders,
+  24 fps deliveries, GPT Image quality high at 1K; previews only on request (at most 4), no midframes, no patches, no
+  identity check per segment or preview; materials real but shapes kept; realism only reported (2 or lower: medium);
+  the gate holds only for visible seams, smeared corners and high findings; 2 review rounds.
+- Offline simulation (stand-in for Lumos: grey, time-compressed 24 fps 720p results) of a 40 s single shot with a
+  logo box: K02's clip starts with 30 frames of K01's result, its prompt has the prefix and position sentences and
+  does not name the logo, the delivery is 720x1280 at 24 fps, the seam measures clean (switch 0.52, inside clean).
+- Not verified on Lumos yet: whether Seedance keeps the 1 s lead as given and continues it without a step, whether
+  the position sentence makes it paint scene over the wiped letters, and how 720p looks. Try one source first.

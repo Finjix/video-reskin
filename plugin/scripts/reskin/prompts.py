@@ -10,18 +10,35 @@ def on_screen(items, span: tuple[float, float] | None) -> list[str]:
     Naming something that is not on screen makes the models draw it (a truck listed for the end of an ad appears in
     its first seconds; text listed for removal turns up as garbled text), so timed items are left out elsewhere.
     """
+    return list(dict.fromkeys(item if isinstance(item, str) else item["what"] for item in timed(items, span)))
+
+
+def timed(items, span: tuple[float, float] | None) -> list:
+    """The items (texts or dicts) on screen during `span` (all of them without a span)."""
     if isinstance(items, str):
         items = [items]
-    chosen = []
-    for item in items or []:
-        if isinstance(item, str):
-            chosen.append(item)
-        elif span is None or (item.get("start", 0) <= span[1] and span[0] <= item.get("end", float("inf"))):
-            chosen.append(item["what"])
-    return list(dict.fromkeys(chosen))
+    return [item for item in items or [] if isinstance(item, str) or span is None
+            or (item.get("start", 0) <= span[1] and span[0] <= item.get("end", float("inf")))]
 
 
 removals = on_screen
+
+
+def is_wiped(item) -> bool:
+    """A `remove` item the program wipes from the clip Seedance gets: one with a `box`, unless `"wipe": "none"`."""
+    return isinstance(item, dict) and bool(item.get("box")) and item.get("wipe", "before") == "before"
+
+
+def where(box: list[float]) -> str:
+    """Where a box sits in the frame, in the words of a prompt: 右上角, 底部, 左侧..."""
+    x, y = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    vertical = "上" if y < 1 / 3 else "下" if y > 2 / 3 else ""
+    horizontal = "" if box[2] - box[0] > .5 else "左" if x < 1 / 3 else "右" if x > 2 / 3 else ""
+    if vertical and horizontal:
+        return f"{horizontal}{vertical}角"
+    if vertical:
+        return "顶部" if vertical == "上" else "底部"
+    return f"{horizontal}侧" if horizontal else "中间"
 
 
 def remove_clause(items: list[str], burned: list[str] | None = None) -> str:
@@ -32,6 +49,13 @@ def remove_clause(items: list[str], burned: list[str] | None = None) -> str:
     if burned:
         parts.append(texts["burn"].format(items="、".join(burned)))
     return "".join(parts)
+
+
+def wiped_clause(items: list, span: tuple[float, float] | None) -> str:
+    """For the video prompt: where the program wiped logos from the clip, by position only. Seedance kept the smooth
+    fill as a blurred patch (S01/S09 of the 1080p batch, every corner); naming the logo instead made it draw one."""
+    spots = list(dict.fromkeys(where(item["box"]) for item in timed([i for i in items if is_wiped(i)], span)))
+    return read(PROMPTS).get("wiped", "").format(where="、".join(spots)) if spots else ""
 
 
 def burned_items(row: dict) -> list:
@@ -46,10 +70,15 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
     its second image (the style's `style_ref` sentence says how to use it)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = "、".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    # Items the program wipes (`box`: from the clip before the render, or after it) stay out of the texts: naming a
-    # logo made Seedance draw one, even over a wiped corner.
-    told = [i for i in row.get("remove") or [] if not (isinstance(i, dict) and i.get("box"))]
-    removal = remove_clause(on_screen(told, span), on_screen(burned_items(row), span))
+    items = row.get("remove") or []
+    if kind == "video":
+        # Wiped items stay unnamed for Seedance (naming a logo made it draw one, even over a wiped corner); the
+        # prompt only says where the wiped patches are, so it paints scene there instead of keeping the smear.
+        told = [i for i in items if not is_wiped(i)]
+        removal = remove_clause(on_screen(told, span), on_screen(burned_items(row), span)) + wiped_clause(items, span)
+    else:
+        # GPT Image sees the original frame, logo included, and removes what it is told to.
+        removal = remove_clause(on_screen(items, span), on_screen(burned_items(row), span))
     text = style[kind].format(materials=materials, remove=removal, look=style.get("look", ""),
                               rebuild=style.get("rebuild", ""), extra=wishes,
                               style_ref=style.get("style_ref", "") if style_ref else "")

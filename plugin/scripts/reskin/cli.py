@@ -145,24 +145,24 @@ def cmd_keyframes(args) -> int:
 
 
 def render_lines(job: Path, results: list[dict]) -> tuple[list[str], bool]:
-    """The render summary: ready / reused / held / waiting / failed segments and patches, with the gate stills."""
+    """The render summary: ready / reused / held / waiting / failed segments, with the gate stills."""
     segments = [r for r in results if r.get("key", "").count(":") == 1]
-    patches = [r for r in results if r.get("key", "").count(":") == 2]
     failed = [r for r in results if r.get("error") and not r.get("waiting")]
     held = [r for r in segments if r.get("held")]
     waiting = [r for r in segments if r.get("waiting")]
     ready = [r for r in segments if not r.get("error") and not r.get("waiting")]
     lines = [f"segments: {len(ready)} ready ({sum(1 for r in ready if r.get('reused'))} reused), {len(held)} held by "
-             f"the segment check, {len(waiting)} waiting behind them, {len(failed)} failed"
-             + (f"; patches: {sum(1 for r in patches if not r.get('error'))} ready" if patches else "")]
+             f"the segment check, {len(waiting)} waiting behind them, {len(failed)} failed"]
     for r in held:
         gate = r["gate"]
         lines.append(f"  {r['key']} held: {'; '.join(gate.get('reasons') or [])}")
         if gate.get("realism"):
             from reskin import review as REVIEW
             lines.append(f"    realism (5 = real footage): {REVIEW.realism_line(gate['realism'])}")
-        if gate.get("identity_sheets"):
-            lines.append(f"    identity close-ups (beside the shot's keyframes): {', '.join(gate['identity_sheets'])}")
+        for wipe in gate.get("wipes") or []:
+            if wipe.get("verdict") in ("smeared", "soft"):
+                lines.append(f"    wiped corner {wipe['what']}: {wipe['verdict']} (detail {wipe['share']} of the scene "
+                             f"around it)")
         for issue in gate.get("issues") or []:
             lines.append(f"    #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s: "
                          f"{issue['description']}")
@@ -216,14 +216,12 @@ def cmd_assemble(args) -> int:
                      f"{result['duration']:.2f} s"
                      + (f", HUD from the original: {len(result['hud'])}" if result["hud"] else "")
                      + (f", problems: {'; '.join(result['problems'])}" if result["problems"] else ""))
-        for seam in result["seams"]:
-            lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s: " + (
-                f"{seam['jump']} (jump {seam['mismatch']} vs motion {seam['motion']}, local {seam.get('local', 0)})" if seam.get("jump")
-                else "hard cut"))
+        lines += seam_lines(result)
         if result.get("seam_sheet"):
             lines.append(f"  seam sheet: {result['seam_sheet']}")
     show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else
-                              "look at the seam sheet (a visible jump: redo the segment after it), then review")])
+                              "look at the seam sheet (a visible jump: redo the segment after it; a smeared logo "
+                              "corner: see the skill's logo rows), then review")])
     return RULE_FAILURE if failed else 0
 
 
@@ -253,16 +251,18 @@ def cmd_compare(args) -> int:
     return RULE_FAILURE if failed else 0
 
 
-def identity_lines(checks: list[dict]) -> list[str]:
-    """The preview identity check: which previews draw a recurring character or object differently."""
+def seam_lines(assembled: dict) -> list[str]:
+    """Every seam (the switch, and where a chained segment's own frames start) and every wiped corner, measured."""
     lines = []
-    for check in checks:
-        if check.get("skipped"):
-            lines.append(f"{check['key']}: skipped ({check['skipped']})")
-            continue
-        issues = check.get("issues") or []
-        lines.append(f"{check['key']}: {len(issues)} changes across the previews; sheet {check['sheet']}")
-        lines += [f"  [{i['severity']}] {i['start']:.1f}-{i['end']:.1f} s: {i['description']}" for i in issues]
+    for seam in assembled["seams"]:
+        inside = seam.get("inside") or {}
+        lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s: " + (
+            f"{seam['jump']} (switch: jump {seam['mismatch']} vs motion {seam['motion']}, local {seam.get('local', 0)}"
+            + (f"; own frames from {inside['time']:.2f} s: {inside['jump']}, step {inside['mismatch']} vs "
+               f"{inside['motion']}" if inside else "") + ")" if seam.get("jump") else "hard cut"))
+    for wipe in assembled.get("wipes") or []:
+        lines.append(f"  wiped corner {wipe['what']} {wipe['start']:.1f}-{wipe['end']:.1f} s: {wipe['verdict']}"
+                     + (f" (detail {wipe['share']} of the scene around it)" if wipe.get("share") is not None else ""))
     return lines
 
 
@@ -284,9 +284,10 @@ def review_lines(result: dict, limit: int) -> list[str]:
     return lines
 
 
-REVIEW_NEXT = ("next: confirm each issue on its stills (upper row original, lower row restyled; the triage hint is "
-               "Gemini's, not a verdict); send confirmed ones back with redo (or, for a short local flaw in a long "
-               "segment, patch), then render, assemble and review again")
+REVIEW_NEXT = ("next: confirm each high issue on its stills (upper row original, lower row restyled; the triage hint "
+               "is Gemini's, not a verdict); redo only confirmed flaws a viewer sees at once (seams, smeared or "
+               "leftover logos, garbled text, morphing or vanishing objects, wrong colours of prominent objects), "
+               "then run again; medium and low issues are reported, not redone")
 
 
 def cmd_review(args) -> int:
@@ -388,22 +389,16 @@ def cmd_preview(args) -> int:
     plan = load_plan(job)
     runtime.ensure("media")
     from reskin import preview as PREVIEW
-    if args.at and len([s for s in plan["sources"] if not args.only or s in {k.partition(":")[0] for k in args.only}]) != 1:
-        raise ValueError("--at takes times of one source: pick it with --only S01")
-    results = PREVIEW.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers,
-                              at=args.at, redo=args.redo)
-    checks = [r for r in results if r.get("kind") == "identity"]
-    results = [r for r in results if r.get("kind") != "identity"]
+    results = PREVIEW.run_all(job, state, plan, JOB.style(state), args.only, args.at, workers=args.workers,
+                              redo=args.redo)
     failed = [r for r in results if r.get("error")]
     made = [r for r in results if not r.get("error") and not r.get("reused")]
     lines = [f"previews: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-preview.jpg: original | preview with the video prompt's texts and the "
-                 f"segment's corrective sentences" + ("; <id>-preview-at.jpg: the --at times" if args.at else "") + ")")
-    lines += identity_lines(checks)
-    lines.append("next: wrong objects, colours or text on a preview mean the edits are wrong: fix them, plan, "
-                 "preview again; a preview that alone drew a character differently: preview --at T --redo; then "
-                 "render")
+    lines.append(f"sheet: {job / 'sheets' / (args.only + '-preview.jpg')} (original | preview with the video prompt's "
+                 "texts and the segment's corrective sentences)")
+    lines.append("next: wrong objects, colours or text on a preview mean the edits are wrong there: fix them, plan, "
+                 "then run")
     show(lines)
     return RULE_FAILURE if failed else 0
 
@@ -417,26 +412,6 @@ def cmd_accept(args) -> int:
         GATE.accept(job, key, args.reason)
         lines.append(f"{key}: accepted ({args.reason}); the rest of its shot renders on the next render")
     show(lines + ["next: render"])
-    return 0
-
-
-def cmd_patch(args) -> int:
-    from reskin import patch as PATCH
-    job = args.job_dir.resolve()
-    JOB.load(job)
-    if args.drop:
-        dropped = [key for key in selection(args.drop) or [] if PATCH.drop(job, key)]
-        show([f"{key}: dropped" for key in dropped] or ["nothing dropped"])
-        return 0
-    if not (args.segment and args.at and args.reason):
-        raise ValueError("patch needs --segment S01:K02 --at <start> [<end>] --reason <what is wrong> (or --drop KEY)")
-    plan = load_plan(job)
-    times = args.at if len(args.at) > 1 else [args.at[0], args.at[0]]
-    entry = PATCH.add(job, plan, args.segment, times[0], times[-1], args.reason, args.prompt)
-    show([f"{args.segment}:{entry['id']}: renders {entry['start']:.2f}-{entry['end']:.2f} s ({entry['seconds']:.1f} s) "
-          f"again from the segment's own frame; the rest of the segment and its shot stay",
-          "next: render (only the patch runs), assemble (both joins are measured: a visible one means drop the patch "
-          "and redo the segment), review"])
     return 0
 
 
@@ -465,29 +440,17 @@ def cmd_run(args) -> int:
     from reskin.common import job_lock, log
     style = JOB.style(state)
     only = selection(args.only)
-    made = []
     results = KEYFRAMES.run_all(job, state, plan, style, only, set())
     failed = [r for r in results if r.get("error")]
-    made += [r["key"] for r in results if not r.get("error") and not r.get("reused")]
-    checks = []
-    if not failed:
-        # --no-preview still makes the previews Seedance takes as references (midframes).
-        from reskin import preview as PREVIEW
-        previews = PREVIEW.run_all(job, state, plan, style, only, midframes_only=args.no_preview)
-        checks = [r for r in previews if r.get("kind") == "identity"]
-        previews = [r for r in previews if r.get("kind") != "identity"]
-        failed += [r for r in previews if r.get("error")]
-        made += [r["key"] for r in previews if not r.get("error") and not r.get("reused")]
+    made = [r["key"] for r in results if not r.get("error") and not r.get("reused")]
     if failed:
-        show([f"  {r['key']}: {r['error']}" for r in failed] + identity_lines(checks)
-             + ["next: fix the failures and run again"])
+        show([f"  {r['key']}: {r['error']}" for r in failed] + ["next: fix the failures and run again"])
         return RULE_FAILURE
     if made:
-        show([f"new keyframes and previews: {', '.join(made)}",
-              f"sheets: {job / 'sheets'} (<id>-keyframes.jpg, <id>-preview.jpg, <id>-preview-identity-subjects.jpg)",
-              *identity_lines(checks),
-              "next: look at every new sheet; fix the edits or keyframes --redo <key> where needed; then run again "
-              "(it renders once nothing new needs looking at)"])
+        show([f"new keyframes: {', '.join(made)}", f"sheets: {job / 'sheets'} (<id>-keyframes.jpg)",
+              "next: look at every new keyframe sheet; fix the edits or keyframes --redo <key> where needed (a "
+              "preview --only <id> --at <t> only for a moment the keyframes do not show); then run again (it "
+              "renders once nothing new needs looking at)"])
         return 0
     limit = int(state["options"].get("review_rounds", 3))
     reports: dict[str, list[str]] = {}
@@ -501,13 +464,10 @@ def cmd_run(args) -> int:
             if assembled is None:
                 assembled = ASSEMBLE.assemble_source(job, state, source_id, row, style)
             visible = [s for s in assembled["seams"] if s.get("jump") == "visible"]
-            lines.append(f"{source_id}: {Path(assembled['output']).name}, seams: "
-                         + (", ".join(f"{s['segment']} {s.get('jump', 'cut')}" for s in assembled["seams"]) or "none")
+            smeared = [w for w in assembled.get("wipes") or [] if w.get("verdict") == "smeared"]
+            lines.append(f"{source_id}: {Path(assembled['output']).name}"
                          + (f"; seam sheet {assembled['seam_sheet']}" if assembled.get("seam_sheet") else ""))
-            for patch in assembled.get("patches") or []:
-                lines.append(f"  patch {patch['key']} {patch['start']:.2f}-{patch['end']:.2f} s: joins {patch['in']} / "
-                             f"{patch['out'] or 'none (runs to the end)'}"
-                             + ("" if patch["kept"] else " -> visible: drop it and redo the segment"))
+            lines += seam_lines(assembled)
             last = REVIEW.last_round(job, source_id)
             if last and last.get("assembled") == assembled.get("inputs"):
                 lines.append(f"  unchanged since review round {last['round']}:")
@@ -516,6 +476,8 @@ def cmd_run(args) -> int:
                 lines += ["  " + line for line in review_lines(REVIEW.review_source(job, state, source_id, row), limit)]
             if visible:
                 lines.append(f"  visible seams: {', '.join(s['segment'] for s in visible)} (not done until fixed)")
+            if smeared:
+                lines.append(f"  smeared logo corners: {'; '.join(w['what'] for w in smeared)} (not done until fixed)")
         except Exception as error:
             lines.append(f"{source_id}: follow-up failed: {type(error).__name__}: {error}")
         with lock:
@@ -664,28 +626,19 @@ def main() -> None:
     lint = command("lint", cmd_lint, help="Gemini lists what each source shows, checks the edits, drafts edits")
     lint.add_argument("--edits", type=Path, help="edits JSON to check")
     lint.add_argument("--only", nargs="*", help="source IDs")
-    preview = command("preview", cmd_preview, help="GPT Image previews across every segment (looked at, not used)")
-    preview.add_argument("--only", nargs="*", help="source IDs or segments like S01:K02")
-    preview.add_argument("--at", nargs="+", type=float, metavar="T",
-                         help="source times to preview instead (one source; e.g. the moment of a flaw after redo)")
-    preview.add_argument("--redo", action="store_true",
-                         help="make the chosen previews again even when current (with --at: those times)")
-    preview.add_argument("--workers", type=int, default=6)
-    run_cmd = command("run", cmd_run, help="keyframes, previews, render with checks, assemble and review per source")
+    preview = command("preview", cmd_preview, help="GPT Image previews of a few moments of one source (looked at only)")
+    preview.add_argument("--only", required=True, help="the source ID, e.g. S01")
+    preview.add_argument("--at", nargs="+", type=float, required=True, metavar="T",
+                         help="source times to preview (at most 4): moments the keyframes do not show")
+    preview.add_argument("--redo", action="store_true", help="make these previews again even when current")
+    preview.add_argument("--workers", type=int, default=4)
+    run_cmd = command("run", cmd_run, help="keyframes, render with checks, assemble and review per source")
     run_cmd.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     run_cmd.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     run_cmd.add_argument("--no-gate", action="store_true", help="no segment checks")
-    run_cmd.add_argument("--no-preview", action="store_true",
-                         help="no preview stills, except the midframes Seedance takes as references")
     accept = command("accept", cmd_accept, help="let a segment held by the segment check through")
     accept.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     accept.add_argument("--reason", required=True, help="why the reported flaw is not one (as seen on the stills)")
-    patch = command("patch", cmd_patch, help="render a short stretch inside a finished segment again")
-    patch.add_argument("--segment", help="key like S01:K02")
-    patch.add_argument("--at", type=float, nargs="+", help="start [end] of the flaw, seconds in the delivered video")
-    patch.add_argument("--reason", help="what is wrong, as confirmed on the stills")
-    patch.add_argument("--prompt", help="one corrective sentence for the patch")
-    patch.add_argument("--drop", nargs="+", help="patch keys like S01:K02:P1 to remove")
     cost = command("cost", cmd_cost, help="what was sent to Seedance, GPT Image and Gemini, and why")
     cost.add_argument("--json", action="store_true")
     command("status", cmd_status, help="progress per source and the next step")

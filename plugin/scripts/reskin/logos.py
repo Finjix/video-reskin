@@ -6,7 +6,10 @@ frames, and the median shows it crisp where the scene averages out. Those pixels
 by frame from the scene around them (push-pull: averages over coarser and coarser neighbourhoods of the known
 pixels). Every earlier fill of the whole box came back from Seedance as something else: an interpolation (delogo) as
 streaks, a mirrored neighbouring strip as upside-down people, doubled icons and fence crosses, a smooth fill as a
-blurred rectangle. The scene between the letters it renders as scene.
+blurred rectangle. The scene between the letters it renders as scene; over plain water or snow it kept the fill of
+dense letters as a blurred patch (the 1080p batch: every corner of S01 and S09), so the video prompt names where the
+wiped patches are (prompts.wiped_clause) and `quality` measures every wiped corner of a rendered video: the detail
+left inside the mask against the scene around it.
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from reskin.common import FFMPEG, digest, run
+from reskin.prompts import is_wiped
 
 TOL = 14.0            # grey levels: a frame matches the median at a pixel within this
 SHARE = .5            # a logo pixel matches its median in at least this share of the item's frames
@@ -122,7 +126,7 @@ def masks(job: Path, source_id: str, source: Path, row: dict, size: tuple[int, i
     found = {}
     keep_start, keep_end = row["keep"]
     for n, item in enumerate(row.get("remove") or []):
-        if not (isinstance(item, dict) and item.get("box")) or item.get("fill", "glyph") != "glyph":
+        if not is_wiped(item):
             continue
         start = max(keep_start, float(item.get("start", keep_start)))
         end = min(keep_end, float(item.get("end", keep_end)))
@@ -163,3 +167,66 @@ def wipe(frame: np.ndarray, rect: list[int], soft: np.ndarray) -> None:
     filled = pushpull(part, known)
     frame[y0:y1, x0:x1] = np.clip(frame[y0:y1, x0:x1] * (1 - soft[..., None]) + filled * soft[..., None] + .5,
                                   0, 255).astype(np.uint8)
+
+
+SMEARED = .4          # fine detail inside a wiped mask below this share of the scene's around it: a blurred patch
+SOFT_SHARE = .6       # below this: soft, a viewer may notice it
+PLAIN = 1.5           # grey levels of fine detail around the mask below which a frame cannot show a smear (sky, fog)
+QUALITY_SAMPLES = 8   # moments measured per wiped item
+
+
+def fine_detail(pixels: np.ndarray) -> np.ndarray:
+    """Per pixel, how far the grey picture differs from its own blur (sigma 1.5 px): texture, edges, grain."""
+    grey = pixels.astype(np.float32).mean(axis=-1)
+    return np.abs(grey - blur(grey, 1.5))
+
+
+def detail_share(pixels: np.ndarray, soft: np.ndarray) -> float | None:
+    """Fine detail inside the wiped pixels of one restyled region (HxWx3) against the scene around and between them:
+    1 = as detailed as around, about .2 = a smooth patch. None when the scene around is too plain to tell."""
+    inside = soft > .5
+    around = ~_grow(soft > .05, 6)
+    if inside.sum() < 40 or around.sum() < 40:
+        return None
+    detail = fine_detail(pixels)
+    scene = float(detail[around].mean())
+    if scene < PLAIN:
+        return None
+    return round(float(detail[inside].mean()) / scene, 3)
+
+
+def verdict(share: float | None) -> str:
+    if share is None:
+        return "plain"
+    return "smeared" if share < SMEARED else "soft" if share < SOFT_SHARE else "clean"
+
+
+def quality(video: Path, items: list[dict], samples: int = QUALITY_SAMPLES) -> list[dict]:
+    """How every wiped corner came out in a restyled `video`. `items`: {"what", "start", "end" (seconds of the
+    video), "mask" (PNG at `size`), "region" (its rect at that size), "size"}. Per item the median detail share over
+    `samples` moments and the verdict: clean, soft, smeared, or plain (nothing to measure against)."""
+    results = []
+    for item in items:
+        soft = load(item["mask"])
+        x0, y0, x1, y1 = item["region"]
+        width, height = item["size"]
+        a, b = float(item["start"]), float(item["end"])
+        shares, moments = [], []
+        for k in range(samples):
+            moment = a + (k + .5) * (b - a) / samples
+            raw = run([FFMPEG, "-v", "error", "-ss", f"{moment:.3f}", "-i", video, "-frames:v", "1", "-vf",
+                       f"scale={width}:{height},crop={x1 - x0}:{y1 - y0}:{x0}:{y0}", "-f", "rawvideo",
+                       "-pix_fmt", "rgb24", "-"], binary=True)
+            if len(raw) < (x1 - x0) * (y1 - y0) * 3:
+                continue
+            pixels = np.frombuffer(raw[: (x1 - x0) * (y1 - y0) * 3], np.uint8).reshape(y1 - y0, x1 - x0, 3)
+            share = detail_share(pixels, soft)
+            if share is not None:
+                shares.append(share)
+                moments.append(round(moment, 2))
+        share = float(np.median(shares)) if shares else None
+        worst = [m for m, s in zip(moments, shares) if s < SMEARED]
+        results.append({"what": item.get("what", ""), "start": round(a, 2), "end": round(b, 2),
+                        "share": None if share is None else round(share, 2), "verdict": verdict(share),
+                        "smeared_at": worst, "measured": len(shares)})
+    return results

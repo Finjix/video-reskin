@@ -2,9 +2,11 @@
 
 Segments of one shot form a chain (each starts from the previous result), so a flaw found only in the final review
 sends the whole rest of the shot back. Here every segment that has a successor is checked on its own as soon as it is
-done: the seam to the segment before it is measured (free, the same measure `assemble` uses) and Gemini compares the
-segment with its original. A flagged segment is held: the rest of its chain waits (other chains go on) until the
-agent confirms on the stills and either sends it back (`redo`) or lets it through (`accept`).
+done: the seam to the segment before it and its wiped logo corners are measured (free, the same measures `assemble`
+uses) and Gemini compares the segment with its original. A segment is held only for what a viewer sees at once: a
+visible seam, a smeared logo corner, or a high Gemini finding (medium ones go to the review). The rest of its chain
+waits (other chains go on) until the agent confirms on the stills and either sends it back (`redo`) or lets it
+through (`accept`).
 """
 from __future__ import annotations
 
@@ -64,12 +66,26 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
         before = assemble.work_clip(job, source_id, lines[index - 1], out_fps, size)
         seam = assemble.measure_seam(before, clip, lines[index - 1], lines[index], out_fps, assemble.ignore_boxes(row))
         verdict["seam"] = {k: seam[k] for k in ("mismatch", "motion", "local", "jump")}
+        verdict["seam"]["inside"] = seam["inside"]
         if seam["jump"] == "visible":
-            reasons.append(f"visible seam to {row['segments'][index - 1]['id']} (jump {seam['mismatch']}, "
-                           f"local {seam['local']})")
+            reasons.append(f"visible seam to {row['segments'][index - 1]['id']} (switch: jump {seam['mismatch']} vs "
+                           f"motion {seam['motion']}, local {seam['local']}; where its own frames start: "
+                           f"{seam['inside']['jump']}, step {seam['inside']['mismatch']} vs {seam['inside']['motion']})")
     source = next(r for r in state["sources"] if r["id"] == source_id)
     start = seg["render_frames"][0] / row["fps"]
     end = seg["render_frames"][1] / row["fps"]
+    # Wiped logo corners inside this segment, on its own clock: a blurred patch is held like a visible seam.
+    from reskin import logos
+    shift = row["keep"][0] - start
+    corners = []
+    for item in assemble.wipe_items(job, state, source_id, row):
+        a, b = max(0.0, item["start"] + shift), min(end - start, item["end"] + shift)
+        if b - a >= .5:
+            corners.append(dict(item, start=a, end=b))
+    verdict["wipes"] = logos.quality(clip, corners, samples=4)
+    for wipe in verdict["wipes"]:
+        if wipe["verdict"] == "smeared":
+            reasons.append(f"blurred patch where {wipe['what']} was wiped (detail {wipe['share']} of the scene's)")
     try:
         credentials.winky_key()
         has_key = True
@@ -100,22 +116,10 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
                                       "end": round(extra["end"] + offset, 2), "segments": [seg["id"]],
                                       "source": "gemini-realism", "local": [extra["start"], extra["end"]]})
         log(f"{key}: realism {review.realism_line(verdict['realism'])}")
-        # Identity: this segment's stills beside the keyframes its shot started from (the look to keep).
-        frames = review.identity_frames(review.identity_references(job, source_id, row, [seg["id"]]), size,
-                                        source_path=source["path"], source_offset=start, result_path=str(clip),
-                                        times=review.identity_times(0.0, end - start, 3.0, 8))
-        subjects, found, sheets = review.identity_check(job, key, frames, row, "one rendered segment of a restyled "
-                                                        "video", size, job / "review/gate" / f"{source_id}-{seg['id']}-identity")
-        verdict["identity"], verdict["identity_sheets"] = subjects, [str(p) for p in sheets]
-        for extra in found:
-            verdict["issues"].append({"n": len(verdict["issues"]) + 1, **extra, "start": round(extra["start"] + offset, 2),
-                                      "end": round(extra["end"] + offset, 2), "segments": [seg["id"]],
-                                      "source": "gemini-identity", "local": [extra["start"], extra["end"]]})
-        log(f"{key}: identity check: {len(subjects)} subjects, {len(found)} changes")
         verdict["summary"] = answer.get("summary", "")
-        if review.judge(verdict["issues"]) == "fail":
-            reasons.append("Gemini: " + "; ".join(f"[{i['severity']}] {i['category']}" for i in verdict["issues"]
-                                                  if i["severity"] in ("high", "medium")))
+        serious = [i for i in verdict["issues"] if i["severity"] == "high"]
+        if serious:
+            reasons.append("Gemini: " + "; ".join(f"[high] {i['category']}: {i['description']}" for i in serious))
     if reasons:
         verdict["held"] = True
         verdict["reasons"] = reasons
@@ -125,6 +129,11 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
             entries.append({"n": len(entries) + 1, "severity": "high", "category": "seam_color",
                             "start": 0.0, "end": round((lines[index]["body"][0] - lines[index]["out"][0]) / out_fps, 2),
                             "source": "measured"})
+        for wipe in verdict["wipes"]:
+            if wipe["verdict"] == "smeared":
+                moment = (wipe["smeared_at"] or [wipe["start"]])[0]
+                entries.append({"n": len(entries) + 1, "severity": "high", "category": "artifact",
+                                "start": moment, "end": moment, "source": "measured"})
         sheets = review.issue_sheets(source["path"], start, str(clip), end - start, size, entries,
                                      job / "review/gate" / f"{source_id}-{seg['id']}")
         verdict["sheets"] = [str(p) for p in sheets]

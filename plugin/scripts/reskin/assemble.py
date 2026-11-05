@@ -1,19 +1,23 @@
-"""Put the restyled segments back on the source's clock: retime, scale to 1080p, match colours across seams inside a
-shot, switch between segments at their best-matching frame, copy the screen-fixed HUD back from the original, and
-lay the source's own audio under it. Every seam is measured and shown on a sheet."""
+"""Put the restyled segments back on the source's clock: retime, scale to the job resolution, match colours across
+seams inside a shot, switch between segments at their best-matching frame, copy the screen-fixed HUD back from the
+original, and lay the source's own audio under it. Every seam is measured and shown on a sheet, and every corner a
+logo was wiped from is measured for a blurred patch."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
 
-from reskin import patch as PATCH
 from reskin.common import FFMPEG, digest, log, read, run, video_info, write
 
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
-BLEND_FRAMES = 4        # a seam inside a shot switches over this many frames, at the best-matching moment
-JUMP_LIMIT = 10.0       # grey levels at the join beyond the picture's own motion that a viewer sees as a jump
+BLEND_FRAMES = 2        # a seam inside a shot switches over this many frames (even), at the best-matching moment:
+#                         a longer blend of two different renders showed as a dissolve (GOF3D10374 at 33.6 s)
+JUMP_LIMIT = 6.0        # grey levels at the join beyond the picture's own motion that a viewer sees as a jump
+RATIO = 2.2             # ... or a mismatch this many times the picture's own motion (and above RATIO_FLOOR): the
+RATIO_FLOOR = 8.0       # GOF3D10374 seam at 33.6 s (12.4 vs motion 4.8: other logs, water and textures) passed as
+#                         "slight" under the old limit of 10
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
@@ -199,15 +203,49 @@ def local_jump(before: np.ndarray, after: np.ndarray, frame: int, correction_bef
     return round(float(excess.max()), 2)
 
 
-LOCAL_LIMIT = 30.0      # colour levels one region may jump beyond its own motion before a viewer sees it at once
+LOCAL_LIMIT = 24.0      # colour levels one region may jump beyond its own motion before a viewer sees it at once
+VERDICTS = ("clean", "slight", "visible")
 
 
 def jump_verdict(join: dict) -> str:
     excess = join["mismatch"] - 1.5 * join["motion"]
     local = join.get("local", 0.0)
-    if excess > JUMP_LIMIT or local > LOCAL_LIMIT:
+    unlike = join["mismatch"] > RATIO_FLOOR and join["mismatch"] > RATIO * max(join["motion"], .5)
+    if excess > JUMP_LIMIT or local > LOCAL_LIMIT or unlike:
         return "visible"
     return "slight" if excess > JUMP_LIMIT / 2 or local > LOCAL_LIMIT / 2 else "clean"
+
+
+def worst(*verdicts: str | None) -> str:
+    return max((v for v in verdicts if v), key=VERDICTS.index, default="clean")
+
+
+def inside_jump(clip: Path, at: int, out_fps: float, ignore: list[list[float]] | None = None,
+                reach: int = 6) -> dict:
+    """The picture's change from frame to frame in a chained segment where its own part starts (frame `at` of its
+    work clip, after the earlier result's lead frames): Seedance may have restyled the two parts of its clip
+    differently. The largest step at the boundary against the steps around it, whole frame and per region."""
+    start = max(0, at - reach)
+    frames = frames_rgb(clip, start, 2 * reach, out_fps)
+    if len(frames) < 4:
+        return {"mismatch": 0.0, "motion": 0.0, "local": 0.0, "jump": "clean"}
+    grey = frames.mean(axis=3)
+    steps = np.abs(np.diff(grey, axis=0)).mean(axis=(1, 2))
+    centre = min(len(steps) - 1, at - start - 1)
+    near = [i for i in (centre - 1, centre, centre + 1) if 0 <= i < len(steps)]
+    step = max(near, key=lambda i: steps[i])
+    others = np.delete(steps, near)
+    motion = float(np.median(others)) if len(others) else 0.0
+    identity = (np.ones(3), np.zeros(3))
+    # The region that changes most at the boundary against the most any region changes from one frame to the next
+    # around it (objects moving through a region change it as much as a recolouring would)
+    worst_step = [local_jump(frames[i:i + 1], frames[i + 1:i + 2], 0, identity, identity, ignore)
+                  for i in range(len(steps))]
+    calm = [worst_step[i] for i in range(len(steps)) if i not in near]
+    local = max(0.0, worst_step[step] - (max(calm) if calm else 0.0))
+    measured = {"mismatch": round(float(steps[step]), 2), "motion": round(motion, 2), "local": round(local, 2),
+                "frame": start + step + 1}
+    return {**measured, "jump": jump_verdict(measured)}
 
 
 def seam_sheet(job: Path, source_id: str, clips: list[Path], lines: list[dict], joins: dict,
@@ -236,8 +274,10 @@ def seam_sheet(job: Path, source_id: str, clips: list[Path], lines: list[dict], 
         canvas.paste(Image.fromarray(a), (0, y + 28))
         canvas.paste(Image.fromarray(b), (width + 10, y + 28))
         when = (line["body"][0] - lines[0]["out"][0]) / out_fps
-        text = (f"{line['id']} ~{when:.2f} s inside a shot: jump {join['mismatch']} vs motion {join['motion']}, local {join['local']} "
-                f"({jump_verdict(join)})" if join else f"{line['id']} at {when:.2f} s: hard cut")
+        inside = (join or {}).get("inside") or {}
+        text = (f"{line['id']} ~{when:.2f} s inside a shot: jump {join['mismatch']} vs motion {join['motion']}, local "
+                f"{join['local']} ({jump_verdict(join)}); where its own frames start: {inside.get('jump', '-')}"
+                if join else f"{line['id']} at {when:.2f} s: hard cut")
         draw.text((4, y + 4), text, fill="black", font=label)
     out = job / "sheets" / f"{source_id}-seams.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -292,7 +332,8 @@ def measure_seam(before_clip: Path, after_clip: Path, before_line: dict, after_l
     solved = solve_run([{"index": 1, "id": after_line["id"], "mean_before": mean_b, "std_before": std_b,
                          "mean_after": mean_a, "std_after": std_a}], 2)
     join = choose_join(before, after, solved[0], solved[1], ignore)
-    return {**join, "jump": jump_verdict(join)}
+    inside = inside_jump(after_clip, count, out_fps, ignore)
+    return {**join, "inside": inside, "jump": worst(jump_verdict(join), inside["jump"])}
 
 
 def inputs_digest(job: Path, state: dict, source_id: str, row: dict) -> str:
@@ -301,10 +342,6 @@ def inputs_digest(job: Path, state: dict, source_id: str, row: dict) -> str:
     for seg in row["segments"]:
         record_path = job / "state/render" / f"{source_id}-{seg['id']}.json"
         generations.append(read(record_path).get("generation_id") if record_path.is_file() else None)
-        for entry in PATCH.active(job, f"{source_id}:{seg['id']}"):
-            patch_path = PATCH.state_path(job, f"{source_id}:{seg['id']}", entry["id"])
-            if patch_path.is_file() and read(patch_path).get("status") == "done":
-                generations.append(read(patch_path)["generation_id"])
     return digest({"generations": generations, "row": row, "fps": state["options"]["fps"],
                    "resolution": state["options"]["resolution"], "version": ASSEMBLY_VERSION})
 
@@ -320,43 +357,26 @@ def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
     return None
 
 
-FEATHER = .02            # feathered edge of a post-render wipe, as a fraction of the frame width
-ASSEMBLY_VERSION = 4     # raise when the assembly itself changes, so delivered videos are made again
+ASSEMBLY_VERSION = 5     # raise when the assembly itself changes, so delivered videos are made again
 
 
-def post_wipes(job: Path, source_id: str, source_path: str, row: dict, size: tuple[int, int]) -> list[dict]:
-    """`remove` boxes painted over in the delivered video too: a neighbouring strip of the restyled frame (the
-    plainest one on the original frame there), mirrored, slightly larger than the box and feathered, so neither a
-    logo the model drew anyway nor the edge of the pre-render wipe shows. Returns per box the patch rectangle, the
-    strip to copy, the flip, the delivered-clock times and a feather mask PNG."""
+def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
+    """Every wiped `remove` item on the delivered clock, with its mask, for logos.quality."""
     from reskin import render as RENDER
-    width, height = size
-    margin = max(4, round(FEATHER * width))
+    from reskin.prompts import is_wiped
+    masks = RENDER.logo_masks(job, state, row, source_id)
+    size = RENDER.clip_size(row["width"], row["height"], state["options"]["resolution"])
     keep_start, keep_end = row["keep"]
-    wipes = []
+    items = []
     for n, item in enumerate(row.get("remove") or []):
-        if not (isinstance(item, dict) and item.get("box")):
+        if not is_wiped(item) or n not in masks:
             continue
-        a, b = max(keep_start, float(item.get("start", 0))), min(keep_end, float(item.get("end", keep_end)))
-        if b - a < RENDER.MIN_WIPE:
-            continue
-        if item.get("wipe", "both") != "after":
-            continue        # wiped before the render (feathered): nothing to paint over
-        x0, y0, x1, y1 = item["box"]
-        grown = [max(0.0, x0 - margin / width), max(0.0, y0 - margin / height),
-                 min(1.0, x1 + margin / width), min(1.0, y1 + margin / height)]
-        raw = run([FFMPEG, "-v", "error", "-ss", f"{(a + b) / 2:.3f}", "-i", source_path, "-frames:v", "1", "-vf",
-                   f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
-        frame = (np.frombuffer(raw[: width * height * 3], dtype=np.uint8).reshape(height, width, 3)
-                 if len(raw) >= width * height * 3 else None)
-        sx, sy, flip = RENDER.wipe_sources([grown + [a, b]], width, height, frame)[0]
-        x, y, w, h = RENDER._pixels(grown, width, height)
-        path = RENDER.feather_mask(x, y, w, h, width, height, job / "work" / f"{source_id}-wipe{n}.png")
-        blur = 0            # a blurred fill read as a censored rectangle
-        wipes.append({"x": x, "y": y, "w": w, "h": h, "sx": sx, "sy": sy, "flip": flip, "blur": blur,
-                      "start": round(a - keep_start, 3), "end": round(b - keep_start, 3), "mask": str(path),
-                      "what": item.get("what", "")})
-    return wipes
+        a, b = max(keep_start, float(item.get("start", keep_start))), min(keep_end, float(item.get("end", keep_end)))
+        if b - a >= RENDER.MIN_WIPE:
+            items.append({"what": item.get("what", ""), "start": a - keep_start, "end": b - keep_start,
+                          "box": item["box"], "mask": masks[n]["path"], "region": masks[n]["region"],
+                          "size": list(size)})
+    return items
 
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
@@ -365,12 +385,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     info = video_info(Path(source["path"]))
     out_fps, size = output_spec(state, row)
     lines = timeline(row, out_fps)
-    clips, patches = [], []
-    for line in lines:
-        clip, measured = PATCH.apply(job, source_id, row, line, work_clip(job, source_id, line, out_fps, size),
-                                     out_fps, size, ignore_boxes(row))
-        clips.append(clip)
-        patches += measured
+    clips = [work_clip(job, source_id, line, out_fps, size) for line in lines]
     corrections, colour, overlaps = match_colours(clips, lines, out_fps)
     # Where each clip is cut: a seam inside a shot switches at its best-matching overlap frame with a short blend
     # (both versions there show the same moment); hard cuts join end to end.
@@ -380,6 +395,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     for index, (before, after) in overlaps.items():
         join = choose_join(before, after, corrections[index - 1], corrections[index], ignore_boxes(row))
         overlap = lines[index]["body"][0] - lines[index]["out"][0]
+        join["inside"] = inside_jump(clips[index], overlap, out_fps, ignore_boxes(row))
         trims[index - 1][1] -= overlap - join["frame"] - half
         trims[index][0] = join["frame"] - half
         joins[index] = join
@@ -414,19 +430,6 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     huds = [HUD.matte(Path(source["path"]), row["keep"], item, size, job / "work" / f"{source_id}-hud{n}.png")
             for n, item in enumerate(row.get("hud") or [], 1)]
     current = "v0"
-    # Logos and warning lines: painted over after the render as well (see post_wipes).
-    wipes = post_wipes(job, source_id, source["path"], row, size)
-    for n, item in enumerate(wipes):
-        inputs += ["-loop", "1", "-framerate", str(out_fps), "-t", f"{total / out_fps + 1:.3f}", "-i", item["mask"]]
-        mask_index = sum(1 for part in inputs if part == "-i") - 1
-        graph.append(f"[{current}]split[wa{n}][wb{n}]")
-        soften = f",gblur=sigma={item['blur']}" if item.get("blur") else ""
-        graph.append(f"[wb{n}]crop={item['w']}:{item['h']}:{item['sx']}:{item['sy']},{item['flip']}{soften}[wp{n}]")
-        graph.append(f"[{mask_index}:v]format=gray[wm{n}]")
-        graph.append(f"[wp{n}][wm{n}]alphamerge[wq{n}]")
-        graph.append(f"[wa{n}][wq{n}]overlay=x={item['x']}:y={item['y']}:eof_action=pass:"
-                     f"enable='between(t\\,{item['start']:.3f}\\,{item['end']:.3f})'[wv{n}]")
-        current = f"wv{n}"
     if huds:
         graph.append(f"[{source_index}:v]trim=start={keep_start:.6f}:end={keep_end:.6f},setpts=PTS-STARTPTS,"
                      f"fps={out_fps},scale={size[0]}:{size[1]}:flags=bicubic,format=yuv420p,split={len(huds)}"
@@ -497,32 +500,23 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
                  "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)}
         if index in joins:
             join = joins[index]
+            inside = join["inside"]
             entry.update(join, time=round((line["out"][0] - lines[0]["out"][0] + join["frame"]) / out_fps, 3),
-                         jump=jump_verdict(join))
+                         jump=worst(jump_verdict(join), inside["jump"]),
+                         inside=dict(inside, time=round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)))
         seam_times.append(entry)
-    # The joins into and out of local patches are seams too (measured, reviewed and close-up checked like them).
-    for patch in patches:
-        for side in ("in", "out"):
-            join = patch[side]
-            if join is None:            # a patch that runs to the end has no join out
-                continue
-            seam_times.append({"segment": f"{patch['segment']}:{patch['patch']}:{side}", "seam": "continuous",
-                               "patch": True, "time": round(join["frame"] / out_fps, 3),
-                               **{k: join[k] for k in ("mismatch", "motion", "local", "jump")}})
     seam_times.sort(key=lambda entry: entry["time"])
+    # Every corner a logo was wiped from: a smooth patch left in the delivery (see logos.quality).
+    from reskin import logos as LOGOS
+    wipes = LOGOS.quality(output, wipe_items(job, state, source_id, row))
     sheet = seam_sheet(job, source_id, clips, lines, joins, trims, out_fps)
     result = {"source": source_id, "inputs": inputs_digest(job, state, source_id, row), "output": str(output),
               "duration": round(made["duration"], 3),
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "problems": problems, "keep": row["keep"], "seam_sheet": str(sheet) if sheet else None,
               "hud": [{k: v for k, v in item.items() if k != "mask"} for item in huds],
-              "wipes": [{k: v for k, v in item.items() if k != "mask"} for item in wipes],
+              "wipes": wipes,
               "overlays": OVERLAY.summary(burned),
-              "patches": [{"key": f"{source_id}:{p['segment']}:{p['patch']}", "reason": p["reason"],
-                           "start": round(p["start_frame"] / out_fps, 3), "end": round(p["end_frame"] / out_fps, 3),
-                           "in": p["in"]["jump"], "out": p["out"]["jump"] if p["out"] else None,
-                           "kept": p["in"]["jump"] != "visible" and (p["out"] or {}).get("jump") != "visible"}
-                          for p in patches],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
                             "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)

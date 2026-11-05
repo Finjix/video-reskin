@@ -1,8 +1,10 @@
 """Seedance 2.5 video editing on Lumos, segment by segment: cut the clip, upload, submit, poll, download, check.
 
 Segments inside one camera shot form a chain: the first starts from its styled keyframe, every later one from the
-previous result's own frame at the moment it begins, so the look carries across the seam instead of being
-re-imagined. A chain renders one segment after another; separate chains (other shots, other sources) in parallel,
+previous result itself. Its clip begins with the previous result's own last second (on the source clock) and its
+reference picture is the first of those frames, so Seedance continues the frames it already made instead of
+re-imagining the scene from one picture; `assemble` switches between the two inside that second, where both show the
+same pixels. A chain renders one segment after another; separate chains (other shots, other sources) in parallel,
 the longest first.
 
 Every segment's inputs (frames, reference picture, attempt) are hashed; a re-run reuses finished segments, resumes
@@ -20,10 +22,12 @@ from pathlib import Path
 
 from reskin import ledger, lumos
 from reskin.common import FFMPEG, PROMPTS, digest, log, read, run, sha, video_info, write
-from reskin.prompts import compose
+from reskin.job import RESOLUTION
+from reskin.prompts import compose, is_wiped
 
 POLL_SECONDS = 15
 GENERATION_TIMEOUT = 30 * 60
+MIN_WIPE = .1            # seconds: a box touching a segment for less (a rounding sliver) does not count
 
 
 def state_path(job: Path, key: str) -> Path:
@@ -47,196 +51,100 @@ def chains(plan_row: dict) -> list[list[dict]]:
 
 
 def clean_boxes(plan_row: dict, start: float, end: float, logos: dict[int, dict] | None = None) -> list[list]:
-    """`remove` items with a `box` on screen during [start, end) of the source, as [x0, y0, x1, y1, a, b] with a, b
-    in seconds into the clip, plus "glyph:<mask hash>" for items wiped letter by letter (`logos`, from
-    logos.masks; the default) rather than with a mirrored strip (`"fill": "mirror"`): wiped from the clip Seedance
-    gets. At 1080p Seedance kept a game logo and the warning line it was told to remove; what it never sees, it
-    cannot draw."""
+    """`remove` items wiped from the clip Seedance gets during [start, end) of the source, as
+    [x0, y0, x1, y1, a, b, "glyph:<mask hash>"] with a, b in seconds into the clip (masks from logos.masks). At 1080p
+    Seedance kept a game logo and the warning line it was told to remove; what it never sees, it cannot draw."""
     boxes = []
     for n, item in enumerate(plan_row.get("remove") or []):
-        if isinstance(item, dict) and item.get("box") and item.get("wipe", "both") != "after":
-            a, b = max(start, float(item.get("start", 0))), min(end, float(item.get("end", float("inf"))))
-            if b - a >= MIN_WIPE:
-                entry = [*[float(v) for v in item["box"]], round(a - start, 3), round(b - start, 3)]
-                if item.get("fill", "glyph") == "glyph":
-                    if not logos or n not in logos:
-                        raise ValueError(f"remove item {n} ({item.get('what', '')}): its logo mask is missing")
-                    entry.append(f"glyph:{logos[n]['hash']}")
-                boxes.append(entry)
+        if not is_wiped(item):
+            continue
+        a, b = max(start, float(item.get("start", 0))), min(end, float(item.get("end", float("inf"))))
+        if b - a >= MIN_WIPE:
+            if not logos or n not in logos:
+                raise ValueError(f"remove item {n} ({item.get('what', '')}): its logo mask is missing")
+            boxes.append([*[float(v) for v in item["box"]], round(a - start, 3), round(b - start, 3),
+                          f"glyph:{logos[n]['hash']}"])
     return boxes
 
 
-def clip_size(width: int, height: int) -> tuple[int, int]:
-    """The size of the clip Seedance gets: at most 1080 on the short side."""
-    if min(width, height) > 1080:
-        factor = 1080 / min(width, height)
+def clip_size(width: int, height: int, resolution: str = RESOLUTION) -> tuple[int, int]:
+    """The size of the clip Seedance gets: the job resolution on the short side (never larger than the source)."""
+    short = int(resolution.rstrip("p"))
+    if min(width, height) > short:
+        factor = short / min(width, height)
         return round(width * factor / 2) * 2, round(height * factor / 2) * 2
-    return width, height
+    return width // 2 * 2, height // 2 * 2
 
 
-MIN_WIPE = .1            # seconds: a box touching a segment for less (a rounding sliver) does not count
-WIPE = "feather"         # how mirrored boxes are filled (in the render inputs: a new method renders them again)
-FILLS = ("glyph", "mirror")  # `fill` of a remove item: the logo's own pixels (logos.py) or the whole box mirrored
-FEATHER = .02            # soft edge of a fill, as a fraction of the frame width: a hard edge stays in the render
-
-
-def _pixels(box: list[float], width: int, height: int) -> tuple[int, int, int, int]:
-    x, y = max(0, round(box[0] * width)), max(0, round(box[1] * height))
-    w, h = min(width, round(box[2] * width)) - x, min(height, round(box[3] * height)) - y
-    return x, y, w // 2 * 2, h // 2 * 2
-
-
-def wipe_sources(boxes: list[list[float]], width: int, height: int, frame=None) -> list[tuple[int, int, str]]:
-    """Per box, the neighbouring strip to mirror into it: (x, y, flip). With `frame` (an RGB array of the clip at
-    full size) the plainest of the strips above, below, left and right (lowest grey spread: snow rather than the
-    fence edge); without, the strip towards the frame's middle."""
-    import numpy as np
-    chosen = []
-    for box in boxes:
-        x, y, w, h = _pixels(box, width, height)
-        options = [(x, y - h, "vflip"), (x, y + h, "vflip"), (x - w, y, "hflip"), (x + w, y, "hflip")]
-        options = [o for o in options if 0 <= o[0] <= width - w and 0 <= o[1] <= height - h]
-        if not options:
-            options = [(x, max(0, min(height - h, y + h if y + h / 2 < height / 2 else y - h)), "vflip")]
-        if frame is not None and len(options) > 1:
-            grey = frame.mean(axis=2) if frame.ndim == 3 else frame
-            options.sort(key=lambda o: float(np.std(grey[o[1]:o[1] + h, o[0]:o[0] + w])))
-        else:
-            options.sort(key=lambda o: abs((o[1] + h / 2) - height / 2) + abs((o[0] + w / 2) - width / 2))
-        chosen.append(options[0])
-    return chosen
-
-
-def grown(box: list[float], width: int, height: int) -> list[float]:
-    """The box with a feather margin around it (fractions), kept inside the frame."""
-    margin = max(4, round(FEATHER * width))
-    return [max(0.0, box[0] - margin / width), max(0.0, box[1] - margin / height),
-            min(1.0, box[2] + margin / width), min(1.0, box[3] + margin / height)]
-
-
-def feather_mask(x: int, y: int, w: int, h: int, width: int, height: int, output: Path) -> Path:
-    """Alpha for a fill: opaque inside, a soft edge of FEATHER towards the scene, opaque where it meets the frame
-    border (nothing outside to blend with)."""
-    import numpy as np
-    from PIL import Image, ImageFilter
-    margin = max(4, round(FEATHER * width))
-    edges = {"left": x <= 1, "top": y <= 1, "right": x + w >= width - 1, "bottom": y + h >= height - 1}
-    # The opaque core reaches the frame border on sides that touch it, then the blur only softens the scene sides.
-    pad = 3 * margin
-    canvas = Image.new("L", (w + 2 * pad, h + 2 * pad), 0)
-    left, top = (0 if edges["left"] else pad + margin), (0 if edges["top"] else pad + margin)
-    right = w + 2 * pad if edges["right"] else pad + w - margin
-    bottom = h + 2 * pad if edges["bottom"] else pad + h - margin
-    canvas.paste(255, (left, top, max(left + 1, right), max(top + 1, bottom)))
-    pixels = np.asarray(canvas.filter(ImageFilter.GaussianBlur(margin / 2)))[pad:pad + h, pad:pad + w].copy()
-    if edges["left"]:
-        pixels[:, :margin] = 255
-    if edges["top"]:
-        pixels[:margin, :] = 255
-    if edges["right"]:
-        pixels[:, -margin:] = 255
-    if edges["bottom"]:
-        pixels[-margin:, :] = 255
-    output.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(pixels).save(output)
-    return output
-
-
-def wipe_graph(boxes: list[list[float]], width: int, height: int, source: str = "0:v",
-               sources: list[tuple[int, int, str]] | None = None, masks: list[int] | None = None) -> tuple[str, str]:
-    """A filter graph filling each box (grown by the feather margin), during its seconds, with a neighbouring strip
-    of the same frame mirrored (see wipe_sources) through a feathered mask (input numbers `masks`): moving scene
-    texture the model repaints as scene. An interpolating `delogo` left streaks and a hard-edged fill a rectangle,
-    both kept by Seedance as faithfully as the logo. Returns (graph, output label)."""
-    sources = sources or wipe_sources([grown(b, width, height) + b[4:] for b in boxes], width, height)
-    parts, label = [], source
-    for n, (box, (sx, sy, flip)) in enumerate(zip(boxes, sources)):
-        x, y, w, h = _pixels(grown(box, width, height), width, height)
-        if w < 4 or h < 4:
-            continue
-        a, b = box[4], box[5]
-        if masks:
-            parts.append(f"[{label}]split[w{n}a][w{n}b];[w{n}b]crop={w}:{h}:{sx}:{sy},{flip}[w{n}p];"
-                         f"[{masks[n]}:v]format=gray[w{n}m];[w{n}p][w{n}m]alphamerge[w{n}q];"
-                         f"[w{n}a][w{n}q]overlay={x}:{y}:enable='between(t,{a:.3f},{b:.3f})'[w{n}]")
-        else:
-            parts.append(f"[{label}]split[w{n}a][w{n}b];[w{n}b]crop={w}:{h}:{sx}:{sy},{flip}[w{n}p];"
-                         f"[w{n}a][w{n}p]overlay={x}:{y}:enable='between(t,{a:.3f},{b:.3f})'[w{n}]")
-        label = f"w{n}"
-    return ";".join(parts), label
+def lead_frames(previous: Path, span: int, count: int, fps: float, size: tuple[int, int]) -> bytes:
+    """The last `count` frames of the previous segment's result on the source clock, at the clip size, as raw RGB:
+    the start of a chained segment's clip. The result is a uniformly compressed copy of the `span` source frames its
+    clip had (see chain_frame), so it is stretched back to them first."""
+    info = video_info(previous)
+    factor = span / fps / info["duration"]
+    raw = run([FFMPEG, "-v", "error", "-i", previous, "-vf",
+               f"setpts=(PTS-STARTPTS)*{factor:.8f},fps={fps:.6f},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1,"
+               f"tpad=stop_mode=clone:stop={count},trim=start_frame={span - count}:end_frame={span}",
+               "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
+    frame_bytes = size[0] * size[1] * 3
+    if len(raw) < count * frame_bytes:
+        raise RuntimeError(f"the previous result {previous.name} gave {len(raw) // frame_bytes} of {count} lead frames")
+    return raw[: count * frame_bytes]
 
 
 def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: int, output: Path,
-             clean: list[list] | None = None, logos: dict[int, dict] | None = None) -> Path:
-    """The segment as a clean H.264 clip (no audio), at most 1080p on the short side; `clean` boxes wiped: the
-    mirrored ones by FFmpeg, the letter-by-letter ones (masks in `logos`) frame by frame here."""
+             clean: list[list] | None = None, logos: dict[int, dict] | None = None,
+             lead: dict | None = None, resolution: str = RESOLUTION) -> Path:
+    """The segment as a clean H.264 clip (no audio) at the clip size, with the `clean` boxes wiped frame by frame
+    (masks in `logos`). `lead` ({"path", "span", "frames"}): the clip's first frames come from the previous segment's
+    result instead of the source (see lead_frames)."""
     import subprocess
     import numpy as np
     from reskin import logos as LOGOS
-    size = clip_size(width, height)
-    graph, label = [], "0:v"
-    if size != (width, height):
-        graph.append(f"[0:v]scale={size[0]}:{size[1]}:flags=lanczos[sc]")
-        label = "sc"
-    mirrored = [b for b in clean or [] if len(b) == 6]
-    glyphs = [b for b in clean or [] if len(b) > 6]
-    sources = None
-    if mirrored:
-        # One frame of the clip (at its middle) decides which neighbouring strip is plainest for each box.
-        moment = (frames[0] + frames[1]) / 2 / fps
-        raw = run([FFMPEG, "-v", "error", "-ss", f"{moment:.3f}", "-i", source, "-frames:v", "1", "-vf",
-                   f"scale={size[0]}:{size[1]}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
-        frame = (np.frombuffer(raw[: size[0] * size[1] * 3], dtype=np.uint8).reshape(size[1], size[0], 3)
-                 if len(raw) >= size[0] * size[1] * 3 else None)
-        sources = wipe_sources([grown(b, *size) + b[4:6] for b in mirrored], *size, frame)
-    masks, extra = [], []
-    for n, box in enumerate(mirrored):
-        x, y, w, h = _pixels(grown(box, *size), *size)
-        mask = feather_mask(x, y, w, h, *size, output.with_name(f"{output.stem}-mask{n}.png"))
-        extra += ["-loop", "1", "-framerate", f"{fps:g}", "-t", f"{(frames[1] - frames[0]) / fps + 1:.3f}",
-                  "-i", mask]
-        masks.append(1 + n)
-    wipe, label = wipe_graph(mirrored, *size, source=label, sources=sources, masks=masks or None)
-    if wipe:
-        graph.append(wipe)
-    video = (["-filter_complex", ";".join(graph), "-map", f"[{label}]"] if graph else [])
-    output.parent.mkdir(parents=True, exist_ok=True)
-    partial = output.with_name(output.stem + ".partial.mp4")
-    decode = [FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, (frames[0] - .5) / fps):.6f}", "-i", source,
-              *extra, "-frames:v", str(frames[1] - frames[0]), *video, "-an"]
+    size = clip_size(width, height, resolution)
+    total = frames[1] - frames[0]
+    ahead = int(lead["frames"]) if lead else 0
+    first = frames[0] + ahead
+    scale = ["-vf", f"scale={size[0]}:{size[1]}:flags=lanczos"] if size != (width, height) else []
+    decode = [FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, (first - .5) / fps):.6f}", "-i", source,
+              "-frames:v", str(total - ahead), *scale, "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     encode = ["-c:v", "libx264", "-preset", "fast", "-crf", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-    if not glyphs:
-        run([*decode, *encode, partial])
-        partial.replace(output)
-        return output
     by_hash = {entry["hash"]: entry for entry in (logos or {}).values()}
     wipes = []
-    for box in glyphs:
+    for box in clean or []:
         entry = by_hash.get(str(box[6]).split(":", 1)[1])
         if entry is None:
             raise ValueError(f"logo mask {box[6]} is missing")
         wipes.append((LOGOS.load(entry["path"]), entry["region"], round(box[4] * fps), round(box[5] * fps)))
+    head = lead_frames(Path(lead["path"]), int(lead["span"]), ahead, fps, size) if ahead else b""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    partial = output.with_name(output.stem + ".partial.mp4")
     flags = 0x08000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-    reader = subprocess.Popen([str(p) for p in [*decode, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]],
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=flags)
+    frame_bytes = size[0] * size[1] * 3
+    written = 0
     log_path = partial.with_suffix(".log")
+    reader = subprocess.Popen([str(p) for p in decode], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              creationflags=flags)
     with open(log_path, "wb") as errors:
         writer = subprocess.Popen([str(p) for p in [FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt",
                                                     "rgb24", "-s", f"{size[0]}x{size[1]}", "-r", f"{fps:g}", "-i", "-",
                                                     "-an", *encode, partial]],
                                   stdin=subprocess.PIPE, stderr=errors, creationflags=flags)
-        frame_bytes = size[0] * size[1] * 3
-        written = 0
         try:
-            for index in range(frames[1] - frames[0]):
+            if head:
+                writer.stdin.write(head)
+                written += ahead
+            for index in range(ahead, total):
                 data = reader.stdout.read(frame_bytes)
                 if len(data) < frame_bytes:
                     break
-                frame = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3).copy()
-                for soft, rect, first, last in wipes:
-                    if first <= index < last:
-                        LOGOS.wipe(frame, rect, soft)
-                writer.stdin.write(frame.tobytes())
+                if wipes:
+                    frame = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3).copy()
+                    for soft, rect, a, b in wipes:
+                        if a <= index < b:
+                            LOGOS.wipe(frame, rect, soft)
+                    data = frame.tobytes()
+                writer.stdin.write(data)
                 written += 1
         finally:
             writer.stdin.close()
@@ -246,9 +154,8 @@ def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: in
             reader.wait()
     detail = log_path.read_text("utf-8", errors="replace").strip()
     log_path.unlink(missing_ok=True)
-    if code or written < frames[1] - frames[0]:
-        raise RuntimeError(f"cutting {output.name} failed ({code}, {written} of {frames[1] - frames[0]} frames): "
-                           f"{detail[-1500:]}")
+    if code or written < total:
+        raise RuntimeError(f"cutting {output.name} failed ({code}, {written} of {total} frames): {detail[-1500:]}")
     partial.replace(output)
     return output
 
@@ -265,6 +172,11 @@ def chain_frame(job: Path, source_id: str, previous: dict, prev_seg: dict, seg: 
     return output
 
 
+def lead_count(seg: dict) -> int:
+    """Source frames a chained segment renders before its own part: the overlap with the segment before it."""
+    return seg["frames"][0] - seg["render_frames"][0] if seg["seam"] == "continuous" else 0
+
+
 def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict,
                previous: dict | None = None) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
@@ -272,53 +184,43 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     redo = redo_log(job).get(key, {})
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
     extra = redo.get("prompt", "")
+    lead = {}
     if seg["seam"] == "continuous":
         if previous is None or not previous.get("generation_id"):
             raise ValueError(f"{key}: the segment before it in this shot is not rendered yet")
-        # Chained: the reference is the previous result itself (Seedance copies objects from any picture it gets,
-        # so nothing else goes along, except the segment's own midframes: the same scene at later moments).
+        # Chained: the reference is the previous result itself (Seedance copies objects from any picture it gets, so
+        # nothing else goes along). With chain_prefix (the default) the clip also starts with the previous result's
+        # own last frames: two renders of the same moment then differ little where assemble switches between them.
+        # (With one reference picture only, the GOF3D10374 seam at 33.6 s changed textures, logs and water.)
         reference = {"chain": previous["generation_id"]}
-        extra = " ".join(part for part in (read(PROMPTS)["chain"], extra) if part)
+        texts = read(PROMPTS)
+        prefix = plan_row.get("chain_prefix")
+        if (state["options"].get("chain_prefix", True) if prefix is None else prefix) and lead_count(seg):
+            sentence = texts["chain_prefix"].format(seconds=f"{lead_count(seg) / plan_row['fps']:.1f}")
+            lead = {"lead": lead_count(seg)}
+        else:
+            sentence = texts["chain"]
+        extra = " ".join(part for part in (sentence, extra) if part)
     else:
         keyframe = job / "keyframes" / f"{source_id}-{seg['id']}.png"
         if not keyframe.is_file():
             raise ValueError(f"{key}: keyframe {keyframe.name} is missing; run keyframes first")
         reference = {"keyframe": sha(keyframe)}
-    mids = midframe_moments(job, plan_row, source_id, seg)
-    if mids:
-        sentence = read(PROMPTS)["midframe"]
-        notes = [sentence.format(n=n, t=f"{t - span[0]:.0f}") for n, t in enumerate(mids, 2)]
-        corrections = redo.get("prompt", "")
-        base = extra[: len(extra) - len(corrections)].strip() if corrections and extra.endswith(corrections) else extra
-        extra = " ".join(part for part in (base, *notes, corrections) if part)
     prompt = compose(style, "video", plan_row, extra=extra, span=span)
-    # Midframes count by their times: a preview made again (after an edits change) applies to new and redone renders.
     clean = clean_boxes(plan_row, *span, logos=logo_masks(job, state, plan_row, source_id))
-    return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference,
-            **({"midframes": mids} if mids else {}), **({"clean": clean, "wipe": WIPE} if clean else {}),
-            "prompt": prompt, "model": lumos.VIDEO_MODEL, "resolution": state["options"]["resolution"],
-            "attempt": redo.get("attempt", 1)}
+    return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference, **lead,
+            **({"clean": clean} if clean else {}), "prompt": prompt, "model": lumos.VIDEO_MODEL,
+            "resolution": state["options"]["resolution"], "attempt": redo.get("attempt", 1)}
 
 
 def logo_masks(job: Path, state: dict, plan_row: dict, source_id: str) -> dict[int, dict]:
-    """The letter-by-letter masks of the row's boxed `remove` items (made once, cached; see logos.py)."""
+    """The letter-by-letter masks of the row's wiped `remove` items (made once, cached; see logos.py)."""
     from reskin import logos as LOGOS
     if not any(isinstance(i, dict) and i.get("box") for i in plan_row.get("remove") or []):
         return {}
     source = Path(next(r for r in state["sources"] if r["id"] == source_id)["path"])
-    return LOGOS.masks(job, source_id, source, plan_row, clip_size(plan_row["width"], plan_row["height"]))
-
-
-def midframe_moments(job: Path, plan_row: dict, source_id: str, seg: dict) -> list[float]:
-    """Preview times inside the segment that go along as extra reference pictures (edits `midframes`): the look each
-    moment should have, so what comes into view later keeps the realism of the first frame."""
-    from reskin import preview as PREVIEW
-    mids = PREVIEW.midframes(plan_row, seg)
-    for t in mids:
-        if not PREVIEW.image_path(job, source_id, t).is_file():
-            raise ValueError(f"{source_id}:{seg['id']}: the midframe preview at {t:.2f} s is missing; run preview "
-                             "(or run) first")
-    return mids
+    size = clip_size(plan_row["width"], plan_row["height"], state["options"]["resolution"])
+    return LOGOS.masks(job, source_id, source, plan_row, size)
 
 
 def core(inputs: dict) -> str:
@@ -345,10 +247,12 @@ def cause_of(record: dict, inputs: dict, redo: dict) -> str:
         return "auto-retry" if reasons and str(reasons[-1]).startswith("automatic retry") else "redo"
     if old.get("chain") != inputs.get("chain"):
         return "upstream"
-    if old.get("keyframe") != inputs.get("keyframe") or old.get("midframes") != inputs.get("midframes"):
+    if old.get("keyframe") != inputs.get("keyframe"):
         return "keyframe"
-    if old.get("clean") != inputs.get("clean") or old.get("wipe") != inputs.get("wipe"):
+    if old.get("clean") != inputs.get("clean"):
         return "wipe"
+    if old.get("lead") != inputs.get("lead"):
+        return "plan"
     if old.get("resolution") != inputs["resolution"]:
         return "resolution"
     if old.get("model") != inputs["model"]:
@@ -371,26 +275,26 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     clip = job / "segments" / f"{source_id}-{seg['id']}.mp4"
     if not resume:
         cause = cause_of(record, inputs, redo_log(job).get(key, {}))
+        lead = ({"path": previous["output"], "frames": inputs["lead"],
+                 "span": prev_seg["render_frames"][1] - prev_seg["render_frames"][0]} if inputs.get("lead") else None)
         cut_clip(source, seg["render_frames"], plan_row["fps"], plan_row["width"], plan_row["height"], clip,
-                 clean=inputs.get("clean"), logos=logo_masks(job, state, plan_row, source_id))
+                 clean=inputs.get("clean"), logos=logo_masks(job, state, plan_row, source_id), lead=lead,
+                 resolution=inputs["resolution"])
         video = lumos.upload(clip, "video-to-video")
         picture = (chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"]) if "chain" in inputs
                    else job / "keyframes" / f"{source_id}-{seg['id']}.png")
-        from reskin import preview as PREVIEW
-        extras = [PREVIEW.image_path(job, source_id, t) for t in inputs.get("midframes") or []]
-        pictures = [lumos.upload(p, "video-to-video") for p in [picture, *extras]]
-        submitted = lumos.submit_video_edit(video, pictures, inputs["prompt"], resolution=inputs["resolution"],
-                                            log=lambda text: log(f"{key}: {text}"))
+        submitted = lumos.submit_video_edit(video, [lumos.upload(picture, "video-to-video")], inputs["prompt"],
+                                            resolution=inputs["resolution"], log=lambda text: log(f"{key}: {text}"))
         record = {"digest": want, "inputs": core_inputs(inputs), "generation_id": submitted["generation_id"],
                   "status": "submitted", "attempt": inputs["attempt"], "prompt": inputs["prompt"],
-                  "reference": picture.name, "midframe_images": {p.name: sha(p) for p in extras},
-                  "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
+                  "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S")}
         write(record_path, record)
         ledger.add(job, kind="video", event="submit", key=key, seconds=seg["seconds"],
                    resolution=inputs["resolution"], cause=cause, attempt=inputs["attempt"],
                    generation_id=submitted["generation_id"], model=inputs["model"])
         log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s, {cause}, from {picture.name}"
-            + (f" + {len(extras)} midframes" if extras else "") + ")")
+            + (f", its clip starting with the previous result's last {inputs['lead']} frames" if inputs.get("lead")
+               else "") + ")")
 
     def on_poll(value):
         status = value.get("status")
@@ -411,8 +315,9 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     problems = []
     if not .8 < info["duration"] / expected < 1.2:
         problems.append(f"length {info['duration']:.2f} s for a {expected:.2f} s clip")
-    if inputs["resolution"] == "1080p" and min(info["width"], info["height"]) < 1000:
-        problems.append(f"resolution {info['width']}x{info['height']} is below 1080p")
+    wanted = min(clip_size(plan_row["width"], plan_row["height"], inputs["resolution"]))
+    if min(info["width"], info["height"]) < .9 * wanted:
+        problems.append(f"resolution {info['width']}x{info['height']} is below {inputs['resolution']}")
     record.update(status="done" if not problems else "rejected", output=str(output), problems=problems,
                   ai={k: info[k] for k in ("width", "height", "fps", "duration", "frames")},
                   finished_at=time.strftime("%H:%M:%S"))
@@ -473,13 +378,8 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
 
     def chain(group):
-        from reskin import patch as PATCH
         sid, row, members = group
         results, previous, prev_seg = [], None, None
-        # Local patches change nothing the rest of the chain starts from: each segment's patches render alongside the
-        # chain as soon as that segment is final.
-        patching = ThreadPoolExecutor(2)
-        patches = []
         for position, seg in enumerate(members):
             key = f"{sid}:{seg['id']}"
             if previous is not None and (previous.get("error") or previous.get("held") or previous.get("waiting")):
@@ -501,11 +401,6 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                     result["gate_error"] = f"{type(error).__name__}: {error}"
             previous, prev_seg = result, seg
             results.append(result)
-            if result.get("generation_id") and not result.get("error"):
-                patches.append(patching.submit(PATCH.render_all, job, state, row, sid, seg, style))
-        patching.shutdown(wait=True)
-        for future in patches:
-            results += future.result()
         finish(sid, results)
         return results
 

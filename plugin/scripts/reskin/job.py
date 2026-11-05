@@ -10,8 +10,9 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-DEFAULTS = {"style": "realistic", "resolution": "480p", "max_segment_seconds": 30.0, "fps": 30,
-            "review_rounds": 3}
+RESOLUTION = "720p"        # Seedance renders and deliveries: one size for every job (cost and speed over detail)
+DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
+            "review_rounds": 2, "chain_prefix": True}
 
 
 def presets() -> dict:
@@ -45,8 +46,12 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     if isinstance(style, str) and style not in presets():
         raise ValueError(f"unknown style preset {style}; known: {sorted(presets())} (or give style as an object with "
                          "label, goal, anchor, keyframe and video prompts)")
-    if options["resolution"] not in ("480p", "720p", "1080p"):
-        raise ValueError("options.resolution must be 480p (default while developing), 720p or 1080p")
+    if options["resolution"] != RESOLUTION:
+        raise ValueError(f"options.resolution is fixed at {RESOLUTION} (leave it out)")
+    if not 12 <= float(options["fps"]) <= 30:
+        raise ValueError("options.fps must be between 12 and 30 (default 24, the rate Seedance renders at)")
+    if not isinstance(options["chain_prefix"], bool):
+        raise ValueError("options.chain_prefix must be true or false")
     if not 4 <= float(options["max_segment_seconds"]) <= 30:
         raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 4-30 s clips)")
     if job_dir:

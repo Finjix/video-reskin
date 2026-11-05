@@ -36,12 +36,15 @@ class PromptTests(unittest.TestCase):
         self.assertIn("积雪地面、蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
         self.assertIn("积雪地面", prompts.compose(style, "video", {"materials": "积雪地面"}, span=(0, 1)))
 
-    def test_rebuild_and_style_reference(self):
+    def test_shapes_stay_and_style_reference(self):
         style = read(PROMPTS)["presets"]["realistic"]
         row = {"materials": "x", "remove": []}
         for kind in ("anchor", "keyframe", "video"):
             text = prompts.compose(style, kind, row)
-            self.assertIn("大幅重构", text)
+            # materials become real; shapes, proportions and designs stay (no redesign of objects or characters)
+            self.assertIn("风格不变", text)
+            self.assertIn("造型、比例", text)
+            self.assertNotIn("重构", text)
             self.assertNotIn("质感参考", text)
         self.assertIn("图2是写实质感参考", prompts.compose(style, "anchor", row, style_ref=True))
 
@@ -86,6 +89,22 @@ class DeliveryDirTests(unittest.TestCase):
             (Path(folder) / "busy" / "old.mp4").write_bytes(b"x")
             with self.assertRaises(ValueError):
                 JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "busy")})
+
+    def test_one_resolution_and_frame_rate(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from reskin import job as JOB
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "ad.mp4"
+            video.write_bytes(b"x")
+            with mock.patch.object(JOB, "sha", return_value="h"):
+                _, state = JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "a")})
+                self.assertEqual({k: state["options"][k] for k in ("resolution", "fps", "review_rounds", "chain_prefix")},
+                                 {"resolution": "720p", "fps": 24, "review_rounds": 2, "chain_prefix": True})
+                for options in ({"resolution": "1080p"}, {"resolution": "480p"}, {"fps": 60}, {"chain_prefix": "yes"}):
+                    with self.assertRaises(ValueError):
+                        JOB.init({"sources": [str(video)], "delivery_dir": str(Path(folder) / "b"), "options": options})
 
 
 class SizeTests(unittest.TestCase):

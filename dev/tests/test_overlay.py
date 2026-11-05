@@ -52,7 +52,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("由程序原样叠加", prompts.compose(style, "video", row, span=(5, 8)))
         for kind in ("anchor", "keyframe", "video"):
             self.assertNotIn("{", prompts.compose(style, kind, row, span=(2, 2)))
-            self.assertIn("实拍", prompts.compose(style, kind, row, span=(2, 2)))
+            self.assertIn("写实", prompts.compose(style, kind, row, span=(2, 2)))
 
 
 class PictureTests(unittest.TestCase):

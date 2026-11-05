@@ -1,5 +1,5 @@
 """What protects the money: single submissions, the job lock, causes and the ledger, the segment check holding a
-chain, longest chains first, local patches, lint drafts and previews."""
+chain, longest chains first, lint drafts and previews on request only."""
 import json
 import shutil
 import tempfile
@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from reskin import cli, common, gate, ledger, lint, lumos, net, patch, preview, render, review
+from reskin import cli, common, gate, ledger, lint, lumos, net, preview, render, review
 from test_plan import catalog_row
 from reskin import plan as PLAN
 
@@ -158,8 +158,7 @@ class GateTests(unittest.TestCase):
         def fake_check(job, state, row, sid, index):
             checked.append(f"{sid}:{row['segments'][index]['id']}")
             return {"held": True, "accepted": False, "reasons": ["Gemini: [high] continuity"]}
-        with mock.patch("reskin.render.render_segment", fake_render), mock.patch("reskin.gate.check", fake_check), \
-                mock.patch("reskin.patch.render_all", lambda *a: []):
+        with mock.patch("reskin.render.render_segment", fake_render), mock.patch("reskin.gate.check", fake_check):
             results = render.run_all(Path(tempfile.gettempdir()), {}, three_segment_plan(), {}, workers=1,
                                      on_source_done=lambda sid, rows: finished.append(sid))
         self.assertEqual(sorted(rendered), ["S01:K01", "S01:K03", "S02:K01"])
@@ -190,49 +189,6 @@ class GateTests(unittest.TestCase):
         self.assertEqual(review.auto_fps(120), 2.0)
 
 
-class PatchTests(unittest.TestCase):
-    row = {"fps": 30, "keep": [0.0, 60.0]}
-    seg = {"id": "K01", "frames": [0, 900], "render_frames": [0, 900]}
-
-    def test_window_is_at_least_four_seconds(self):
-        a, b = patch.window(self.row, self.seg, 10.0, 10.4, following=True)
-        self.assertGreaterEqual(b - a, 120)
-        self.assertLessEqual(a, round(9.5 * 30))
-        self.assertGreaterEqual(b, round(10.9 * 30))
-
-    def test_window_slides_away_from_the_edges(self):
-        a, b = patch.window(self.row, self.seg, 29.5, 29.8, following=True)
-        self.assertLessEqual(b, 900 - round(.75 * 30))      # clear of the next segment's overlap
-        a, b = patch.window(self.row, self.seg, 0.1, 0.2, following=False)
-        self.assertGreaterEqual(a, round(.25 * 30))
-
-    def test_window_runs_to_the_end_of_the_last_segment(self):
-        a, b = patch.window(self.row, self.seg, 27.0, 30.0, following=False, last=True)
-        self.assertEqual(b, 900)                              # no join out at the end of the video
-        a, b = patch.window(self.row, self.seg, 27.0, 30.0, following=False)
-        self.assertEqual(b, 900 - round(.25 * 30))
-
-    def test_window_too_long(self):
-        with self.assertRaises(ValueError):
-            patch.window(self.row, self.seg, 5, 15, following=False)
-
-    def test_add_and_drop(self):
-        job = tmp()
-        try:
-            plan = {"sources": {"S01": {**self.row, "segments": [dict(self.seg, seam="start")]}}}
-            common.write(job / "state/render/S01-K01.json", {"status": "done", "generation_id": "g1"})
-            entry = patch.add(job, plan, "S01:K01", 12.0, 12.5, "鱼变形", "鱼保持原样")
-            self.assertEqual(entry["id"], "P1")
-            with self.assertRaises(ValueError):
-                patch.add(job, plan, "S01:K01", 13.0, 13.2, "overlap", None)
-            self.assertEqual(len(patch.active(job, "S01:K01")), 1)
-            common.write(job / "state/render/S01-K01.json", {"status": "done", "generation_id": "g2"})
-            self.assertEqual(patch.active(job, "S01:K01"), [])      # made for the earlier render
-            self.assertTrue(patch.drop(job, "S01:K01:P1"))
-        finally:
-            shutil.rmtree(job, ignore_errors=True)
-
-
 class LintTests(unittest.TestCase):
     def test_draft(self):
         row = catalog_row(70.2, 30.0)
@@ -258,15 +214,13 @@ class LintTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
-    def test_moments(self):
-        row = {"fps": 30, "keep": [0.0, 65.0],
-               "segments": [{"frames": [0, 990], "render_frames": [0, 990]},
-                            {"frames": [990, 1950], "render_frames": [975, 1950]}],
-               "materials": ["积雪地面", {"what": "蓝色皮卡车", "start": 56, "end": 65}]}
-        times = preview.moments(row)
-        self.assertIn(56.5, times)
-        self.assertTrue(all(abs(t - 32.5) > 1.5 and t > 1.5 for t in times))     # not at segment starts
-        self.assertLessEqual(len(times), preview.LIMIT)
+    def test_previews_only_at_asked_moments(self):
+        plan = {"sources": {"S01": {"fps": 30, "segments": []}}}
+        with self.assertRaises(ValueError):
+            preview.run_all(Path("job"), {}, plan, {}, "S01", [])
+        with self.assertRaises(ValueError) as caught:
+            preview.run_all(Path("job"), {}, plan, {}, "S01", [1, 2, 3, 4, 5])
+        self.assertIn("at most 4", str(caught.exception))
 
 
 class RedoTests(unittest.TestCase):
