@@ -66,22 +66,30 @@ def _drawtext(text: str) -> str:
             "box=1:boxcolor=black@0.55:boxborderw=6")
 
 
+INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured 2026-11-06)
+PROXY_CRF = 18                 # review proxy quality; raised step by step only when the clip would not fit inline
+
+
 def side_by_side(source_path: str, start: float, end: float, result_path: str, size: tuple[int, int],
-                 output: Path) -> tuple[Path, str]:
-    """Original (left or top) and restyled (right or bottom) on one small clip, the same clock for both: the source
-    from `start` to `end`, the result from its first frame."""
+                 output: Path, crf: int = PROXY_CRF) -> tuple[Path, str]:
+    """Original (left or top) and restyled (right or bottom) on one clip, the same clock for both: the source from
+    `start` to `end`, the result from its first frame. Each half keeps the result's own size (1080p) at 24 fps, so
+    Gemini judges the delivered detail; `crf` goes up only when the clip would exceed INLINE_LIMIT."""
     width, height = size
     portrait = height >= width
-    side = (480, round(480 * height / width / 2) * 2) if portrait else (854, round(854 * height / width / 2) * 2)
+    side = (round(width / 2) * 2, round(height / 2) * 2)
     output.parent.mkdir(parents=True, exist_ok=True)
     stack = "hstack" if portrait else "vstack"
-    graph = (f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps=15,scale={side[0]}:{side[1]}:flags=area"
-             f"{_drawtext('ORIGINAL')}[a];"
-             f"[1:v]setpts=PTS-STARTPTS,fps=15,scale={side[0]}:{side[1]}:flags=area{_drawtext('RESTYLED')}[b];"
-             f"[a][b]{stack}=inputs=2:shortest=1,format=yuv420p[v]")
-    run([FFMPEG, "-v", "error", "-y", "-i", source_path, "-i", result_path, "-filter_complex", graph,
-         "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", output])
-    return output, ("left" if portrait else "top")
+    while True:
+        graph = (f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps=24,"
+                 f"scale={side[0]}:{side[1]}:flags=lanczos{_drawtext('ORIGINAL')}[a];"
+                 f"[1:v]setpts=PTS-STARTPTS,fps=24,scale={side[0]}:{side[1]}:flags=lanczos{_drawtext('RESTYLED')}[b];"
+                 f"[a][b]{stack}=inputs=2:shortest=1,format=yuv420p[v]")
+        run([FFMPEG, "-v", "error", "-y", "-i", source_path, "-i", result_path, "-filter_complex", graph,
+             "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), output])
+        if output.stat().st_size <= INLINE_LIMIT or crf >= 36:
+            return output, ("left" if portrait else "top")
+        crf += 4
 
 
 def proxy(job: Path, state: dict, source_id: str, assembled: dict) -> tuple[Path, str]:
@@ -950,7 +958,7 @@ def seam_checks(job: Path, source_id: str, assembled: dict, clip: Path, layout: 
         length = max(seam["time"], inside) + SEAM_WINDOW - start
         piece = job / "review" / f"{source_id}-seam-{seam['segment'].replace(':', '-')}.mp4"
         run([FFMPEG, "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", clip,
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-an", piece])
+             "-c:v", "libx264", "-preset", "medium", "-crf", str(PROXY_CRF), "-an", piece])
         part = winky.inline(piece, "video/mp4")
         part["videoMetadata"] = {"fps": 10}
         answer = winky.gemini([part, {"text": seam_prompt({**seam, "time": seam["time"] - start}, layout)
@@ -1151,8 +1159,9 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     fps = fps or auto_fps(assembled["duration"])
     clip, layout = proxy(job, state, source_id, assembled)
     size = clip.stat().st_size
-    if size > 18 * 1024 * 1024:
-        raise RuntimeError(f"{source_id}: review proxy is {size / 1e6:.0f} MB, too large to send inline")
+    if size > INLINE_LIMIT:
+        raise RuntimeError(f"{source_id}: review proxy is {size / 1e6:.0f} MB, over the {INLINE_LIMIT / 1e6:.0f} MB "
+                           "inline limit even at the lowest quality")
     log(f"{source_id}: asking Gemini to review ({size / 1e6:.1f} MB comparison clip, {fps:g} fps)")
     part = winky.inline(clip, "video/mp4")
     part["videoMetadata"] = {"fps": fps}

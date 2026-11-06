@@ -605,7 +605,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         final = "joined"
     else:
         final = labels[0]
-    graph.append(f"[{final}]trim=end_frame={total},setpts=PTS-STARTPTS[v0]")
+    graph.append(f"[{final}]trim=end_frame={total},setpts=PTS-STARTPTS,format=yuv420p[vout]")
     keep_start, keep_end = row["keep"]
     source_index = len(clips)
     inputs += ["-i", source["path"]]
