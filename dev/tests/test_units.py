@@ -73,6 +73,25 @@ class SwitchTests(unittest.TestCase):
         before, after = self.moving(seed=1), self.moving(seed=2)
         self.assertEqual(assemble.find_switch(before, after)["verdict"], "visible")
 
+    def test_later_clip_running_a_frame_behind_is_found(self):
+        frames = self.moving(count=16)
+        before = frames[2:12]                     # the earlier clip's overlap
+        after = frames[1:13]                      # the later clip shows each moment one frame late
+        lag, scores = assemble.lag_of(before, after, 10)
+        self.assertEqual(lag, 1)
+        self.assertLess(scores[1], scores[0])
+
+    def test_switch_during_fast_motion_is_a_cut_not_a_blend(self):
+        before = self.moving(count=12)
+        after = before + 2.0                      # nearly the same drawing; the picture moves more than that
+        found = assemble.find_switch(before, after)
+        self.assertEqual(found["blend"], 0)
+        self.assertEqual(found["verdict"], "clean")
+
+    def test_aligned_clips_keep_no_lag(self):
+        frames = self.moving(count=14)
+        self.assertEqual(assemble.lag_of(frames[:10], frames[:12], 10)[0], 0)
+
 
 class TimelineTests(unittest.TestCase):
     def test_global_clock_has_no_drift(self):
