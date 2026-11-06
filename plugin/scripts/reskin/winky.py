@@ -10,6 +10,7 @@ from reskin import credentials, net
 
 BASE = "https://lumos.diandian.info/winky"
 REVIEW_MODEL = "gemini-3.8-flash"
+MEDIA_RESOLUTION = "MEDIA_RESOLUTION_HIGH"     # video frames were 66 tokens each by default: too coarse to judge
 
 
 class PermissionDenied(RuntimeError):
@@ -59,10 +60,13 @@ def check_key() -> dict:
 
 
 def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW_MODEL, system: str | None = None,
-           temperature: float = 0.2, timeout: float = 600) -> dict | str:
-    """generateContent; with a schema the JSON answer is parsed."""
+           temperature: float = 0.2, timeout: float = 900, media_resolution: str | None = MEDIA_RESOLUTION) -> dict | str:
+    """generateContent; with a schema the JSON answer is parsed. `media_resolution` (default HIGH) sets how finely
+    Gemini reads images and video frames."""
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": temperature}}
+    if media_resolution:
+        body["generationConfig"]["mediaResolution"] = media_resolution
     if schema:
         body["generationConfig"].update(responseMimeType="application/json", responseSchema=schema)
     if system:

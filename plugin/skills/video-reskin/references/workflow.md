@@ -10,15 +10,17 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `keyframes [--only K] [--redo K]` | anchor + segment keyframes (GPT Image) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/` | 3-8 min per segment, 4 at a time |
-| `assemble [--only S01]` | retime, colour-match, cross-fade, join with the source audio → delivery folder | ~1 min per video |
-| `review [--only S01]` | Gemini compares original and result → `reports/review/<id>-r<n>.md/json` | ~1 min per video |
+| `keyframes [--only K] [--redo K]` | anchor + segment keyframes (GPT Image) → `keyframes/`, `sheets/<id>-keyframes.png` | ~1 min per image, 3 at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot chained | 3-8 min per segment, 4 chains at a time |
+| `assemble [--only S01]` | retime, colour-match, switch at the best-matching overlap frame, measure seams, join with the source audio → delivery folder | ~1 min per video |
+| `review [--only S01] [--fps F]` | Gemini watches original and result side by side at full size, and each seam up close → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/`, `review/seams/<id>-<Kxx>/` | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--keyframe]` | sends confirmed segments back for another attempt | - |
 | `status` | progress per source and the next step | - |
 
-Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key).
+Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key; a segment that continues a shot starts
+from `keyframes/S01-K02-chain.png`, the previous result's frame at its first moment, and gets its keyframe as the
+material-detail reference).
 
 ## Work order (`init`)
 
@@ -31,8 +33,8 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
-- `style`: a preset name from `assets/prompts.json` (`realistic`: realistic materials, style unchanged; dark, deep tones,
-  pronounced textures, looked up from `assets/styles/realistic.jpg`) or an object with `label`, `goal`, `look`, `anchor`,
+- `style`: a preset name from `assets/prompts.json` (`realistic`: realistic materials, style unchanged; pronounced textures,
+  brightness and grading looked up from `assets/styles/realistic.jpg`) or an object with `label`, `goal`, `look`, `anchor`,
   `keyframe`, `video`, `default_materials` and optionally `reference` (a look picture, absolute or relative to `assets/`)
   like the preset, for another look. All prompt texts are English. The reference picture goes with the anchor as Image 2
   (look only, nothing copied from its content); every other keyframe follows the anchor.
@@ -67,7 +69,9 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
 - `materials`: the real-world materials of what this video shows, in Chinese, each prominent object named as itself
   (`整条的金枪鱼`, `绿色的纸币堆`, `原木`, `积雪地面`...): one text, or a list whose items are texts or
   `{"what": text, "start": s, "end": s}` for objects that appear only part of the time. Each prompt names only the
-  items on screen during its keyframe or segment; the preset's generic list is the default. Never list a material
+  items on screen during its keyframe or segment; the preset's generic list is the default. A timed item that first
+  starts inside a later segment gets a reveal frame (GPT Image, 0.7 s after its start, or at its `"at"` seconds):
+  give `at` when that moment shows it badly. Never list a material Never list a material
   the video does not show or one another object could turn into: a list naming `三文鱼` turned stacks of whole tuna
   and of green cash into salmon steaks, and an untimed `蓝色皮卡车` (trucks arrive near the end) put a truck into
   the opening seconds.
@@ -86,7 +90,7 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
 ## Plan (`config/plan.json`, `reports/plan.md`)
 
 Each source lists its segments `K01...` with `frames` (source frames it delivers), `render_frames` (what is sent
-to Seedance: the delivered frames plus 0.5 s before a seam inside a shot, for the cross-fade), `seam` before it
+to Seedance: the delivered frames plus 0.5 s before a seam inside a shot, the overlap in which `assemble` switches), `seam` before it
 (`start`, `cut`: a camera cut hides the join, `continuous`: inside a shot) and `inner_cuts` (camera cuts inside the
 segment). Edit the edits file, not the plan.
 
@@ -94,9 +98,10 @@ segment). Edit the edits file, not the plan.
 
 - Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, H.264, AAC, the source audio of the
   kept range).
-- `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.jpg`.
+- `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.png`.
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, slightly shorter than the source clip: `assemble`
   stretches them back exactly).
-- `temp/state/assembled/<id>.json`: seam times (`seams`), colour corrections (`colour`: raw difference and residual
+- `temp/state/assembled/<id>.json`: seam times (`seams`; inside a shot the switch moment with `difference`, `motion`,
+  `local` and `verdict` clean/visible), colour corrections (`colour`: raw difference and residual
   per seam inside a shot, 0-255 scale), segment times in the delivered video.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

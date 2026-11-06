@@ -1,7 +1,9 @@
 """The agent's edits (kept range, materials, what to remove, anchor frame) and the segment plan built from them.
 
 Seedance edits clips of 4-30 s, so each kept range is cut into segments: at camera cuts where possible (a hard cut
-hides the seam), otherwise inside a shot at its stillest moment, with a short overlap that `assemble` cross-fades.
+hides the seam), otherwise inside a shot into as few even pieces as fit, each split at the stillest moment near its
+even position, with a short overlap: the later piece is rendered from the earlier result's frame there (`render`) and
+`assemble` switches inside the overlap at the frame where both match best.
 """
 from __future__ import annotations
 
@@ -13,19 +15,23 @@ from reskin.prompts import describe
 MIN_SECONDS = 3.0         # Seedance needs at least 2 s; shorter pieces are merged into a neighbour
 OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more, cross-faded in assemble
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds"}
+REVEAL_DELAY = .7         # seconds after a timed material's start that its reveal frame is taken (it is fully in view)
+REVEAL_GROUP = 2.0        # timed materials starting this close together share one reveal frame
+MAX_REVEALS = 2           # reveal frames one segment gets at most
 
 
 def items_problem(items, name: str) -> str | None:
-    """`remove` (and `materials` when not one text) is a list of Chinese descriptions, each a string or
-    {"what": ..., "start": s, "end": s} for something on screen only part of the time."""
+    """`remove` (and `materials` when not one text) is a list of descriptions, each a string or
+    {"what": ..., "start": s, "end": s} for something on screen only part of the time (materials may add "at": the
+    moment their reveal frame shows them best)."""
     if not isinstance(items, list):
         return f"{name} must be a list"
     for item in items:
         if isinstance(item, str) and item.strip():
             continue
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end"}
-                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
+                and set(item) <= {"what", "start", "end", "at"}
+                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end", "at"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds}}"
@@ -110,7 +116,7 @@ def _stillest(motion: list[float], lo: int, hi: int, fps: float) -> int:
     best, frame = None, (lo + hi) // 2
     for i in range(lo, hi):
         window = motion[max(0, i - half): i + half + 1]
-        score = sum(window) / len(window)
+        score = (round(sum(window) / len(window), 6), abs(i - (lo + hi) // 2))   # ties: nearest the middle
         if best is None or score < best:
             best, frame = score, i
     return frame
@@ -138,12 +144,19 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
         if options:
             end, following = options[-1], "cut"
         else:
-            if remaining < limit + minimum:      # two pieces left: split near the middle, both within limits
-                lo = max(position + minimum, last - (maximum - overlap), position + remaining // 2 - window)
-                hi = min(position + limit, last - minimum, position + remaining // 2 + window)
-            else:
-                lo, hi = position + limit - window, position + limit
-            end, following = (_stillest(motion, lo, hi, fps) if lo < hi else hi), "continuous"
+            # As few pieces as fit up to the next cut out of reach (every seam inside a shot can show), split
+            # evenly, each split at the stillest moment near its even position.
+            stretch = min([c for c in cuts if c > position + limit] + [last]) - position
+            lead = overlap if seam == "continuous" else 0
+            pieces = 2
+            while stretch + lead + (pieces - 1) * overlap > pieces * maximum:
+                pieces += 1
+            target = position + stretch // pieces
+            # what is left after this piece must still fit into pieces - 1 pieces
+            rest = (pieces - 1) * (maximum - overlap)
+            lo = max(position + minimum, position + stretch - rest, target - window)
+            hi = min(position + limit, position + stretch - minimum, target + window)
+            end, following = (_stillest(motion, lo, hi, fps) if lo < hi else min(hi, max(lo, target))), "continuous"
         spans.append((position, end, seam))
         position, seam = end, following
     segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b]}
@@ -155,6 +168,36 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
         row["start"], row["end"] = round(row["frames"][0] / fps, 3), round(row["frames"][1] / fps, 3)
         row["seconds"] = round((row["render_frames"][1] - row["render_frames"][0]) / fps, 3)
     return segments
+
+
+def mark_reveals(row: dict) -> None:
+    """Per segment after a source's first: the timed materials that come into view for the first time during it
+    (`reveals`). Nothing earlier shows them, so GPT Image restyles one source frame of them after the anchor, and
+    the segment gets that frame as a reference besides the earlier results (render)."""
+    items = [i for i in (row["materials"] if isinstance(row["materials"], list) else [])
+             if isinstance(i, dict) and "start" in i]
+    fps = row["fps"]
+    for number, seg in enumerate(row["segments"]):
+        seg["reveals"] = []
+        if not number:
+            continue
+        start, end = seg["frames"][0] / fps, seg["frames"][1] / fps
+        new = sorted((min(max(float(i.get("at", i["start"] + REVEAL_DELAY)), start), end - .1), i["what"])
+                     for i in items if start <= i["start"] < end)
+        groups: list[list] = []
+        for moment, what in new:
+            if groups and moment - groups[-1][0][0] <= REVEAL_GROUP:
+                groups[-1].append((moment, what))
+            else:
+                groups.append([(moment, what)])
+        while len(groups) > MAX_REVEALS:      # merge the two closest groups
+            gaps = [groups[k + 1][0][0] - groups[k][-1][0] for k in range(len(groups) - 1)]
+            k = gaps.index(min(gaps))
+            groups[k:k + 2] = [groups[k] + groups[k + 1]]
+        for k, group in enumerate(groups, 1):
+            moment = max(m for m, _ in group)       # every item of the group in view
+            seg["reveals"].append({"id": f"{seg['id']}-N{k}", "frame": round(moment * fps), "time": round(moment, 3),
+                                   "what": list(dict.fromkeys(w for _, w in group))})
 
 
 def auto_anchor(catalog_row: dict, keep: list[float], motion: list[float]) -> float:
@@ -191,6 +234,7 @@ def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_s
         plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
                                       "width": row["info"]["width"], "height": row["info"]["height"],
                                       "segments": segments}
+        mark_reveals(plan["sources"][row["id"]])
     write(job / "config/plan.json", plan)
     write_text(job / "reports/plan.md", markdown(plan, catalog))
     return plan
@@ -209,7 +253,9 @@ def markdown(plan: dict, catalog: dict) -> str:
             lines.append(f"extra: {row['extra']}")
         for seg in row["segments"]:
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
+            reveals = "".join(f"; reveal {r['id']} at {r['time']:.2f} s: {', '.join(r['what'])}"
+                              for r in seg.get("reveals") or [])
             lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['seconds']:.2f} s), "
-                         f"seam before: {seg['seam']}{inner}")
+                         f"seam before: {seg['seam']}{inner}{reveals}")
         lines.append("")
     return "\n".join(lines)

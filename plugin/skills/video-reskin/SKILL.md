@@ -51,6 +51,7 @@ batch without asking; an open question never stops production: take the default 
 | A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
 | A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` |
+| Detail fades late in a long segment | keep the segments long (never lower `max_segment_seconds`: 5 segments of 15 s showed more and clearer jumps than 2 of 30 s); report it |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | Issues remain after `review_rounds` (3) rounds | deliver; list each remaining issue with its time |
 
@@ -68,14 +69,21 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    `materials` of what is on screen, what to `remove` (only logos and warning lines you actually saw on that source's
    sheets, timed when they come and go; HUD stays), and an `anchor` time when the automatic one would be a poor frame. `plan --edits <file>` cuts every kept range into
    segments of at most 12 s (at camera cuts where possible) and writes `reports/plan.md`.
-4. `keyframes` restyles one anchor frame per source and the first frame of every segment after it. Look at every
-   `sheets/<id>-keyframes.jpg`: same layout and objects as the original, realistic materials, no logo or warning text,
+4. `keyframes` restyles one anchor frame per source and, after it, the first frame of every segment (a segment that continues a
+   shot starts from the previous result's frame; its keyframe only sets the material detail). Objects that come
+   into view for the first time in a later segment (timed `materials`) get a reveal frame (`S01:K02-N1`). Look at every
+   `sheets/<id>-keyframes.png`: same layout and objects as the original, realistic materials, no logo or warning text,
    no strong noise or fragmented look. Redo bad ones before rendering: every segment copies its keyframe.
-5. `render` edits every segment with Seedance 2.5 at 1080p on Lumos.
-6. `assemble` retimes each segment to its source duration, matches colours across seams inside a shot, cross-fades
-   those seams, joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
-7. `review` has Gemini compare each video with its original (穿帮, bugs, 拼接色差, leftover logos/text). Confirm every
-   reported issue on stills (`frames --source <id> --at <t>`), `redo` the confirmed segments, then (`keyframes` if
+5. `render` edits every segment with Seedance 2.5 at 1080p on Lumos. The segments of one source run one after
+   another: each later one gets the previous result's frame at its start, its own keyframe for material detail,
+   its reveal frames and up to 3 earlier results' frames of the places it shows again (at most 6 pictures).
+6. `assemble` retimes each segment to its source duration, matches colours across seams inside a shot, switches at
+   the best-matching overlap frame with a 3-frame blend and measures each such seam (`visible` ones become high
+   review issues), joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
+7. `review` has Gemini watch each whole video beside its original at full size (穿帮, bugs, 拼接色差, leftover
+   logos/text) and every seam up close, and writes full-size lossless stills for you: the whole video every 2 s and
+   every seam frame by frame. Look at all of them yourself, confirm every reported issue on stills
+   (`frames --source <id> --at <t>`), `redo` the confirmed segments, then (`keyframes` if
    a keyframe was redone,) `render`, `assemble`, `review` again, up to `review_rounds` rounds.
 8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
    rounds and verdict; issues dismissed (and why) or still open (with times); fallbacks taken (image backend, redos,

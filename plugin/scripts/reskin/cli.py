@@ -136,7 +136,7 @@ def cmd_keyframes(args) -> int:
     lines = [f"keyframes: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"
              + (f" (via {', '.join(backends)})" if made else "")]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-keyframes.jpg: original | styled)")
+    lines.append(f"sheets: {job / 'sheets'} (<id>-keyframes.png: original | styled)")
     lines.append("next: " + ("fix the failures and run keyframes again" if failed else
                              "look at every keyframe sheet (make a bad one again with keyframes --redo <id>:<key> "
                              "after adjusting the edits), then render"))
@@ -178,6 +178,10 @@ def cmd_assemble(args) -> int:
             lines.append(f"{source_id}: not assembled: {error}")
             continue
         colour = "; ".join(f"{c['before']} diff {c['raw_difference']} -> {c['residual']}" for c in result["colour"])
+        checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['verdict']} ({s['difference']} vs motion "
+                            f"{s['motion']}, region {s['local']} vs {s.get('local_motion')})" for s in result["seams"] if "verdict" in s)
+        if checked:
+            colour = (colour + "; " if colour else "") + "seams: " + checked
         lines.append(f"{source_id}: {Path(result['output']).name} {result['size'][0]}x{result['size'][1]} "
                      f"{result['duration']:.2f} s" + (f", seam colours: {colour}" if colour else "")
                      + (f", problems: {'; '.join(result['problems'])}" if result["problems"] else ""))
@@ -207,9 +211,16 @@ def cmd_review(args) -> int:
         for issue in result["issues"]:
             lines.append(f"  #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
                          f"-> {', '.join(issue['segments'])}: {issue['description']}")
+        if result.get("stills"):
+            lines.append(f"  stills (full size, lossless): {Path(result['stills'][0]).parent} ({len(result['stills'])} pairs)")
+        for seam in result.get("seams") or []:
+            if seam["stills"]:
+                lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s stills: {Path(seam['stills'][0]).parent} "
+                             f"({len(seam['stills'])} pairs)")
     show(lines + [f"reports: {job / 'reports/review'}",
-                  "next: confirm each issue with frames --source <id> --at <seconds>; send confirmed ones back with "
-                  "redo, then (keyframes,) render, assemble and review again"])
+                  "next: look at every still (whole video and every seam) yourself; confirm each issue with frames "
+                  "--source <id> --at <seconds>; send confirmed flaws back with redo, then (keyframes,) render, "
+                  "assemble and review again"])
     return RULE_FAILURE if failed else 0
 
 
@@ -255,7 +266,8 @@ def cmd_status(args) -> int:
         step = "plan --edits <edits.json>"
     for source_id, row in plan["sources"].items():
         keys = [s["id"] for s in row["segments"]]
-        frames_ready = sum(1 for k in ["anchor", *keys] if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
+        own = ["anchor", *keys, *(r["id"] for s in row["segments"] for r in s.get("reveals") or [])]
+        frames_ready = sum(1 for k in own if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
         rendered = 0
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
@@ -264,10 +276,10 @@ def cmd_status(args) -> int:
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
-        lines.append(f"{source_id}: keyframes {frames_ready}/{len(keys) + 1}, segments {rendered}/{len(keys)}, "
+        lines.append(f"{source_id}: keyframes {frames_ready}/{len(own)}, segments {rendered}/{len(keys)}, "
                      f"assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
-            if frames_ready < len(keys) + 1:
+            if frames_ready < len(own):
                 step = "keyframes"
             elif rendered < len(keys):
                 step = "render"
@@ -328,7 +340,7 @@ def main() -> None:
     assemble.add_argument("--only", nargs="*", help="source IDs")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
     review.add_argument("--only", nargs="*", help="source IDs")
-    review.add_argument("--fps", type=float, default=2.0, help="frames per second Gemini samples")
+    review.add_argument("--fps", type=float, default=None, help="frames per second Gemini samples (default: 4 up to 75 s, else 2)")
     frames = command("frames", cmd_frames, help="stills of original and restyled around given times")
     frames.add_argument("--source", required=True)
     frames.add_argument("--at", type=float, nargs="+", required=True, help="seconds in the delivered video")

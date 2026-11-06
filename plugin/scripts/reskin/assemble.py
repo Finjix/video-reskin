@@ -1,5 +1,6 @@
 """Put the restyled segments back on the source's clock: retime, scale to 1080p, match colours across seams inside a
-shot, cross-fade their overlaps, join, and lay the source's own audio under it."""
+shot, switch inside each overlap at the frame where both results match best (a short blend, not a long dissolve that
+shows both drawings at once), measure every such seam, join, and lay the source's own audio under it."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,6 +11,14 @@ from reskin.common import FFMPEG, log, read, run, video_info, write
 
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
+BLEND_FRAMES = 3       # the switch inside an overlap: a 3-frame blend at the best-matching moment
+GRID = (10, 6)         # rows, columns of the regions a seam is measured in
+# A seam is visible when the two results differ at the switch clearly more than the picture moves from frame to
+# frame there, or when one region changes a lot (an object drawn differently). Calibrated on GOF3D10232
+# (2026-11-06): independent segments differed 0.66-0.69 SSIM in the overlap against 0.90 frame to frame.
+SEAM_EXCESS = 6.0      # switch difference minus motion, 0-255
+SEAM_RATIO = 2.5       # switch difference / motion
+SEAM_LOCAL = 30.0      # largest region difference, 0-255 (and SEAM_RATIO times that region's own motion)
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
@@ -134,6 +143,41 @@ def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple
     return corrections, seams
 
 
+def corrected(pixels: np.ndarray, correction: tuple) -> np.ndarray:
+    gain, offset = correction
+    return np.clip(pixels * gain + offset, 0, 255)
+
+
+def regional(a: np.ndarray, b: np.ndarray) -> float:
+    """The largest mean difference of one region of the frame."""
+    rows, cols = GRID
+    h, w = a.shape[0] // rows, a.shape[1] // cols
+    diff = np.abs(a - b).mean(axis=2)
+    return float(max(diff[r * h:(r + 1) * h, c * w:(c + 1) * w].mean() for r in range(rows) for c in range(cols)))
+
+
+def find_switch(before: np.ndarray, after: np.ndarray) -> dict:
+    """Both clips' frames of one overlap (same moments, colours corrected): the blend start where they match best,
+    and how visible the switch is against the ordinary frame-to-frame change there."""
+    count = min(len(before), len(after))
+    blend = min(BLEND_FRAMES, count)
+    per_frame = [float(np.abs(before[i] - after[i]).mean()) for i in range(count)]
+    starts = range(0, count - blend + 1)
+    start = min(starts, key=lambda i: (round(float(np.mean(per_frame[i:i + blend])), 4), -i))
+    middle = start + blend // 2
+    steps = [float(np.abs(clip[i + 1] - clip[i]).mean()) for clip in (before, after) for i in range(count - 1)]
+    motion = float(np.median(steps)) if steps else 0.0
+    difference = float(np.mean(per_frame[start:start + blend]))
+    local = regional(before[middle], after[middle])
+    # a region where the picture itself changes fast (a bending stack, a popping bubble) may differ as much
+    local_steps = [regional(clip[i], clip[i + 1]) for clip in (before, after) for i in range(count - 1)]
+    local_motion = float(np.median(local_steps)) if local_steps else 0.0
+    visible = ((difference - motion > SEAM_EXCESS and difference > SEAM_RATIO * max(motion, .5))
+               or (local > SEAM_LOCAL and local > SEAM_RATIO * max(local_motion, .5)))
+    return {"start": start, "blend": blend, "difference": round(difference, 2), "motion": round(motion, 2),
+            "local": round(local, 2), "local_motion": round(local_motion, 2), "verdict": "visible" if visible else "clean"}
+
+
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
@@ -157,11 +201,28 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
             write(stamp_path, stamp)
         clips.append(work)
     corrections, seams = match_colours(clips, lines, out_fps)
-    # One filter graph: corrected clips, cross-faded inside shots, joined at cuts, with the source audio.
-    inputs, graph = [], []
+    # Inside a shot both clips render the overlap: find where they match best and switch there.
+    switches: dict[int, dict] = {}
+    for index, line in enumerate(lines):
+        overlap = line["body"][0] - line["out"][0]
+        if not index or line["seam"] != "continuous" or overlap <= 0:
+            continue
+        prev_count = lines[index - 1]["out"][1] - lines[index - 1]["out"][0]
+        before = corrected(frames_rgb(clips[index - 1], prev_count - overlap, overlap, out_fps), corrections[index - 1])
+        after = corrected(frames_rgb(clips[index], 0, overlap, out_fps), corrections[index])
+        switches[index] = {**find_switch(before, after), "overlap": overlap}
+    # Frames each clip contributes: a later clip from its switch on, an earlier one up to the end of the blend.
+    heads = {index: s["start"] for index, s in switches.items()}
+    tails = {index - 1: lines[index - 1]["out"][1] - lines[index - 1]["out"][0] - s["overlap"] + s["start"] + s["blend"]
+             for index, s in switches.items()}
+    # One filter graph: corrected clips, switched inside shots, joined at cuts, with the source audio.
+    inputs, graph, lengths = [], [], []
     for index, (clip, (gain, offset)) in enumerate(zip(clips, corrections)):
         inputs += ["-i", clip]
-        chain = f"[{index}:v]setpts=PTS-STARTPTS"
+        head = heads.get(index, 0)
+        tail = tails.get(index, lines[index]["out"][1] - lines[index]["out"][0])
+        lengths.append(tail - head)
+        chain = f"[{index}:v]trim=start_frame={head}:end_frame={tail},setpts=PTS-STARTPTS"
         if not (np.allclose(gain, 1) and np.allclose(offset, 0)):
             chain += f",format=rgb24,{lut(gain, offset)},format=yuv420p"
         graph.append(chain + f"[c{index}]")
@@ -174,16 +235,16 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     labels = []
     for number, members in enumerate(runs):
         label = f"c{members[0]}"
-        length = (lines[members[0]]["out"][1] - lines[members[0]]["out"][0]) / out_fps
+        length = lengths[members[0]]
         for index in members[1:]:
-            overlap = (lines[index]["body"][0] - lines[index]["out"][0]) / out_fps
-            clip_length = (lines[index]["out"][1] - lines[index]["out"][0]) / out_fps
-            if overlap > 0:
-                graph.append(f"[{label}][c{index}]xfade=transition=fade:duration={overlap:.6f}:offset={length - overlap:.6f}[x{index}]")
-                length = length + clip_length - overlap
+            if index in switches:
+                blend = switches[index]["blend"]
+                graph.append(f"[{label}][c{index}]xfade=transition=fade:duration={blend / out_fps:.6f}:"
+                             f"offset={(length - blend) / out_fps:.6f}[x{index}]")
+                length = length + lengths[index] - blend
             else:
                 graph.append(f"[{label}][c{index}]concat=n=2:v=1:a=0[x{index}]")
-                length += clip_length
+                length += lengths[index]
             label = f"x{index}"
         labels.append(label)
     total = lines[-1]["out"][1] - lines[0]["out"][0]
@@ -222,8 +283,19 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         problems.append(f"duration {made['duration']:.3f} s, expected {expected:.3f} s")
     if (made["width"], made["height"]) != size:
         problems.append(f"size {made['width']}x{made['height']}, expected {size[0]}x{size[1]}")
-    seam_times = [{"segment": line["id"], "seam": line["seam"],
-                   "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)} for line in lines[1:]]
+    seam_times = []
+    for index, line in enumerate(lines[1:], 1):
+        entry = {"segment": line["id"], "seam": line["seam"],
+                 "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)}
+        if index in switches:
+            s = switches[index]
+            moment = line["out"][0] + s["start"] + s["blend"] / 2 - lines[0]["out"][0]
+            entry = {**entry, "time": round(moment / out_fps, 3),
+                     **{k: s[k] for k in ("difference", "motion", "local", "local_motion", "verdict")}}
+            if s["verdict"] == "visible":
+                problems.append(f"seam before {line['id']} at {entry['time']:.2f} s is visible (difference "
+                                f"{s['difference']} vs motion {s['motion']}, region {s['local']})")
+        seam_times.append(entry)
     result = {"source": source_id, "output": str(output), "duration": round(made["duration"], 3),
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": seams,
               "problems": problems, "keep": row["keep"],

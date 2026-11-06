@@ -17,10 +17,10 @@ class PromptTests(unittest.TestCase):
             text = prompts.compose(style, kind, row, extra="鱼不要变形")
             self.assertNotIn("{", text)
             self.assertIn("真实的冰块", text)
-            self.assertIn("游戏logo、底部警示语", text)
+            self.assertIn("游戏logo, 底部警示语", text)
             self.assertIn("雪地洁白", text)
             self.assertIn("鱼不要变形", text)
-        self.assertTrue(prompts.compose(style, "video", row).startswith("编辑视频"))
+        self.assertTrue(prompts.compose(style, "video", row).startswith("Edit the video"))
 
     def test_timed_removals_only_where_on_screen(self):
         items = ["游戏logo", {"what": "底部警示语", "start": 0, "end": 10}, {"what": "右上角水印", "start": 30}]
@@ -33,7 +33,7 @@ class PromptTests(unittest.TestCase):
         style = read(PROMPTS)["presets"]["realistic"]
         row = {"materials": ["积雪地面", {"what": "蓝色皮卡车", "start": 50, "end": 66}], "remove": []}
         self.assertNotIn("皮卡车", prompts.compose(style, "video", row, span=(0, 11)))
-        self.assertIn("积雪地面、蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
+        self.assertIn("积雪地面, 蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
         self.assertIn("积雪地面", prompts.compose(style, "video", {"materials": "积雪地面"}, span=(0, 1)))
 
     def test_no_removal_clause_when_empty(self):
@@ -52,6 +52,26 @@ class SizeTests(unittest.TestCase):
     def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")
         self.assertEqual(images.aspect_for(1080, 1920), "9:16")
+
+
+class SwitchTests(unittest.TestCase):
+    def moving(self, count=12, seed=1):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        base = np.kron(rng.uniform(40, 200, (10, 6, 3)), np.ones((6, 6, 1)))    # smooth: small motion per step
+        return np.stack([np.roll(base, i, axis=1) for i in range(count)]).astype(np.float32)
+
+    def test_matching_overlap_is_clean_and_switches_at_best_frame(self):
+        before = self.moving()
+        after = before.copy()
+        after[:4] += 40           # the later result differs at first, then matches
+        found = assemble.find_switch(before, after)
+        self.assertEqual(found["verdict"], "clean")
+        self.assertGreaterEqual(found["start"], 4)
+
+    def test_different_drawing_is_visible(self):
+        before, after = self.moving(seed=1), self.moving(seed=2)
+        self.assertEqual(assemble.find_switch(before, after)["verdict"], "visible")
 
 
 class TimelineTests(unittest.TestCase):
@@ -119,3 +139,20 @@ class ReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EarlierFrameTests(unittest.TestCase):
+    def test_picks_the_place_seen_again(self):
+        import numpy as np
+        from reskin import references
+        fps = 24.0
+        river, camp = np.full((8, 4, 3), 50.0), np.full((8, 4, 3), 200.0)
+        # 0-10 s river, 10-20 s camp; the later segment 20-40 s: camp, then river again at 34-40 s
+        times = np.arange(0, 40, .5)
+        pixels = np.stack([river if (t < 10 or t >= 34) else camp for t in times]).astype(np.float32)
+        frames = np.array([round(t * fps) for t in times])
+        row = {"segments": [{"id": "K01", "frames": [0, 480], "render_frames": [0, 480]},
+                            {"id": "K02", "frames": [480, 960], "render_frames": [468, 960]}]}
+        picked = references.earlier_moments(pixels, frames, row, row["segments"][1], fps)
+        self.assertTrue(picked)
+        self.assertLess(picked[0]["frame"] / fps, 10)          # the river, not the camp the start frame covers

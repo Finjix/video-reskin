@@ -11,6 +11,8 @@ STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
 RESOLUTION = "1080p"       # Seedance renders and deliveries: one size for every job (the user's choice, 2026-11-05)
+# Segments as long as Seedance takes (30 s): every seam inside a shot can show, and more seams showed more jumps
+# (GOF3D10232 in 5 segments of 15 s, 2026-11-06), so a shot is cut into as few pieces as fit (user rule).
 DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
             "remove_end_card": True, "review_rounds": 3}
 

@@ -34,6 +34,18 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(segments[0]["seam"], "start")
         self.assertTrue(all(s["seam"] == "continuous" for s in segments[1:]))
 
+    def test_fewest_even_pieces(self):
+        row = catalog_row(63.6, 60.0)
+        motion = [1.0] * row["info"]["frames"]
+        segments = plan.segment(row, [0, 59.3], 30.0, motion, [])
+        self.check(segments, 60.0, [0, 59.3], 30.0)
+        self.assertEqual(len(segments), 2)
+        segments = plan.segment(row, [0, 61.0], 30.0, motion, [])
+        self.check(segments, 60.0, [0, 61.0], 30.0)
+        self.assertEqual(len(segments), 3)
+        lengths = [s["end"] - s["start"] for s in segments]
+        self.assertLess(max(lengths) - min(lengths), 4.5)
+
     def test_cuts_become_seams(self):
         row = catalog_row(40.0, 30.0, cuts=(8.0, 19.0, 30.0))
         segments = plan.segment(row, [0, 40.0], 12.0, [], [])
@@ -91,3 +103,18 @@ class EditsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevealTests(unittest.TestCase):
+    def test_new_objects_in_later_segments(self):
+        fps = 60.0
+        row = {"fps": fps, "materials": ["ice", {"what": "cabin", "start": 8, "end": 59}, {"what": "pot", "start": 56.5, "end": 59},
+                                         {"what": "yellow crowd", "start": 57, "end": 59}, {"what": "truck", "start": 40, "end": 59, "at": 42}],
+               "segments": [{"id": "K01", "frames": [0, 1800]}, {"id": "K02", "frames": [1800, 3558]}]}
+        plan.mark_reveals(row)
+        self.assertEqual(row["segments"][0]["reveals"], [])
+        reveals = row["segments"][1]["reveals"]
+        self.assertEqual([r["what"] for r in reveals], [["truck"], ["pot", "yellow crowd"]])
+        self.assertAlmostEqual(reveals[0]["time"], 42.0)
+        self.assertAlmostEqual(reveals[1]["time"], 57.7)
+        self.assertEqual(reveals[1]["id"], "K02-N2")

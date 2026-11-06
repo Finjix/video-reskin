@@ -1,4 +1,6 @@
-"""Style keyframes: one anchor per source (the look), then the first frame of every segment restyled after it."""
+"""Style keyframes: one anchor per source (the look), then the first frame of every segment restyled after it (a
+segment that continues a shot starts from the previous result's frame and gets its keyframe as the material-detail
+reference, see render), and reveal frames of objects new in a later segment."""
 from __future__ import annotations
 
 import threading
@@ -51,6 +53,12 @@ def tasks(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None
             rows.append({"key": f"{source_id}:{seg['id']}", "source": source_id, "path": sources[source_id]["path"],
                          "fps": fps, "frame": seg["render_frames"][0], "kind": "segment", "row": row,
                          "selected": wanted(f"{source_id}:{seg['id']}")})
+        for seg in row["segments"]:
+            for reveal in seg.get("reveals") or []:   # objects new in a later segment, restyled after the anchor
+                rows.append({"key": f"{source_id}:{reveal['id']}", "source": source_id,
+                             "path": sources[source_id]["path"], "fps": fps, "frame": reveal["frame"],
+                             "kind": "reveal", "row": row,
+                             "selected": wanted(f"{source_id}:{reveal['id']}") or wanted(f"{source_id}:{seg['id']}")})
     for task in rows:
         task["redo"] = task["key"] in redo or task["source"] in redo
     return rows
@@ -85,7 +93,8 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
     if output.is_file() and known.get("digest") == digest(inputs) and not task["redo"]:
         return {"key": task["key"], "reused": True, "output": str(output), **known,
                 "prompt_changed": known.get("prompt") != prompt}
-    log(f"{task['key']}: restyling frame {task['frame']} ({'anchor' if task['kind'] == 'anchor' else 'segment start'})")
+    kind = {"anchor": "anchor", "segment": "segment start", "reveal": "new objects"}[task["kind"]]
+    log(f"{task['key']}: restyling frame {task['frame']} ({kind})")
     made = images.edit(references, prompt, output, width=row["width"], height=row["height"])
     with Image.open(output) as image:
         converted = image.convert("RGB") if image.format != "PNG" else None
@@ -108,7 +117,7 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
     with ThreadPoolExecutor(workers) as executor:
         results += list(executor.map(lambda t: _safe(job, t, style, lock), plain))
         results += list(executor.map(lambda t: _safe(job, t, style, lock), dependent))
-        segments = [t for t in rows if t["kind"] == "segment" and t["selected"]]
+        segments = [t for t in rows if t["kind"] in ("segment", "reveal") and t["selected"]]
         results += list(executor.map(lambda t: _safe(job, t, style, lock), segments))
     for source_id in plan["sources"]:
         sheet(job, source_id, plan["sources"][source_id])
@@ -125,13 +134,14 @@ def _safe(job, task, style, lock) -> dict:
 def sheet(job: Path, source_id: str, row: dict) -> Path | None:
     """Original | styled pairs (anchor first) for the agent to judge."""
     folder = job / "keyframes"
-    keys = ["anchor"] + [seg["id"] for seg in row["segments"]]
+    keys = (["anchor"] + [seg["id"] for seg in row["segments"]]
+            + [r["id"] for seg in row["segments"] for r in seg.get("reveals") or []])
     pairs = [(key, folder / f"{source_id}-{key}-src.png", folder / f"{source_id}-{key}.png") for key in keys]
     pairs = [p for p in pairs if p[1].is_file() and p[2].is_file()]
     if not pairs:
         return None
     portrait = row["height"] >= row["width"]
-    width = 240 if portrait else 400
+    width = 540 if portrait else 960
     height = round(width * row["height"] / row["width"])
     columns = 3 if portrait else 2
     label = font(18)
@@ -145,7 +155,7 @@ def sheet(job: Path, source_id: str, row: dict) -> Path | None:
             with Image.open(file) as image:
                 canvas.paste(image.convert("RGB").resize((width, height), Image.LANCZOS), (x + offset, y + 26))
         draw.text((x + 4, y + 3), f"{source_id} {key}: original | styled", fill="black", font=label)
-    out = job / "sheets" / f"{source_id}-keyframes.jpg"
+    out = job / "sheets" / f"{source_id}-keyframes.png"
     out.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(out, quality=88)
+    canvas.save(out, compress_level=1)      # lossless: the agent judges detail on it
     return out

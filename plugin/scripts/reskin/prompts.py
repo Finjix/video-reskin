@@ -32,13 +32,17 @@ def remove_clause(items: list[str]) -> str:
     return read(PROMPTS)["remove"].format(items=", ".join(items))
 
 
-def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None) -> str:
+def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
+            refs: str = "") -> str:
     """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
-    source time the text is for (a frame: start == end)."""
+    source time the text is for (a frame: start == end); `refs` says what the reference pictures after Image 1 are
+    (video only; placed at {refs}, or after the template when it has none)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = ", ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    text = style[kind].format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
-                              look=style.get("look", ""), extra=wishes)
+    base = style.get(kind) or read(PROMPTS)["presets"]["realistic"][kind]    # custom styles may lack "refresh"
+    template = base if "{refs}" in base or not refs else base + " {refs}"
+    text = template.format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
+                           look=style.get("look", ""), extra=wishes, refs=refs)
     return " ".join(text.split())
 
 

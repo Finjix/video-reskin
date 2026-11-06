@@ -2,6 +2,13 @@
 
 Every segment's inputs (frames, keyframes, prompt, attempt) are hashed; a re-run reuses finished segments, resumes
 generations still running on Lumos, and renders only what changed or was sent back with `redo`.
+
+The segments of one source render one after another and each takes its look from the results before it: a segment
+that continues a shot (seam "continuous") gets the previous result's frame at its first moment as Image 1 instead of
+a separately restyled keyframe, so both draw the overlap alike; every later segment also gets the earlier results'
+frames of the places it shows again, and GPT Image reveal frames of objects no earlier segment shows
+(references.py). Only pictures are chained: a lead of the earlier result in the clip itself made Seedance keep the
+source's look in the rest (archive branch, 2026-11-05). A redone segment therefore re-renders the segments after it.
 """
 from __future__ import annotations
 
@@ -43,26 +50,132 @@ def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: in
     return output
 
 
+def previous(plan_row: dict, seg: dict) -> dict | None:
+    """The segment a continuing segment is chained to (None at a shot start or a cut)."""
+    if seg["seam"] != "continuous":
+        return None
+    ids = [s["id"] for s in plan_row["segments"]]
+    return plan_row["segments"][ids.index(seg["id"]) - 1]
+
+
+def refreshed(job: Path, style: dict, plan_row: dict, key: str, chained: Path, look: Path, output: Path,
+              moment: float) -> Path:
+    """The previous result's frame at a continuing segment's start, redrawn by GPT Image with the surface detail of
+    the segment's own keyframe and nothing else changed. Seedance smooths texture and falls back to the game's flat
+    snow the further a clip moves from its first picture; starting each segment from the earlier result's frame
+    with its detail restored keeps the seam and renews the detail (GOF3D10232, 2026-11-06)."""
+    from reskin import images
+    from reskin.common import digest
+    stamp = output.with_suffix(".json")
+    prompt = compose(style, "refresh", plan_row, span=(moment, moment))
+    want = digest({"chained": sha(chained), "look": sha(look)})
+    if output.is_file() and stamp.is_file() and read(stamp).get("digest") == want:
+        return output
+    log(f"{key}: redrawing the previous result's frame with the keyframe's surface detail (GPT Image)")
+    made = images.edit([chained, look], prompt, output, width=plan_row["width"], height=plan_row["height"])
+    write(stamp, {"digest": want, "prompt": prompt, **made})
+    return output
+
+
+def references(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> list[dict]:
+    """The segment's reference pictures in order (Image 1, 2, ...): its start (the previous result's frame there when
+    it continues a shot, else its keyframe), the reveal frames of objects new in it, then the earlier results' frames
+    of the places it shows again (references.py). Each: {"path", "role", ...}."""
+    from reskin import references as REFS
+    key = f"{source_id}:{seg['id']}"
+    ids = [s["id"] for s in plan_row["segments"]]
+    earlier = plan_row["segments"][: ids.index(seg["id"])]
+    for other in earlier:
+        record_path = state_path(job, f"{source_id}:{other['id']}")
+        record = read(record_path) if record_path.is_file() else {}
+        if record.get("status") != "done" or not (job / "ai" / f"{source_id}-{other['id']}.mp4").is_file():
+            raise ValueError(f"{key}: follows {source_id}:{other['id']}, which is not rendered yet")
+    folder = job / "keyframes"
+    stem = f"{source_id}-{seg['id']}"
+    prev = previous(plan_row, seg)
+    if prev is not None:
+        chained = REFS.result_frame(job, plan_row, source_id, seg["render_frames"][0], folder / f"{stem}-chain.png", prev)
+        look = folder / f"{stem}.png"
+        if not look.is_file():
+            raise ValueError(f"{key}: keyframe {look.name} is missing; run keyframes first")
+        start = refreshed(job, style, plan_row, key, chained, look, folder / f"{stem}-start.png",
+                          seg["render_frames"][0] / plan_row["fps"])
+        pictures = [{"path": start, "role": "start",
+                     "after": read(state_path(job, f"{source_id}:{prev['id']}"))["generation_id"]},
+                    {"path": look, "role": "look"}]
+    else:
+        keyframe = folder / f"{stem}.png"
+        if not keyframe.is_file():
+            raise ValueError(f"{key}: keyframe {keyframe.name} is missing; run keyframes first")
+        pictures = [{"path": keyframe, "role": "keyframe"}]
+    for reveal in seg.get("reveals") or []:
+        path = folder / f"{source_id}-{reveal['id']}.png"
+        if not path.is_file():
+            raise ValueError(f"{key}: reveal frame {path.name} is missing; run keyframes first")
+        pictures.append({"path": path, "role": "reveal", "what": reveal["what"], "time": reveal["time"]})
+    room = REFS.MAX_PICTURES - len(pictures)
+    if earlier and room > 0:
+        source = Path(next(r for r in state["sources"] if r["id"] == source_id)["path"])
+        pixels, frames = REFS.thumbnails(job, source_id, source, plan_row["width"], plan_row["height"], plan_row["fps"])
+        for number, moment in enumerate(REFS.earlier_moments(pixels, frames, plan_row, seg, plan_row["fps"],
+                                                             min(room, REFS.EARLIER)), 1):
+            path = REFS.result_frame(job, plan_row, source_id, moment["frame"], folder / f"{stem}-ref{number}.png")
+            pictures.append({"path": path, "role": "earlier", "time": round(moment["frame"] / plan_row["fps"], 3),
+                             "for": round(moment["for"] / plan_row["fps"], 3), "gain": moment["gain"]})
+    return pictures
+
+
+def references_clause(pictures: list[dict], clip_start: float) -> str:
+    """What each reference picture after Image 1 is for, in the video prompt."""
+    parts = []
+    for number, picture in enumerate(pictures, 1):
+        if picture["role"] == "start" and number == 1 and picture.get("after"):
+            parts.append("Image 1 is this video's previous part at the clip's first moment, with its surface detail "
+                         "restored: continue exactly from it.")
+        if picture["role"] == "look":
+            parts.append(f"Image {number} is the same first moment converted as a still: it sets the material detail "
+                         "for the whole clip. Match its surfaces exactly and keep them that detailed to the last frame: "
+                         "snow with crisp visible grain, sparkle and an uneven packed surface, ground with clear soil "
+                         "texture, wood with visible grain, fabric with weave; never let surfaces turn smooth, soft or "
+                         "flat. Take only the surface detail from it: colours, brightness and every object's look follow Image 1, "
+                         "which stays the exact starting picture.")
+    reveals = [(n, p) for n, p in enumerate(pictures, 1) if p["role"] == "reveal"]
+    earlier = [n for n, p in enumerate(pictures, 1) if p["role"] == "earlier"]
+    for number, picture in reveals:
+        parts.append(f"Image {number} is this video at {max(0.0, picture['time'] - clip_start):.1f} s of the clip, "
+                     f"converted ahead, showing {', '.join(picture['what'])} in realistic materials: when they come "
+                     f"into view, render them exactly as Image {number} shows them.")
+    if earlier:
+        names = (f"Image {earlier[0]}" if len(earlier) == 1 else
+                 "Images " + ", ".join(str(n) for n in earlier[:-1]) + f" and {earlier[-1]}")
+        parts.append(f"{names} {'is a frame' if len(earlier) == 1 else 'are frames'} of this same video converted "
+                     "earlier: wherever the same places, objects and characters appear in this clip (ground, water, "
+                     "trees, buildings, props, people), render them exactly as there, with the same realistic "
+                     "materials, textures, lighting and level of realism; never fall back to the game's cartoon look.")
+    if parts:
+        parts.append("All reference images are for look only: the composition, camera, motion and content come from "
+                     "the input video; do not add anything from them that the input video does not show.")
+    return " ".join(parts)
+
+
 def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     key = f"{source_id}:{seg['id']}"
     redo = redo_log(job).get(key, {})
-    # Only the segment's own keyframe goes along: it already carries the anchor's look, and Seedance copies objects
-    # from any reference picture into the video (an anchor from elsewhere in the ad leaks its objects).
-    keyframe = job / "keyframes" / f"{source_id}-{seg['id']}.png"
-    if not keyframe.is_file():
-        raise ValueError(f"{key}: keyframe {keyframe.name} is missing; run keyframes first")
+    pictures = references(job, state, plan_row, source_id, seg, style)
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
-    prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span)
+    prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span,
+                     refs=references_clause(pictures, span[0]))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],
-            "keyframe": sha(keyframe), "prompt": prompt, "model": lumos.VIDEO_MODEL,
-            "resolution": state["options"]["resolution"], "attempt": redo.get("attempt", 1)}
+            "pictures": [sha(p["path"]) for p in pictures], "after": pictures[0].get("after"),
+            "references": [{**p, "path": str(p["path"])} for p in pictures], "prompt": prompt,
+            "model": lumos.VIDEO_MODEL, "resolution": state["options"]["resolution"], "attempt": redo.get("attempt", 1)}
 
 
 def core(inputs: dict) -> str:
     """What makes a finished segment current: its pictures, frames, model and attempt. A prompt change alone applies
     to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly)."""
-    return digest({k: v for k, v in inputs.items() if k != "prompt"})
+    return digest({k: v for k, v in inputs.items() if k not in ("prompt", "references")})
 
 
 def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> dict:
@@ -80,7 +193,7 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     if not resume:
         cut_clip(source, seg["render_frames"], plan_row["fps"], plan_row["width"], plan_row["height"], clip)
         video = lumos.upload(clip, "video-to-video")
-        pictures = [lumos.upload(job / "keyframes" / f"{source_id}-{seg['id']}.png", "video-to-video")]
+        pictures = [lumos.upload(Path(p["path"]), "video-to-video") for p in inputs["references"]]
         started = time.monotonic()
         while True:
             try:
@@ -92,6 +205,7 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
                 log(f"{key}: submission refused ({error}); retrying in 60 s")
                 time.sleep(60)
         record = {"digest": want, "generation_id": submitted["generation_id"], "status": "submitted",
+                  "references": inputs["references"],
                   "attempt": inputs["attempt"], "prompt": inputs["prompt"], "submitted_at": time.strftime("%H:%M:%S")}
         write(record_path, record)
         log(f"{key}: submitted {submitted['generation_id']} ({seg['seconds']:.1f} s)")
@@ -128,7 +242,16 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
 def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None = None, workers: int = 4) -> list[dict]:
     todo = [(sid, row, seg) for sid, row in plan["sources"].items() for seg in row["segments"]
             if not only or sid in only or f"{sid}:{seg['id']}" in only]
-    log(f"rendering {len(todo)} segments, {workers} at a time (each takes a few minutes on Lumos)")
+    # The segments of one source follow each other (each takes pictures from the results before it), so a change
+    # upstream reaches them too; sources run side by side.
+    chains: list[list] = []
+    for item in todo:
+        if chains and chains[-1][-1][0] == item[0]:
+            chains[-1].append(item)
+        else:
+            chains.append([item])
+    log(f"rendering {len(todo)} segments of {len(chains)} sources, {workers} sources at a time (segments of one "
+        "source follow each other; each takes a few minutes on Lumos)")
     done = threading.Event()
 
     def heartbeat(started=time.monotonic()):
@@ -152,9 +275,17 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                 return {"key": f"{sid}:{seg['id']}", "error": str(error)}
             except Exception as error:     # the summary lists every failed segment; the rest continue
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
+    def chain(items):
+        results = []
+        for item in items:
+            if results and results[-1].get("error"):
+                results.append({"key": f"{item[0]}:{item[2]['id']}", "error": f"waits for {results[-1]['key']}"})
+                continue
+            results.append(one(item))
+        return results
     try:
         with ThreadPoolExecutor(max(1, workers)) as executor:
-            return list(executor.map(one, todo))
+            return [r for rows in executor.map(chain, chains) for r in rows]
     finally:
         done.set()
 
