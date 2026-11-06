@@ -66,6 +66,31 @@ class SheetsTests(unittest.TestCase):
         self.assertEqual(second["late_materials"], ["a red crane"])
         self.assertEqual(row["subject_times"]["hero"], [[0.0, 60.0]])
 
+    def test_an_item_touching_a_segment_end_is_not_in_it(self):
+        # GOF3D10374: shot 2 starts at 10.33 s, K01 ends at frame 310 (10.333 s); its prompt named shot 2's road,
+        # yard and truck, and its render got the hero and truck sheets
+        items = [{"what": "a road", "start": 10.33, "end": 61.0}, {"what": "logs", "start": 0, "end": 10.33}]
+        self.assertEqual(prompts.on_screen(items, (0.0, 10.333)), ["logs"])
+        self.assertEqual(prompts.on_screen(items, (10.333, 33.8)), ["a road"])
+        self.assertEqual(prompts.on_screen(items, (10.33, 10.33)), ["a road", "logs"])     # a moment: both hold
+        row = {"keep": [0, 61], "subjects": [dict(HERO, on=[[10.33, 61.0]])]}
+        self.assertEqual(prompts.subjects_in(row, (0.0, 10.333)), [])
+
+    def test_counter_values_on_the_clip_clock(self):
+        item = {"what": "the cash counter at the top left", "values": [[0, "400"], [5, "200"], [26.3, "200"],
+                                                                       [27.8, "0"], [41, "500"]]}
+        row = {"keep": [0, 61], "ui": [item]}
+        # K02 renders 10.33-33.83 s of the source; its clip starts there (no opening)
+        text = prompts.ui_clause(row, "video", (10.33, 33.83), clock=0.0)
+        self.assertIn('its digits read exactly "200" at 0.0 s of this clip', text)
+        self.assertIn('"0" from 17.5 s', text)
+        self.assertNotIn('"500"', text)
+        # a chained clip: its own frames begin 0.5 s into the clip (the shot's opening first)
+        self.assertIn('"0" from 6.3 s', prompts.ui_clause(row, "video", (22.0, 30.0), clock=.5))
+        self.assertIn('its digits read exactly "500"', prompts.ui_clause(row, "keyframe", (46, 46)))
+        self.assertTrue(plan.values_problem([[5, "1"], [2, "2"]]))
+        self.assertFalse(plan.values_problem([[0, "400"], [4.5, "300"]]))
+
     def test_plan_report_lists_them(self):
         row = dict(self.row(), anchor=10.0, style_from=None, remove=[], extra="", live=[])
         text = plan.markdown({"sources": {"S01": row}}, {"sources": [{"id": "S01", "name": "ad"}]})
@@ -88,6 +113,22 @@ class SheetsTests(unittest.TestCase):
         old = {"attempt": 1, "keyframe": "k", "subjects": ["a"]}
         self.assertEqual(render.cause_of({"digest": "x", "inputs": old}, {**old, "subjects": ["b"], "prompt": ""}, {}),
                          "subjects")
+
+
+class SaturationTests(unittest.TestCase):
+    def test_a_later_part_meets_the_saturation_before_it(self):
+        import numpy as np
+        from reskin import assemble
+        vivid = np.tile(np.array([200.0, 80.0, 40.0]), (4, 6, 6, 1))
+        dull = vivid * .6 + vivid.mean(axis=-1, keepdims=True) * .4          # the same colours, less saturated
+        lines = [{"id": "K01", "seam": "start"}, {"id": "K02", "seam": "continuous"}]
+        same = (np.ones(3), np.zeros(3))
+        factors = assemble.match_saturation({1: (vivid, dull)}, [same, same], lines)
+        self.assertEqual(factors[0], 1.0)
+        self.assertGreater(factors[1], 1.1)
+        self.assertLessEqual(factors[1], assemble.SATURATION_LIMITS[1])
+        lines[1]["seam"] = "cut"         # another shot may change its look: nothing to match
+        self.assertEqual(assemble.match_saturation({}, [same, same], lines), [1.0, 1.0])
 
 
 class LintTests(unittest.TestCase):

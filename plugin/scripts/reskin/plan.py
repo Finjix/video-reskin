@@ -78,15 +78,27 @@ def ui_problem(items) -> str | None:
         return "ui must be a list"
     for item in items:
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end", "box", "dynamic"}
-                and isinstance(item.get("dynamic", False), bool)
+                and set(item) <= {"what", "start", "end", "box", "dynamic", "values"}
+                and isinstance(item.get("dynamic", False), bool) and not values_problem(item.get("values"))
                 and ("box" not in item or not box_problem(item["box"]))
                 and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return (f"ui item {item!r} must be {{\"what\": text, \"start\": seconds, \"end\": seconds, "
-                "\"box\": [x0, y0, x1, y1] (optional), \"dynamic\": true or false (optional)}")
+                "\"box\": [x0, y0, x1, y1] (optional), \"dynamic\": true or false (optional), \"values\": "
+                "[[seconds, \"digits\"], ...] (optional, in time order)}")
     return None
+
+
+def values_problem(values) -> bool:
+    """`values` of a `ui` item: [[seconds, "digits"], ...] in time order (the digits it shows from each second on)."""
+    if values is None:
+        return False
+    if not isinstance(values, list) or not values or not all(
+            isinstance(v, list) and len(v) == 2 and isinstance(v[0], (int, float)) and isinstance(v[1], str) and v[1]
+            for v in values):
+        return True
+    return any(b[0] < a[0] for a, b in zip(values, values[1:]))
 
 
 def live_problem(items, duration: float) -> str | None:
@@ -509,7 +521,7 @@ def mark_subjects(row: dict) -> None:
     of appearance), those not on screen at its reference frame that come into view later (`new_subjects`: where a
     sheet matters most), the subjects of its keyframe (`keyframe_subjects`, first segments of a shot) and timed
     materials that come into view after the reference frame (`late_materials`: candidates for a subject)."""
-    from reskin.prompts import subject_spans, subjects_in
+    from reskin.prompts import TOUCH, subject_spans, subjects_in
     for seg in row["segments"]:
         for key in ("subjects", "new_subjects", "late_materials", "keyframe_subjects"):
             seg.pop(key, None)
@@ -527,7 +539,7 @@ def mark_subjects(row: dict) -> None:
             seg["keyframe_subjects"] = at_reference[:SUBJECT_SHEETS]
         materials = row.get("materials")
         late = [item["what"] for item in ([] if isinstance(materials, str) else materials or [])
-                if isinstance(item, dict) and span[0] + SUBJECT_LATE < float(item.get("start", 0)) < span[1]
+                if isinstance(item, dict) and span[0] + SUBJECT_LATE < float(item.get("start", 0)) < span[1] - TOUCH
                 and float(item.get("start", 0)) > moment + SUBJECT_LATE]
         if late:
             seg["late_materials"] = late

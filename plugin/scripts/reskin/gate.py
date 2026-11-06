@@ -193,6 +193,8 @@ def check(job: Path, state: dict, row: dict, source_id: str, index: int) -> dict
             compare, layout = review.side_by_side(source["path"], start, end, str(clip), size, here / "vs-original.mp4")
             known_notes = review.accepted_notes(job, source_id)
             text = review.segment_prompt(state, row, layout, known=known_notes)
+            text += (f"\nThis clip starts at {start:.2f} s of the whole video: second t of the clip is second "
+                     f"{start:.2f} + t of the video (the times listed above count in seconds of the whole video).")
             if body > .05:
                 text += (f"\nThe first {body:.1f} s of this clip repeat the end of the previous segment (this one "
                          "continues from them); judge them like the rest.")

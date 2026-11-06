@@ -36,7 +36,7 @@ subject sheet `S01:<subject id>`; a seam is named by the segment after it (`S01:
  "output_root": "<optional folder; default: the user's Desktop>",
  "delivery_dir": "<optional: the exact folder the user named for the videos, instead of output_root>",
  "style": "realistic",
- "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 0}}
+ "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 0, "name_suffix": "_写实版"}}
 ```
 
 - `delivery_dir`: when the user names the folder the videos go to (`成片放 D:\成片`), the deliveries go exactly
@@ -50,7 +50,7 @@ subject sheet `S01:<subject id>`; a seam is named by the segment after it (`S01:
 - Resolution is fixed: Seedance renders 1080p and the deliveries are 1080 on the short side (`options.resolution`
   accepts only `1080p`). `fps`: output frame rate, 12-30 (default 24, the rate Seedance renders at; never above the
   source). `max_segment_seconds`: 4-30 (default 30; fewer, longer segments mean fewer seams). `review_rounds`:
-  default 0, no limit: review and redo until no visible flaw is left; a positive number caps the rounds. `chain_prefix`: default true (see Plan); false sends chained segments only the previous result's frame.
+  default 0, no limit: review and redo until no visible flaw is left; a positive number caps the rounds. `chain_prefix`: default true (see Plan); false sends chained segments only the previous result's frame. `name_suffix`: what follows the source name in a delivery's file name (default `"_" + the style's label`, `_写实`; e.g. `"_写实版"`).
 
 ## Catalog (`analyze`)
 
@@ -129,8 +129,10 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
     size (`one line of small grey text "健康游戏忠告：…" along the bottom edge`). The prompts add that the interface
     is a flat 2D layer, sharp, untextured, copied character by character, one copy each, and (for Seedance) stable
     from frame to frame.
-  - Changing numbers: say how they change and when (`counts up from "12,580" at 0 s to "15,200" at 3 s`); a counter
-    that changes often gets one timed item per stretch, and `split_at` where it jumps keeps each segment's values few.
+  - Changing numbers: `"values": [[seconds, "digits"], ...]` (in time order; the digits it settles on and from when,
+    read off the original's frames). Each keyframe and preview is told the digits at its moment, each Seedance clip
+    its digits at its start and every change, in seconds of that clip (a chained clip's opening counted). Never put
+    times into `what`: a clip has its own clock, not the whole video's.
   - A logo that moves to another corner is one timed item per corner; time the switch to the frame.
   - Only screen-fixed, flat elements. UI standing in the scene (floor price tags, bubbles over characters, signs in
     perspective) is part of the scene: the models keep it with the rest of the picture.
@@ -202,7 +204,7 @@ rest of its chain again. Edit the edits file, not the plan.
 
 ## Outputs
 
-- Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, 24 fps, H.264, AAC, the source audio
+- Delivery folder: `<source name>_写实.mp4` per source (`<source name><name_suffix>.mp4` when the work order sets it) (1080 on the short side, 24 fps, H.264, AAC, the source audio
   of the kept range); `<source name>_写实_对比.mp4` after `compare`.
 - `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.jpg`.
 - `temp/keyframes/<id>-subject-<subject id>.png` (the reference sheet) and `-src<n>.png` (its crops of the original);
@@ -225,7 +227,9 @@ rest of its chain again. Edit the edits file, not the plan.
   - `wipes`: per wiped logo corner the `share` of fine detail inside the wiped letters against the scene around
     them and the `verdict` (clean, soft below 0.6, smeared below 0.4, plain when the scene is too plain to tell),
     with the moments it was smeared.
-  - colour corrections, segment times in the delivered video.
+  - colour corrections (gain and offset per channel, then a `saturation` factor per later part of a shot: a
+    per-channel match leaves a pure saturation step, GOF3D10374 at 33.83 s z 16 before, 2.3 after), segment times in the
+    delivered video.
 - `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description, and the
   seam cards; `temp/review/issues/<id>-r<n>-p<k>.jpg`: the stills of every issue (upper row original, lower row restyled).

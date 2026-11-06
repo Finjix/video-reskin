@@ -448,20 +448,29 @@ def cmd_accept(args) -> int:
 
 def pending_checks(job: Path, plan: dict) -> list[dict]:
     """Every check waiting for the agent: segment checks of current renders and seam checks of current deliveries."""
-    from reskin import gate as GATE, review as REVIEW
+    from reskin import gate as GATE, render as RENDER, review as REVIEW
     found = []
+    redos = RENDER.redo_log(job)
     for source_id, row in plan["sources"].items():
+        stale = False           # a segment is sent back or rendering again: its cards and the seams are not current
         for seg in row["segments"]:
             if seg.get("live"):
                 continue
             key = f"{source_id}:{seg['id']}"
+            path = RENDER.state_path(job, key)
+            record = read(path) if path.is_file() else {}
+            if record.get("status") != "done" or redos.get(key, {}).get("attempt", 1) > record.get("attempt", 1):
+                stale = True
+                continue
             verdict = GATE.stored(job, key)
             if GATE.pending(verdict):
                 found.append({"kind": "segment", "key": key, "held": bool(verdict.get("held")),
                               "card": verdict.get("card"), "reasons": verdict.get("reasons") or []})
-        record_path = job / "state/assembled" / f"{source_id}.json"
         report = REVIEW.last_round(job, source_id)
-        if report and record_path.is_file() and read(record_path).get("inputs") == report.get("assembled"):
+        # the seam cards belong to one delivery: only while it is still made of the current renders
+        from reskin import assemble as ASSEMBLE
+        assembled = None if stale or not report else ASSEMBLE.current(job, JOB.load(job), source_id, row)
+        if assembled and assembled.get("inputs") == report.get("assembled"):
             for entry in REVIEW.pending_seams(job, source_id, report):
                 found.append({"kind": "seam", "key": f"{source_id}:{entry['segment']}", "held": entry["flagged"],
                               "card": entry["card"], "reasons": []})
@@ -499,6 +508,14 @@ def cmd_checks(args) -> int:
                              if items else "nothing to check" + ("; checks --wait again to wait for the next card"
                                                                  if running else "")))
     show(lines)
+    return 0
+
+
+def cmd_relink(args) -> int:
+    """A source file moved (same content, new place): point the job at it."""
+    job = args.job_dir.resolve()
+    value = JOB.relink(job, args.source, args.path)
+    show([f"{value['source']}: {value['old']} -> {value['new']} (same SHA-256)", "next: run again"])
     return 0
 
 
@@ -585,7 +602,10 @@ def cmd_run(args) -> int:
     with job_lock(job, "render"):
         results = RENDER.run_all(job, state, plan, style, only, workers=args.workers, gate=not args.no_gate,
                                  on_source_done=done, hold=set(waits), wait_checks=args.wait_checks)
-    pool.shutdown(wait=True)
+        # `checks --wait` must keep waiting while sources are still assembled and reviewed (their seam cards)
+        RENDER.run_status(job, running=True, awaiting=[], phase="assembling and reviewing")
+        pool.shutdown(wait=True)
+        RENDER.run_status(job, running=False, awaiting=[])
     lines, failed = render_lines(job, results)
     lines = wait_lines(waits) + lines[:-1]
     for source_id in plan["sources"]:
@@ -752,6 +772,9 @@ def main() -> None:
     checks.add_argument("--wait", action="store_true",
                         help="block until a card waits or the running render ends (instead of polling)")
     checks.add_argument("--timeout", type=float, default=30, help="minutes --wait waits at most")
+    relink = command("relink", cmd_relink, help="a source file moved: point the job at the same file in its new place")
+    relink.add_argument("--source", required=True, help="the source ID, e.g. S01")
+    relink.add_argument("--path", type=Path, required=True, help="the file's new path (its SHA-256 must match)")
     cost = command("cost", cmd_cost, help="what was sent to Seedance, GPT Image and Gemini, and why")
     cost.add_argument("--json", action="store_true")
     command("status", cmd_status, help="progress per source and the next step")

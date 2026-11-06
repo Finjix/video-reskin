@@ -193,6 +193,9 @@ def ui_listing(items) -> str:
     parts = []
     for item in items or []:
         text = describe([item])
+        if isinstance(item, dict) and item.get("values"):
+            text += " (its digits: " + ", ".join(f'"{v}" from {t:g} s' for t, v in item["values"]) + \
+                    ", seconds of the whole video)"
         parts.append(text + (" [animated]" if isinstance(item, dict) and item.get("dynamic") else " [static]"))
     return "; ".join(parts)
 

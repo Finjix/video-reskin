@@ -12,7 +12,8 @@ SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
 RESOLUTION = "1080p"       # Seedance renders and deliveries: one size for every job (the user's choice, 2026-11-05)
 DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
-            "review_rounds": 0, "chain_prefix": True}
+            "review_rounds": 0, "chain_prefix": True, "name_suffix": None}
+# name_suffix: what follows the source name in a delivery's file name (default "_" + the style's label: "_写实")
 # review_rounds 0: review and redo until no visible flaw is left (the user's rule of 2026-11-05); a positive number caps the rounds
 
 
@@ -55,6 +56,9 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
         raise ValueError("options.review_rounds must be a whole number: 0 (default) reviews until no visible flaw is left, N caps the rounds")
     if not isinstance(options["chain_prefix"], bool):
         raise ValueError("options.chain_prefix must be true or false")
+    suffix = options["name_suffix"]
+    if suffix is not None and (not isinstance(suffix, str) or not suffix.strip() or any(c in suffix for c in r'\/:*?"<>|')):
+        raise ValueError('options.name_suffix must be text that can end a file name (e.g. "_写实版")')
     if not 4 <= float(options["max_segment_seconds"]) <= 30:
         raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 4-30 s clips)")
     if job_dir:
@@ -94,8 +98,30 @@ def load(job: Path) -> dict:
     for row in state["sources"]:
         source = Path(row["path"])
         if not source.is_file() or source.stat().st_size != row["size"]:
-            raise FileNotFoundError(f"source {row['id']} moved or changed: {source}; init a new job")
+            raise FileNotFoundError(f"source {row['id']} moved or changed: {source}; if the same file now lies elsewhere, "
+                                    f"relink --source {row['id']} --path <its new path> (checked by its SHA-256), else "
+                                    "init a new job")
     return state
+
+
+def relink(job: Path, source_id: str, new_path: Path) -> dict:
+    """Point a source at the same file in a new place (moved or renamed folder): accepted only when the file's SHA-256
+    is the one recorded at init, so nothing rendered from it goes stale."""
+    path = Path(job) / STATE
+    state = read(path)
+    row = next((r for r in state["sources"] if r["id"] == source_id), None)
+    if row is None:
+        raise ValueError(f"no source {source_id} in this job")
+    new_path = Path(new_path).expanduser().resolve()
+    if not new_path.is_file():
+        raise FileNotFoundError(f"{new_path} is not a file")
+    if new_path.stat().st_size != row["size"] or sha(new_path) != row["sha256"]:
+        raise ValueError(f"{new_path} is not the same file as {source_id} was ({row['path']}): its content differs; "
+                         "init a new job for it")
+    old = row["path"]
+    row["path"] = str(new_path)
+    write(path, state)
+    return {"source": source_id, "old": old, "new": str(new_path)}
 
 
 def style(state: dict) -> dict:

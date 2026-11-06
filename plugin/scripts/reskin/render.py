@@ -342,9 +342,10 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     for subject, _ in sheets:
         # seconds into the clip Seedance gets (a chained clip starts with the shot's opening)
         moment = head + firsts.get(subject["id"], span[0]) - span[0]
-        named.append((subject["what"], "on screen from the start" if moment <= SUBJECT_LATE else
+        named.append((subject["what"], "on screen from the start" if moment <= head + SUBJECT_LATE else
                       f"comes into view at about {moment:.1f} s"))
-    prompt = compose(style, "video", plan_row, extra=extra, span=span, subjects=subjects_clause("video", named, first=2))
+    prompt = compose(style, "video", plan_row, extra=extra, span=span, subjects=subjects_clause("video", named, first=2),
+                     clock=head)
     clean = clean_boxes(plan_row, *span, logos=logo_masks(job, state, plan_row, source_id))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference, **lead,
             **({"clean": clean} if clean else {}), **({"subjects": [sha(p) for _, p in sheets]} if sheets else {}),
@@ -611,6 +612,7 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
         except Exception as error:
             log(f"{sid}: follow-up after rendering failed: {type(error).__name__}: {error}")
 
+    run_status(job, running=True, awaiting=[])      # before anything else: `checks --wait` must see the render
     try:
         with ThreadPoolExecutor(max(1, workers)) as executor:
             futures = {executor.submit(chain, group): index for index, group in enumerate(groups)}

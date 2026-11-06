@@ -13,12 +13,24 @@ def on_screen(items, span: tuple[float, float] | None) -> list[str]:
     return list(dict.fromkeys(item if isinstance(item, str) else item["what"] for item in timed(items, span)))
 
 
+TOUCH = .1      # seconds: a stretch must share more than this with an item for the item to count as on screen in it
+
+
+def overlaps(a: float, b: float, span: tuple[float, float]) -> bool:
+    """[a, b] is on screen during `span`: for a moment (start == end) when it holds there, for a stretch when they
+    share more than TOUCH (an item from 10.33 s does not belong to a segment ending at 10.333 s: naming it there gets
+    it drawn into the shot before)."""
+    if span[1] - span[0] <= 1e-6:
+        return a <= span[0] <= b
+    return min(b, span[1]) - max(a, span[0]) > TOUCH
+
+
 def timed(items, span: tuple[float, float] | None) -> list:
     """The items (texts or dicts) on screen during `span` (all of them without a span)."""
     if isinstance(items, str):
         items = [items]
     return [item for item in items or [] if isinstance(item, str) or span is None
-            or (item.get("start", 0) <= span[1] and span[0] <= item.get("end", float("inf")))]
+            or overlaps(float(item.get("start", 0)), float(item.get("end", float("inf"))), span)]
 
 
 removals = on_screen
@@ -57,12 +69,15 @@ def remove_clause(items: list[str]) -> str:
     return read(PROMPTS)["remove"].format(items=listing(items)) + " " if items else ""
 
 
-def ui_clause(row: dict, kind: str, span: tuple[float, float] | None) -> str:
+def ui_clause(row: dict, kind: str, span: tuple[float, float] | None, clock: float = 0.0) -> str:
     """The screen-fixed interface the models draw exactly as in the original (`ui`), each element named with its
-    position, quoted text and colours; for Seedance also that it stays stable and follows the original's numbers.
-    Only the elements on screen during `span`: one named where it is not shown gets drawn there."""
+    position, quoted text and colours (and its `values` on the prompt's clock); for Seedance also that it stays
+    stable and follows the original's numbers. Only the elements on screen during `span`: one named where it is not
+    shown gets drawn there."""
     texts = read(PROMPTS)
-    shown = on_screen(row.get("ui"), span)
+    shown = list(dict.fromkeys(
+        (item if isinstance(item, str) else item["what"].rstrip(". ") + values_text(item, kind, span, clock))
+        for item in timed(row.get("ui"), span)))
     parts = [texts["ui"].format(items="; ".join(shown))] if shown else []
     if kind == "video":
         parts.append(texts["ui_video"])
@@ -87,7 +102,7 @@ def subjects_in(row: dict, span: tuple[float, float]) -> list[tuple[dict, float]
     appearance. A moment (start == end) takes the subjects on screen at that moment."""
     found = []
     for subject in row.get("subjects") or []:
-        starts = [max(a, span[0]) for a, b in subject_spans(subject, row["keep"]) if a <= span[1] and span[0] <= b]
+        starts = [max(a, span[0]) for a, b in subject_spans(subject, row["keep"]) if overlaps(a, b, span)]
         if starts:
             found.append((subject, min(starts)))
     return sorted(found, key=lambda item: item[1])
@@ -104,12 +119,41 @@ def subjects_clause(kind: str, named: list[tuple[str, str]], first: int) -> str:
     return template.format(first=first, last=first + len(named) - 1, items=items)
 
 
+def value_at(values: list, t: float) -> str:
+    """The digits a `ui` item with `values` ([[seconds, text], ...], ascending) shows at source second `t`."""
+    shown = values[0][1]
+    for moment, text in values:
+        if moment <= t + 1e-6:
+            shown = text
+    return shown
+
+
+def values_text(item: dict, kind: str, span: tuple[float, float] | None, clock: float) -> str:
+    """A `ui` item's `values` for one prompt, on that prompt's own clock: a picture gets the digits at its moment; a
+    video clip the digits at its start and every change inside it, in seconds into the clip (`clock`: the clip second
+    of span[0]; a chained clip opens with the shot's first frames). Times in `what` would name seconds of the whole
+    video, which no clip has (GOF3D10374: the cash counter read 280 for 200)."""
+    values = item.get("values") or []
+    if not values or span is None:
+        return ""
+    first = value_at(values, span[0])
+    if kind != "video" or span[1] - span[0] <= 1e-6:
+        return f'; its digits read exactly "{first}"'
+    changes = [(t, text) for t, text in values if span[0] + 1e-6 < t < span[1]]
+    text = f'; its digits read exactly "{first}" at {clock:.1f} s of this clip'
+    if changes:
+        text += ", then " + ", ".join(f'"{v}" from {clock + t - span[0]:.1f} s' for t, v in changes)
+        text += " (between two values the digits count quickly from one to the next)"
+    return text
+
+
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
-            style_ref: bool = False, subjects: str = "") -> str:
+            style_ref: bool = False, subjects: str = "", clock: float = 0.0) -> str:
     """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
     source time the text is for (a frame: start == end). `style_ref`: the anchor gets a texture reference picture as
     its second image (the style's `style_ref` sentence says how to use it). `subjects`: the sentence naming the subject
-    reference sheets that go along (subjects_clause)."""
+    reference sheets that go along (subjects_clause). `clock`: for a video, the second of the clip where span[0]
+    lies (the `values` of `ui` items are told on the clip's clock)."""
     wishes = " ".join(part.strip() for part in (subjects or "", row.get("extra") or "", extra or "")
                       if part and part.strip())
     materials = "; ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
@@ -123,7 +167,7 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
         # GPT Image sees the original frame, logo included, and removes what it is told to.
         removal = remove_clause(on_screen(items, span))
     spaced = lambda value: f"{value} " if value else ""      # English sentences need the space Chinese did not
-    text = style[kind].format(materials=materials, remove=removal, ui=ui_clause(row, kind, span),
+    text = style[kind].format(materials=materials, remove=removal, ui=ui_clause(row, kind, span, clock),
                               look=spaced(style.get("look", "")),
                               rebuild=spaced(style.get("rebuild", "")), extra=wishes,
                               style_ref=spaced(style.get("style_ref", "")) if style_ref else "")

@@ -85,6 +85,34 @@ def stats(pixels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return flat.mean(axis=0), flat.std(axis=0) + 1e-3
 
 
+SATURATION_LIMITS = (.85, 1.18)    # the most a later clip's saturation is scaled to meet the one before it
+
+
+def saturation(pixels: np.ndarray, correction: tuple) -> float:
+    """Mean HSV saturation (0-1) of frames after a gain/offset correction."""
+    gain, offset = correction
+    rgb = np.clip(pixels.reshape(-1, 3) * gain + offset, 0, 255)
+    high, low = rgb.max(axis=1), rgb.min(axis=1)
+    return float(np.mean(np.where(high > 1, (high - low) / np.maximum(high, 1), 0)))
+
+
+def match_saturation(overlaps: dict, corrections: list[tuple], lines: list[dict]) -> list[float]:
+    """A saturation factor per clip so the picture's saturation does not step where two parts of a shot meet: a
+    per-channel gain and offset matches the colours' levels but leaves a pure saturation difference (GOF3D10374 at
+    33.83 s: 70.6 to 63.2, a z of 16 against the video's ordinary frame pairs). Factors carry along a shot."""
+    factors = [1.0 for _ in lines]
+    for members in runs_of(lines):
+        for index in members[1:]:
+            if index not in overlaps:
+                continue
+            before, after = overlaps[index]
+            s_before = saturation(before, corrections[index - 1]) * factors[index - 1]
+            s_after = saturation(after, corrections[index])
+            if s_after > .02:
+                factors[index] = float(np.clip(s_before / s_after, *SATURATION_LIMITS))
+    return factors
+
+
 def lut(gain: np.ndarray, offset: np.ndarray) -> str:
     parts = [f"{c}='clip(val*{g:.5f}{o:+.3f}\\,0\\,255)'" for c, g, o in zip("rgb", gain, offset)]
     return "lutrgb=" + ":".join(parts)
@@ -527,7 +555,7 @@ def current(job: Path, state: dict, source_id: str, row: dict) -> dict | None:
     return None
 
 
-ASSEMBLY_VERSION = 9     # raise when the assembly itself changes, so delivered videos are made again (9: no HUD copy-back or burn-in)
+ASSEMBLY_VERSION = 10    # raise when the assembly itself changes, so delivered videos are made again (10: saturation matched at seams)
 
 
 def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
@@ -549,6 +577,11 @@ def wipe_items(job: Path, state: dict, source_id: str, row: dict) -> list[dict]:
     return items
 
 
+def delivery_suffix(state: dict, style: dict) -> str:
+    """What follows the source name in a delivery's file name: the work order's `name_suffix`, else "_<label>"."""
+    return (state.get("options") or {}).get("name_suffix") or f"_{style.get('label', 'reskin')}"
+
+
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
@@ -558,6 +591,11 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
              else work_clip(job, source_id, line, out_fps, size) for line in lines]
     cuts = lead_cuts(job, source_id, lines)
     corrections, colour, overlaps = match_colours(clips, lines, out_fps, cuts)
+    saturations = match_saturation(overlaps, corrections, lines)
+    for entry in colour:
+        index = next((i for i, line in enumerate(lines) if line["id"] == entry["before"]), None)
+        if index is not None:
+            entry["saturation"] = round(saturations[index], 3)
     # Where each clip is cut: a seam inside a shot switches at its best-matching overlap frame with a short blend
     # (both versions there show the same moment); hard cuts join end to end.
     half = BLEND_FRAMES // 2
@@ -584,6 +622,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         chain = f"[{index}:v]trim=start_frame={trims[index][0]}:end_frame={trims[index][1]},setpts=PTS-STARTPTS"
         if not (np.allclose(gain, 1) and np.allclose(offset, 0)):
             chain += f",format=rgb24,{lut(gain, offset)},format=yuv420p"
+        if abs(saturations[index] - 1) > .005:
+            chain += f",hue=s={saturations[index]:.4f}"
         graph.append(chain + f"[c{index}]")
     labels = []
     blend = BLEND_FRAMES / out_fps
@@ -624,7 +664,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     delivery = Path(state["delivery_dir"])
     names = [r["name"] for r in state["sources"]]
     name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
-    output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
+    output = delivery / f"{name}{delivery_suffix(state, style)}.mp4"
     partial = output.with_name(output.stem + ".partial.mp4")
     audio = []
     if audio_filter:
