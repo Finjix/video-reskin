@@ -27,14 +27,14 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
  "style": "realistic",
- "options": {"resolution": "1080p", "max_segment_seconds": 12, "fps": 30, "review_rounds": 3}}
+ "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 3}}
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
 - `style`: a preset name from `assets/prompts.json` (`realistic`: 写实版材质，风格不变) or an object with `label`,
   `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look.
-- `options.max_segment_seconds`: 4-15 (default 12; Seedance edits clips of 2-15 s). `fps`: output frame rate
-  (default 30, never above the source).
+- `options.max_segment_seconds`: 4-30 (default 30; Seedance edits clips of 4-30 s; resolution is fixed at 1080p). `fps`: output frame rate
+  (default 24, the Seedance rate, never above the source).
 
 ## Catalog (`analyze`)
 

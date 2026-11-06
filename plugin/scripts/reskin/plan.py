@@ -1,6 +1,6 @@
 """The agent's edits (kept range, materials, what to remove, anchor frame) and the segment plan built from them.
 
-Seedance edits clips of 2-15 s, so each kept range is cut into segments: at camera cuts where possible (a hard cut
+Seedance edits clips of 4-30 s, so each kept range is cut into segments: at camera cuts where possible (a hard cut
 hides the seam), otherwise inside a shot at its stillest moment, with a short overlap that `assemble` cross-fades.
 """
 from __future__ import annotations
@@ -185,7 +185,7 @@ def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_s
             continue
         motion_path = job / "catalog/motion" / f"{row['id']}.json"
         motion = read(motion_path) if motion_path.is_file() else []
-        limit = min(15.0, settings["max_segment_seconds"] or max_seconds)
+        limit = min(30.0, settings["max_segment_seconds"] or max_seconds)
         segments = segment(row, settings["keep"], limit, motion, settings["split_at"])
         anchor = settings["anchor"] if settings["anchor"] is not None else auto_anchor(row, settings["keep"], motion)
         plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
