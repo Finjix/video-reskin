@@ -10,17 +10,18 @@ from PIL import Image, ImageDraw
 from reskin import winky
 from reskin.analyze import font
 from reskin.common import FFMPEG, log, read, run, video_info, write, write_text
+from reskin.job import style as job_style
 from reskin.prompts import describe
 
 CATEGORIES = {
-    "continuity": "穿帮: the restyled side shows something the original does not (cartoon material left over, an object or "
+    "continuity": "the restyled side shows something the original does not (cartoon material left over, an object or "
                   "character changing identity, shape, colour or count, things appearing or vanishing, motion that no "
                   "longer matches)",
     "artifact": "bug: morphing, melting, warping, flicker, jitter, frozen or repeated frames, garbled UI text or numbers, "
                 "broken limbs, smeared detail, strong noise or a fragmented look",
     "added_text": "text the original does not have: captions, warning lines, watermarks or garbled characters drawn "
                   "anywhere (look along the bottom and top edges in particular)",
-    "seam_color": "拼接色差: a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
+    "seam_color": "a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
                   "especially at the listed seam times",
     "leftover_overlay": "a logo, watermark or warning/disclaimer text that should have been removed is still visible",
     "end_card": "closing-card content (big logo, store badges, call to action) is visible",
@@ -80,6 +81,7 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         f"(same timestamps). The restyle goal: {describe(plan_row['materials'])} — game-rendered cartoon materials replaced by "
         f"realistic real-world materials (style preset: {style}) while composition, camera motion, characters, object "
         "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
+        *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if (look := job_style(state).get("look")) else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         f"The restyled video was rendered in segments and joined at: {seams}. Check these moments closely for jumps.",
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "

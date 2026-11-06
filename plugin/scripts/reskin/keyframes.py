@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 from reskin import images
 from reskin.analyze import font
 from reskin.common import FFMPEG, digest, log, read, run, sha, write
-from reskin.prompts import compose
+from reskin.prompts import compose, reference
 
 
 def grab(path: Path, frame: int, fps: float, output: Path) -> Path:
@@ -67,6 +67,10 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
         references.append(folder / f"{row['style_from']}-anchor.png")
         prompt = compose(style, "keyframe", row, span=moment)
     elif task["kind"] == "anchor":
+        # The style's reference picture (Image 2) sets the look; the anchor then carries it to every keyframe.
+        look = reference(style)
+        if look is not None:
+            references.append(look)
         prompt = compose(style, "anchor", row, span=moment)
     else:
         references.append(folder / f"{source_id}-anchor.png")

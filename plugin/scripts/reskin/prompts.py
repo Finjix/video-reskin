@@ -1,6 +1,8 @@
 """Prompt texts: the style preset's templates filled with a source's materials, removals and extra wishes."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from reskin.common import PROMPTS, read
 
 
@@ -27,16 +29,16 @@ removals = on_screen
 def remove_clause(items: list[str]) -> str:
     if not items:
         return ""
-    return read(PROMPTS)["remove"].format(items="、".join(items))
+    return read(PROMPTS)["remove"].format(items=", ".join(items))
 
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None) -> str:
     """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
     source time the text is for (a frame: start == end)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
-    materials = "、".join(on_screen(row.get("materials"), span)) or style["default_materials"]
+    materials = ", ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
     text = style[kind].format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
-                              extra=wishes)
+                              look=style.get("look", ""), extra=wishes)
     return " ".join(text.split())
 
 
@@ -52,3 +54,14 @@ def describe(items) -> str:
             parts.append(f"{item['what']} ({item.get('start', 0):g}-{item['end']:g} s)" if "end" in item
                          else f"{item['what']} (from {item.get('start', 0):g} s)")
     return "; ".join(parts)
+
+
+def reference(style: dict) -> Path | None:
+    """The style's look reference picture (sent with the anchor as Image 2), if it has one; relative to assets/."""
+    value = style.get("reference")
+    if not value:
+        return None
+    path = Path(value) if Path(value).is_absolute() else PROMPTS.parent / value
+    if not path.is_file():
+        raise FileNotFoundError(f"style reference picture not found: {path}")
+    return path

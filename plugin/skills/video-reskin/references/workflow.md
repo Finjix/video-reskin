@@ -31,8 +31,11 @@ Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
-- `style`: a preset name from `assets/prompts.json` (`realistic`: 写实版材质，风格不变) or an object with `label`,
-  `goal`, `anchor`, `keyframe`, `video` and `default_materials` like the preset, for another look.
+- `style`: a preset name from `assets/prompts.json` (`realistic`: realistic materials, style unchanged; dark, deep tones,
+  pronounced textures, looked up from `assets/styles/realistic.jpg`) or an object with `label`, `goal`, `look`, `anchor`,
+  `keyframe`, `video`, `default_materials` and optionally `reference` (a look picture, absolute or relative to `assets/`)
+  like the preset, for another look. All prompt texts are English. The reference picture goes with the anchor as Image 2
+  (look only, nothing copied from its content); every other keyframe follows the anchor.
 - `options.max_segment_seconds`: 4-30 (default 30; Seedance edits clips of 4-30 s; resolution is fixed at 1080p). `fps`: output frame rate
   (default 24, the Seedance rate, never above the source).
 
