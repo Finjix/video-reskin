@@ -16,10 +16,15 @@ OVERLAP_SECONDS = 1.0     # a segment after a seam inside a shot renders this mu
 #                           frames); assemble joins inside it
 HEAD_SECONDS = 0.5        # ... and its clip starts with this much of the shot's opening (cut off again in assembly)
 EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "ui", "style_ref", "chain_prefix", "like", "live"}
+             "ui", "style_ref", "chain_prefix", "like", "live", "subjects", "subject_refs"}
 # `like`: the same ad in another framing (横版/竖版). The timeline and the texts are the twin's; boxes (remove) and
-# the `ui` (named by position) sit elsewhere in another framing, so the source names its own.
-LIKE_FIELDS = ("keep", "materials", "extra", "anchor", "split_at", "max_segment_seconds", "chain_prefix", "live")
+# the `ui` (named by position) sit elsewhere in another framing, so the source names its own. Subjects are the
+# twin's too, with the twin's reference sheets (made once).
+LIKE_FIELDS = ("keep", "materials", "extra", "anchor", "split_at", "max_segment_seconds", "chain_prefix", "live",
+               "subjects", "subject_refs")
+SUBJECT_VIEWS = ("2d", "2.5d", "3d")
+SUBJECT_SHEETS = 4        # subject reference sheets one keyframe or segment gets at most (in order of appearance)
+SUBJECT_LATE = .3         # seconds: a subject or timed material showing up this long after the reference frame is new
 LIVE_SNAP = .25           # seconds: a live-action span's ends move onto a camera cut this close (they start and end
 #                           at hard cuts; a frame or two of the other footage on the wrong side would show)
 LIKE_SECONDS = .3         # twins differing more in length than this are different cuts: their times do not carry over
@@ -67,18 +72,20 @@ def ui_problem(items) -> str | None:
     """`ui`: screen-fixed interface and text the models draw exactly as in the original (HUD counters, buttons,
     captions, banners, game logos, warning lines): [{"what": English text naming its position, exact text in quotes,
     colours and how its numbers change, "start": s, "end": s, "box": [x0, y0, x1, y1] (fractions, optional: for the
-    review's close-up check)}]."""
+    review's close-up check), "dynamic": true (optional: animated text or HUD effects, counting digits, popping or
+    flying text; a little blur or ghosting is tolerated on them, never on static text and logos)}]."""
     if not isinstance(items, list):
         return "ui must be a list"
     for item in items:
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end", "box"}
+                and set(item) <= {"what", "start", "end", "box", "dynamic"}
+                and isinstance(item.get("dynamic", False), bool)
                 and ("box" not in item or not box_problem(item["box"]))
                 and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return (f"ui item {item!r} must be {{\"what\": text, \"start\": seconds, \"end\": seconds, "
-                "\"box\": [x0, y0, x1, y1] (optional)}")
+                "\"box\": [x0, y0, x1, y1] (optional), \"dynamic\": true or false (optional)}")
     return None
 
 
@@ -100,6 +107,52 @@ def live_problem(items, duration: float) -> str | None:
     for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
         if b0 < a1:
             return f"live spans {a0:g}-{a1:g} s and {b0:g}-{b1:g} s overlap"
+    return None
+
+
+def subjects_problem(items, duration: float, live: list | None = None) -> str | None:
+    """`subjects`: what must keep one look while it moves, recurs or comes into view after its reference frame (the
+    protagonist, recurring characters and vehicles, props that appear mid-shot), each made into one multi-view
+    reference sheet: [{"id": "hero", "what": English description, "view": "2d" | "2.5d" | "3d", "views": text
+    (optional, replaces the view's preset), "from": [{"at": s, "box": [x0, y0, x1, y1]}] (1-3 crops of the original),
+    "on": [[start, end], ...] (optional: when it is on screen; the whole kept range by default)}]."""
+    if not isinstance(items, list):
+        return "subjects must be a list"
+    seen = set()
+    shape = ('subject {!r} must be {{"id": lowercase name, "what": text, "view": "2d" | "2.5d" | "3d", "from": '
+             '[{{"at": seconds, "box": [x0, y0, x1, y1]}}] (1-3), "on": [[start, end]] (optional), "views": text '
+             '(optional)}}')
+    for item in items:
+        if not isinstance(item, dict) or not set(item) <= {"id", "what", "view", "views", "from", "on"}:
+            return shape.format(item)
+        sid = item.get("id")
+        if not (isinstance(sid, str) and sid and sid[0].isalpha() and sid == sid.lower()
+                and all(c.isalnum() or c in "_-" for c in sid)) or sid == "anchor":
+            return f"subject id {sid!r} must be lowercase letters, digits, - or _ (starting with a letter), not anchor"
+        if sid in seen:
+            return f"subject id {sid} is used twice"
+        seen.add(sid)
+        if not (isinstance(item.get("what"), str) and item["what"].strip()):
+            return f"subject {sid}: what must describe it in English"
+        if item.get("view", "3d") not in SUBJECT_VIEWS:
+            return f"subject {sid}: view must be one of {', '.join(SUBJECT_VIEWS)}"
+        if "views" in item and not (isinstance(item["views"], str) and item["views"].strip()):
+            return f"subject {sid}: views must be text"
+        crops = item.get("from")
+        if not isinstance(crops, list) or not 1 <= len(crops) <= 3:
+            return f"subject {sid}: from must list 1-3 crops of the original"
+        for crop in crops:
+            if (not isinstance(crop, dict) or set(crop) != {"at", "box"} or not isinstance(crop["at"], (int, float))
+                    or not 0 <= crop["at"] < duration or box_problem(crop["box"])):
+                return (f'subject {sid}: crop {crop!r} must be {{"at": seconds inside 0-{duration:.2f}, '
+                        '"box": [x0, y0, x1, y1]}')
+            if any(isinstance(span, dict) and span["start"] <= crop["at"] < span["end"] for span in live or []):
+                return f"subject {sid}: crop at {crop['at']:g} s lies in a live-action span; take it from game footage"
+        spans = item.get("on")
+        if spans is not None and (not isinstance(spans, list) or not spans or not all(
+                isinstance(span, list) and len(span) == 2 and all(isinstance(v, (int, float)) for v in span)
+                and 0 <= span[0] < span[1] <= duration + .05 for span in spans)):
+            return f"subject {sid}: on must be a list of [start, end] seconds inside 0-{duration:.2f}"
     return None
 
 
@@ -215,6 +268,10 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: {ui_problem(row['ui'])}")
         if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
             problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
+        if "subjects" in row and subjects_problem(row["subjects"], duration, row.get("live")):
+            problems.append(f"{source_id}: {subjects_problem(row['subjects'], duration, row.get('live'))}")
+        if "subject_refs" in row and not isinstance(row["subject_refs"], bool):
+            problems.append(f"{source_id}: subject_refs must be true or false")
         if "live" in row and live_problem(row["live"], duration):
             problems.append(f"{source_id}: {live_problem(row['live'], duration)}")
         elif row.get("live"):
@@ -265,6 +322,11 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) ->
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [], "ui": row.get("ui") or [],
             "style_ref": ({"path": row["style_ref"]} if isinstance(row.get("style_ref"), str) else row.get("style_ref")),
             "chain_prefix": row.get("chain_prefix"), "like": row.get("like"),
+            "subjects": [dict(item, view=item.get("view", "3d")) for item in row.get("subjects") or []],
+            "subject_refs": row.get("subject_refs", True),
+            # a `like` source takes its twin's subjects and their sheets (made once, under the twin's id)
+            "subjects_owner": (row["like"] if row.get("like") and row.get("subjects")
+                               and "subjects" not in ((edits.get("sources") or {}).get(source_id) or {}) else None),
             "live": sorted(({"start": float(i["start"]), "end": float(i["end"]), "what": i.get("what", "")}
                             for i in row.get("live") or [] if i["end"] > keep[0] and i["start"] < keep[1]),
                            key=lambda i: i["start"]),
@@ -426,10 +488,52 @@ def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_s
         plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
                                       "width": row["info"]["width"], "height": row["info"]["height"],
                                       "segments": segments}
+        mark_subjects(plan["sources"][row["id"]])
     link_twins(plan)
     write(job / "config/plan.json", plan)
     write_text(job / "reports/plan.md", markdown(plan, catalog))
     return plan
+
+
+def reference_moment(row: dict, seg: dict) -> float:
+    """The source second whose styled frame a segment follows: its own keyframe, or its shot's (a chained segment)."""
+    head = seg
+    for other in row["segments"][:row["segments"].index(seg) + 1]:
+        if other["seam"] != "continuous":
+            head = other
+    return head["render_frames"][0] / row["fps"]
+
+
+def mark_subjects(row: dict) -> None:
+    """Per rendered segment: the subjects on screen while it renders (`subjects`: the sheets its render gets, in order
+    of appearance), those not on screen at its reference frame that come into view later (`new_subjects`: where a
+    sheet matters most), the subjects of its keyframe (`keyframe_subjects`, first segments of a shot) and timed
+    materials that come into view after the reference frame (`late_materials`: candidates for a subject)."""
+    from reskin.prompts import subject_spans, subjects_in
+    for seg in row["segments"]:
+        for key in ("subjects", "new_subjects", "late_materials", "keyframe_subjects"):
+            seg.pop(key, None)
+        if seg.get("live"):
+            continue
+        fps = row["fps"]
+        span = (seg["render_frames"][0] / fps, seg["render_frames"][1] / fps)
+        moment = reference_moment(row, seg)
+        shown = subjects_in(row, span)
+        at_reference = [s["id"] for s, _ in subjects_in(row, (moment, moment))]
+        seg["subjects"] = [s["id"] for s, _ in shown][:SUBJECT_SHEETS]
+        seg["new_subjects"] = [s["id"] for s, first in shown if s["id"] not in at_reference
+                               and first > moment + SUBJECT_LATE]
+        if seg["seam"] != "continuous":
+            seg["keyframe_subjects"] = at_reference[:SUBJECT_SHEETS]
+        materials = row.get("materials")
+        late = [item["what"] for item in ([] if isinstance(materials, str) else materials or [])
+                if isinstance(item, dict) and span[0] + SUBJECT_LATE < float(item.get("start", 0)) < span[1]
+                and float(item.get("start", 0)) > moment + SUBJECT_LATE]
+        if late:
+            seg["late_materials"] = late
+    row.pop("subject_times", None)
+    if row.get("subjects"):
+        row["subject_times"] = {s["id"]: subject_spans(s, row["keep"]) for s in row["subjects"]}
 
 
 def link_twins(plan: dict) -> None:
@@ -462,6 +566,12 @@ def markdown(plan: dict, catalog: dict) -> str:
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
         if row["extra"]:
             lines.append(f"extra: {row['extra']}")
+        for subject in row.get("subjects") or []:
+            spans = ", ".join(f"{a:g}-{b:g}" for a, b in (row.get("subject_times") or {}).get(subject["id"], []))
+            owner = f", the sheet of {row['subjects_owner']}" if row.get("subjects_owner") else ""
+            lines.append(f"subject {subject['id']} ({subject.get('view', '3d')}{owner}): {subject['what']}; on screen {spans} s")
+        if row.get("subjects") and not row.get("subject_refs", True):
+            lines.append("subject sheets go to the keyframes only (subject_refs false), not to Seedance")
         if row.get("style_ref"):
             ref = row["style_ref"]
             lines.append(f"style reference (anchor only): {ref['path']}" + (f" at {ref['at']:g} s" if "at" in ref else "")
@@ -478,6 +588,12 @@ def markdown(plan: dict, catalog: dict) -> str:
                 continue
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
             lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['seconds']:.2f} s), "
-                         f"seam before: {seg['seam']}{inner}" + (f", fixes from {seg['like']}" if seg.get("like") else ""))
+                         f"seam before: {seg['seam']}{inner}" + (f", fixes from {seg['like']}" if seg.get("like") else "")
+                         + (f", subject sheets: {', '.join(seg['subjects'])}" if seg.get("subjects") else "")
+                         + (f" (new after its reference frame: {', '.join(seg['new_subjects'])})"
+                            if seg.get("new_subjects") else ""))
+            if seg.get("late_materials"):
+                lines.append(f"  comes into view after its reference frame without a subject sheet: "
+                             f"{'; '.join(seg['late_materials'])} (add a subject when it must keep one look)")
         lines.append("")
     return "\n".join(lines)

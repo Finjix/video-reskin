@@ -1,4 +1,5 @@
-"""Style keyframes: one anchor per source (the look), then the first frame of every segment restyled after it."""
+"""Style keyframes: one anchor per source (the look), the reference sheet of every subject (after the anchor), then
+the first frame of every shot restyled after the anchor and the sheets of the subjects in it."""
 from __future__ import annotations
 
 import threading
@@ -7,10 +8,10 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from reskin import images
+from reskin import images, subjects as SUBJECTS
 from reskin.analyze import font
 from reskin.common import FFMPEG, digest, log, read, run, sha, write
-from reskin.prompts import compose
+from reskin.prompts import compose, subjects_clause
 
 
 def grab(path: Path, frame: int, fps: float, output: Path) -> Path:
@@ -82,11 +83,11 @@ def tasks(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None
                 continue        # chained: starts from the previous segment's result (render), no keyframe; live:
                 #                 delivered from the original
             rows.append({"key": f"{source_id}:{seg['id']}", "source": source_id, "path": sources[source_id]["path"],
-                         "fps": fps, "frame": seg["render_frames"][0], "kind": "segment", "row": row,
+                         "fps": fps, "frame": seg["render_frames"][0], "kind": "segment", "row": row, "seg": seg,
                          "selected": wanted(f"{source_id}:{seg['id']}")})
     for task in rows:
         task["redo"] = task["key"] in redo or task["source"] in redo
-    return rows
+    return rows + SUBJECTS.tasks(plan, only, redo)
 
 
 def make(job: Path, task: dict, style: dict, lock) -> dict:
@@ -106,7 +107,11 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
         prompt = compose(style, "anchor", row, span=moment)
     else:
         references.append(folder / f"{source_id}-anchor.png")
-        prompt = compose(style, "keyframe", row, span=moment)
+        # the sheets of the subjects in this frame: they keep one look across shots and from every side
+        sheets = SUBJECTS.sheets_for(job, source_id, row, task["seg"].get("keyframe_subjects") or [])
+        references += [path for _, path in sheets]
+        clause = subjects_clause("keyframe", [(s["what"], "") for s, _ in sheets], first=3)
+        prompt = compose(style, "keyframe", row, span=moment, subjects=clause)
     for ref in references[1:]:
         if not ref.is_file():
             raise RuntimeError(f"{task['key']}: needs {ref.name} first")
@@ -139,17 +144,23 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
     plain = [t for t in anchors if not t["row"].get("style_from")]
     dependent = [t for t in anchors if t["row"].get("style_from")]
     with ThreadPoolExecutor(workers) as executor:
-        results += list(executor.map(lambda t: _safe(job, t, style, lock), plain))
-        results += list(executor.map(lambda t: _safe(job, t, style, lock), dependent))
+        results += list(executor.map(lambda t: _safe(job, state, t, style, lock), plain))
+        results += list(executor.map(lambda t: _safe(job, state, t, style, lock), dependent))
+        # subject sheets follow the anchors; the shot keyframes take the sheets of the subjects in them
+        sheets = [t for t in rows if t["kind"] == "subject" and t["selected"]]
+        results += list(executor.map(lambda t: _safe(job, state, t, style, lock), sheets))
         segments = [t for t in rows if t["kind"] == "segment" and t["selected"]]
-        results += list(executor.map(lambda t: _safe(job, t, style, lock), segments))
+        results += list(executor.map(lambda t: _safe(job, state, t, style, lock), segments))
     for source_id in plan["sources"]:
         sheet(job, source_id, plan["sources"][source_id])
+        SUBJECTS.contact_sheet(job, source_id, plan["sources"][source_id])
     return results
 
 
-def _safe(job, task, style, lock) -> dict:
+def _safe(job, state, task, style, lock) -> dict:
     try:
+        if task["kind"] == "subject":
+            return SUBJECTS.make(job, state, task, style, lock, _record, _remember)
         return make(job, task, style, lock)
     except Exception as error:      # one failed keyframe must not stop the others; the summary lists it
         return {"key": task["key"], "error": f"{type(error).__name__}: {error}"}

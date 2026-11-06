@@ -28,11 +28,19 @@ SCHEMA = {
             "required": ["what", "start", "end", "box"]}},
         "screen_text": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "what": {"type": "STRING"}, "text": {"type": "STRING"}, "start": {"type": "NUMBER"},
-            "end": {"type": "NUMBER"}, "box": BOX, "fixed": {"type": "BOOLEAN"}},
-            "required": ["what", "text", "start", "end", "box", "fixed"]}},
+            "end": {"type": "NUMBER"}, "box": BOX, "fixed": {"type": "BOOLEAN"}, "animated": {"type": "BOOLEAN"}},
+            "required": ["what", "text", "start", "end", "box", "fixed", "animated"]}},
         "hud": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "what": {"type": "STRING"}, "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}, "box": BOX},
-            "required": ["what", "start", "end", "box"]}},
+            "what": {"type": "STRING"}, "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}, "box": BOX,
+            "animated": {"type": "BOOLEAN"}},
+            "required": ["what", "start", "end", "box", "animated"]}},
+        "camera": {"type": "STRING", "enum": ["2d", "2.5d", "3d"]},
+        "subjects": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "id": {"type": "STRING"}, "what": {"type": "STRING"},
+            "reason": {"type": "STRING", "enum": ["protagonist", "recurring", "moves", "appears_later"]},
+            "on": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "NUMBER"}}},
+            "at": {"type": "NUMBER"}, "box": BOX},
+            "required": ["id", "what", "reason", "on", "at", "box"]}},
         "live_action": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "what": {"type": "STRING"}, "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}},
             "required": ["what", "start", "end"]}},
@@ -42,16 +50,21 @@ SCHEMA = {
             "verdict": {"type": "STRING", "enum": ["ok", "not_on_screen", "wrong_time", "wrong_colour", "ambiguous",
                                                     "missing"]},
             "suggestion": {"type": "STRING"}}, "required": ["field", "what", "verdict", "suggestion"]}}},
-    "required": ["objects", "logos", "screen_text", "hud", "live_action", "end_card_start", "edits_check"]}
+    "required": ["objects", "logos", "screen_text", "hud", "live_action", "end_card_start", "edits_check", "camera",
+                 "subjects"]}
+LINT_FPS = 2.0          # frames per second Gemini reads (each at the HIGH media resolution)
 
 
 def proxy(source: Path, output: Path) -> Path:
+    """The source at 1080 on the short side (never larger), at the rate Gemini reads it, barely compressed: the
+    boxes and the exact text of logos and captions come from these frames."""
     info = video_info(source)
     portrait = info["height"] >= info["width"]
-    scale = "480:-2" if portrait else "854:-2"
+    short = min(1080, min(info["width"], info["height"]))
+    scale = f"{short}:-2" if portrait else f"-2:{short}"
     output.parent.mkdir(parents=True, exist_ok=True)
-    run([FFMPEG, "-v", "error", "-y", "-i", source, "-vf", f"fps=10,scale={scale}:flags=area", "-an",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", output])
+    run([FFMPEG, "-v", "error", "-y", "-i", source, "-vf", f"fps=10,scale={scale}:flags=lanczos", "-an",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", output])
     return output
 
 
@@ -78,11 +91,23 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
         "(fractions). A logo that moves to another corner is two items.",
         "- screen_text: other text and flat UI: captions, labels, banners, buttons. fixed = true when it stays at one "
         "place on the screen while the scene moves (it does not move with the 3D scene); price tags standing on the "
-        "floor, bubbles over characters or signs in perspective are fixed = false. Give the exact text and a box.",
+        "floor, bubbles over characters or signs in perspective are fixed = false. Give the exact text and a box. "
+        "animated = true when the text itself moves, pops, zooms, flies in or changes (an effect), false when it "
+        "stays still on the screen.",
         "- hud: screen-fixed counters with changing numbers (coins, timers, scores) with a box slightly larger than "
         "the element; `what` also says how the number changes over time (e.g. counts up from \"12,580\" at 0 s to "
         "\"15,200\" at 3 s, then stays). A counter whose numbers change many times is one item per stretch with its "
-        "values.",
+        "values. animated = true when its digits count, pop or fly (an effect), false when they stay still.",
+        "- camera: how the game is filmed: 2d (a flat side or front view), 2.5d (a fixed high three-quarter camera "
+        "looking down, isometric-like) or 3d (a free perspective camera that moves around).",
+        "- subjects: what must keep one look through the video and is hard to restyle from one picture: always the "
+        "player character (reason protagonist), characters, animals, vehicles or machines seen again and again "
+        "(recurring) or moving a lot (moves), and objects or characters that come into view in the middle of a camera "
+        "shot, after its first frame (appears_later: a truck driving in, a prop dropped in, a customer arriving). At "
+        "most 6, the most prominent first; not the ground, water, sky or crowds as a whole. id = a short lowercase "
+        "English name (hero, truck, crane); what = an English description with shape, build and colours (it goes into "
+        "the prompts); on = the [start, end] stretches when it is on screen; at = the second where it is shown "
+        "largest and clearest, unhidden, and box = its box [x0, y0, x1, y1] (fractions) at that second.",
         "- live_action: every stretch that is not game footage: live-action video (real people, real cars, real "
         "landscapes or weather filmed with a camera), real photos, and real human faces pasted onto game objects; "
         "start/end at the hard cuts around it. The game itself, its rendered cutscenes and the end card are not "
@@ -93,7 +118,7 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
     if edits_row:
         lines += [
             "- edits_check: an agent wrote these edits for this video: "
-            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "ui", "live")
+            + json.dumps({k: edits_row.get(k) for k in ("keep", "materials", "remove", "ui", "live", "subjects")
                           if k in edits_row},
                          ensure_ascii=False),
             "Check every `materials` and `remove` item: ok; not_on_screen (the video never shows it: naming it makes the "
@@ -102,7 +127,9 @@ def prompt(catalog_row: dict, edits_row: dict | None) -> str:
             "prominent objects whose colour should be named, screen-fixed logos, warning lines, text, buttons or HUD that "
             "are not in `ui` (the models draw them from it), `ui` items whose text, digits, place or times differ from "
             "the video (field ui, verdict wrong_time or ambiguous, with the right description), and "
-            "live-action stretches that are not in `live` (or `live` items that show the game). "
+            "live-action stretches that are not in `live` (or `live` items that show the game), `subjects` whose "
+            "description, `on` times or crop (`from`: at and box) do not fit the video (field subjects), and the "
+            "protagonist or objects arriving mid-shot that have no subject (field subjects, verdict missing). "
             "`suggestion` (in English, as it would go into the prompt) says what to write instead.",
         ]
     else:
@@ -145,6 +172,8 @@ def draft(facts: dict, catalog_row: dict) -> dict:
                  "end": round(float(item.get("end", keep[1])), 2)}
         if (box := _box(item.get("box"))):
             entry["box"] = box
+        if item.get("animated"):
+            entry["dynamic"] = True
         if entry["start"] <= keep[0] + .3 and entry["end"] >= keep[1] - .3:
             del entry["start"], entry["end"]
         return entry
@@ -158,6 +187,25 @@ def draft(facts: dict, catalog_row: dict) -> dict:
     live = [item for item in live if item["end"] - item["start"] >= .2]
     if live:
         row["live"] = live
+    subjects, seen = [], set()
+    view = facts.get("camera") if facts.get("camera") in ("2d", "2.5d", "3d") else "3d"
+    for item in facts.get("subjects") or []:
+        name = "".join(c for c in str(item.get("id", "")).lower().replace(" ", "_") if c.isalnum() or c in "_-")
+        box = _box(item.get("box"))
+        at = float(item.get("at", -1))
+        if not name or not name[0].isalpha() or name == "anchor" or name in seen or not box or not item.get("what") \
+                or not keep[0] <= at < keep[1] or any(span["start"] <= at < span["end"] for span in live):
+            continue
+        seen.add(name)
+        spans = [[round(max(keep[0], float(a)), 2), round(min(keep[1], float(b)), 2)]
+                 for a, b in (s for s in item.get("on") or [] if isinstance(s, list) and len(s) == 2)
+                 if min(keep[1], float(b)) > max(keep[0], float(a))]
+        entry = {"id": name, "what": item["what"], "view": view, "from": [{"at": round(at, 2), "box": box}]}
+        if spans and not (len(spans) == 1 and spans[0][0] <= keep[0] + .3 and spans[0][1] >= keep[1] - .3):
+            entry["on"] = spans
+        subjects.append(entry)
+    if subjects:
+        row["subjects"] = subjects
     return row
 
 
@@ -166,7 +214,7 @@ def lint_source(job: Path, state: dict, catalog_row: dict, edits_row: dict | Non
     clip = proxy(Path(source["path"]), job / "catalog/lint" / f"{catalog_row['id']}.mp4")
     log(f"{catalog_row['id']}: asking Gemini what is on screen" + (" and checking the edits" if edits_row else ""))
     part = winky.inline(clip, "video/mp4")
-    part["videoMetadata"] = {"fps": 2}
+    part["videoMetadata"] = {"fps": LINT_FPS}
     facts = winky.gemini([part, {"text": prompt(catalog_row, edits_row)}], schema=SCHEMA)
     ledger.add(job, kind="gemini", purpose="lint", key=catalog_row["id"], seconds=catalog_row["duration"])
     facts["draft"] = draft(facts, catalog_row)
@@ -176,14 +224,19 @@ def lint_source(job: Path, state: dict, catalog_row: dict, edits_row: dict | Non
              + [{"id": f"T{n}", "box": b, "start": float(item["start"]), "end": float(item["end"])}
                 for n, item in enumerate(facts.get("screen_text") or [], 1) if (b := _box(item.get("box")))]
              + [{"id": f"H{n}", "box": b, "start": float(item["start"]), "end": float(item["end"])}
-                for n, item in enumerate(facts.get("hud") or [], 1) if (b := _box(item.get("box")))])
+                for n, item in enumerate(facts.get("hud") or [], 1) if (b := _box(item.get("box")))]
+             # a subject's box holds at its clearest moment only
+             + [{"id": f"S:{item.get('id', n)}", "box": b, "start": float(item["at"]) - .6, "end": float(item["at"]) + .6}
+                for n, item in enumerate(facts.get("subjects") or [], 1)
+                if (b := _box(item.get("box"))) and isinstance(item.get("at"), (int, float))])
     info = catalog_row["info"]
     step = 2.0 if catalog_row["duration"] > 40 else 1.0
     times = [round(t, 2) for t in [x * step + .25 for x in range(int((catalog_row["duration"] - .3) / step) + 1)]]
     portrait = info["height"] >= info["width"]
     facts["sheet"] = str(sheet(Path(source["path"]), info, times, job / "catalog" / f"{catalog_row['id']}-lint.jpg",
                                columns=10 if portrait else 6, thumb=192 if portrait else 300, boxes=boxes,
-                               title=f"{catalog_row['id']} Gemini boxes: L logo/warning, T screen text, H HUD"))
+                               title=f"{catalog_row['id']} Gemini boxes: L logo/warning, T screen text, H HUD, "
+                                     f"S:<id> subject crop"))
     write(job / "catalog/lint" / f"{catalog_row['id']}.json", facts)
     return facts
 
@@ -200,7 +253,12 @@ def markdown(rows: list[tuple[str, dict]]) -> str:
                                                f"{o['start']:g}-{o['end']:g} s)" for o in facts.get("screen_text") or []) or "none"))
         lines.append("live-action (not game, delivered from the original): " + ("; ".join(
             f"{o['what']} ({o['start']:g}-{o['end']:g} s)" for o in facts.get("live_action") or []) or "none"))
-        lines.append("hud: " + ("; ".join(f"{o['what']} {o.get('box')}" for o in facts.get("hud") or []) or "none"))
+        lines.append("hud: " + ("; ".join(f"{o['what']} {o.get('box')}" + (" (animated)" if o.get("animated") else "")
+                                          for o in facts.get("hud") or []) or "none"))
+        lines.append(f"camera: {facts.get('camera', '?')}; subjects (multi-view reference sheets): " + ("; ".join(
+            f"{o.get('id')} [{o.get('reason')}] {o['what']} (clearest at {o.get('at')} s, box {o.get('box')}, on "
+            f"{', '.join(f'{a:g}-{b:g}' for a, b in (s for s in o.get('on') or [] if len(s) == 2))} s)"
+            for o in facts.get("subjects") or []) or "none"))
         problems = [c for c in facts.get("edits_check") or [] if c.get("verdict") != "ok"]
         if facts.get("edits_check"):
             lines.append("edits check: " + ("all ok" if not problems else ""))

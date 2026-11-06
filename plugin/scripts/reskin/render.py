@@ -23,7 +23,8 @@ from pathlib import Path
 from reskin import ledger, lumos
 from reskin.common import FFMPEG, PROMPTS, digest, log, read, run, sha, video_info, write
 from reskin.job import RESOLUTION
-from reskin.prompts import compose, is_wiped
+from reskin.plan import SUBJECT_LATE
+from reskin.prompts import compose, is_wiped, subjects_clause, subjects_in
 
 POLL_SECONDS = 15
 GENERATION_TIMEOUT = 30 * 60
@@ -334,11 +335,30 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
         if not keyframe.is_file():
             raise ValueError(f"{key}: keyframe {keyframe.name} is missing; run keyframes first")
         reference = {"keyframe": sha(keyframe)}
-    prompt = compose(style, "video", plan_row, extra=extra, span=span)
+    sheets = segment_sheets(job, plan_row, source_id, seg)
+    head = (lead["head"][1] - lead["head"][0]) / plan_row["fps"] if lead.get("head") else 0.0
+    firsts = {s["id"]: t for s, t in subjects_in(plan_row, span)}
+    named = []
+    for subject, _ in sheets:
+        # seconds into the clip Seedance gets (a chained clip starts with the shot's opening)
+        moment = head + firsts.get(subject["id"], span[0]) - span[0]
+        named.append((subject["what"], "on screen from the start" if moment <= SUBJECT_LATE else
+                      f"comes into view at about {moment:.1f} s"))
+    prompt = compose(style, "video", plan_row, extra=extra, span=span, subjects=subjects_clause("video", named, first=2))
     clean = clean_boxes(plan_row, *span, logos=logo_masks(job, state, plan_row, source_id))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"], **reference, **lead,
-            **({"clean": clean} if clean else {}), "prompt": prompt, "model": lumos.VIDEO_MODEL,
+            **({"clean": clean} if clean else {}), **({"subjects": [sha(p) for _, p in sheets]} if sheets else {}),
+            "prompt": prompt, "model": lumos.VIDEO_MODEL,
             "resolution": state["options"]["resolution"], "attempt": redo.get("attempt", 1)}
+
+
+def segment_sheets(job: Path, plan_row: dict, source_id: str, seg: dict) -> list[tuple[dict, Path]]:
+    """The subject reference sheets a segment's render gets (after its reference picture): those of the subjects on
+    screen during it, unless the source keeps them to the keyframes (`subject_refs: false`)."""
+    from reskin import subjects as SUBJECTS
+    if not plan_row.get("subject_refs", True):
+        return []
+    return SUBJECTS.sheets_for(job, source_id, plan_row, seg.get("subjects") or [])
 
 
 def logo_masks(job: Path, state: dict, plan_row: dict, source_id: str) -> dict[int, dict]:
@@ -377,6 +397,8 @@ def cause_of(record: dict, inputs: dict, redo: dict) -> str:
         return "upstream"
     if old.get("keyframe") != inputs.get("keyframe"):
         return "keyframe"
+    if old.get("subjects") != inputs.get("subjects"):
+        return "subjects"
     if old.get("clean") != inputs.get("clean"):
         return "wipe"
     if any(old.get(k) != inputs.get(k) for k in ("lead", "lead_logos", "head", "head_clean")):
@@ -417,8 +439,11 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
             picture = chain_frame(job, source_id, previous, prev_seg, seg, plan_row["fps"])
         else:
             picture = job / "keyframes" / f"{source_id}-{seg['id']}.png"
-        submitted = lumos.submit_video_edit(video, [lumos.upload(picture, "video-to-video")], inputs["prompt"],
-                                            resolution=inputs["resolution"], log=lambda text: log(f"{key}: {text}"))
+        # the reference picture first (image 1), then the subject sheets in the prompt's order (image 2...)
+        pictures = [picture, *(path for _, path in segment_sheets(job, plan_row, source_id, seg))]
+        submitted = lumos.submit_video_edit(video, [lumos.upload(p, "video-to-video") for p in pictures],
+                                            inputs["prompt"], resolution=inputs["resolution"],
+                                            log=lambda text: log(f"{key}: {text}"))
         record = {"digest": want, "inputs": core_inputs(inputs), "generation_id": submitted["generation_id"],
                   "status": "submitted", "attempt": inputs["attempt"], "prompt": inputs["prompt"],
                   "reference": picture.name, "cause": cause, "submitted_at": time.strftime("%H:%M:%S"),
@@ -477,30 +502,58 @@ def plan_order(plan: dict, only: set[str] | None = None,
     return sorted(groups, key=lambda group: -sum(seg["seconds"] for seg in group[2]))
 
 
+AGENT_POLL = 20          # seconds between looks at the state files for the agent's verdicts while a chain waits
+
+
+def unblocked(job: Path, key: str) -> bool:
+    """A segment the next one of its shot waits for is cleared: the agent accepted its check (`accept`), or sent it
+    back (`redo`: the chain renders it again first)."""
+    from reskin import gate as GATE
+    path = state_path(job, key)
+    record = read(path) if path.is_file() else {}
+    if redo_log(job).get(key, {}).get("attempt", 1) > record.get("attempt", 1):
+        return True
+    verdict = GATE.stored(job, key)
+    return bool(verdict and verdict.get("accepted"))
+
+
+def run_status(job: Path, **value) -> None:
+    """`state/run.json`: whether a render is running and which segments wait for the agent (for `checks --wait`)."""
+    write(job / "state/run.json", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), **value})
+
+
 def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | None = None, workers: int = 4,
-            gate: bool = True, on_source_done=None, hold: set[str] | None = None) -> list[dict]:
-    """Render every selected chain. With `gate`, each segment that has a successor is checked before the successor
-    starts; a held segment stops its chain (`held`, the rest `waiting`). `on_source_done(source_id, results)` is
-    called as soon as every chain of a source has finished, so its assembly and review need not wait for the batch."""
+            gate: bool = True, on_source_done=None, hold: set[str] | None = None,
+            wait_checks: bool = False) -> list[dict]:
+    """Render every selected chain. With `gate`, every segment is checked as soon as it is rendered (measures, Gemini
+    on the video, stills for the agent: gate.check); the next segment of its shot starts only once the agent has
+    accepted that check or sent the segment back. A waiting chain gives its worker up (`awaiting`, the rest of the
+    shot `waiting`) and is taken up again when its segment is cleared; without `wait_checks` the render ends when
+    nothing else is running. `on_source_done(source_id, results)` is called as soon as every chain of a source has
+    finished, so its assembly and review need not wait for the batch."""
+    from concurrent.futures import FIRST_COMPLETED, wait
     from reskin import gate as GATE
     groups = plan_order(plan, only, hold)
     todo = [(sid, row, seg) for sid, row, members in groups for seg in members]
     log(f"rendering {len(todo)} segments in {len(groups)} chains, {workers} chains at a time, longest first "
         "(segments of one chain follow each other; each takes a few minutes on Lumos)"
-        + ("; every segment with a successor is checked before it" if gate else ""))
+        + ("; every segment is checked as soon as it is rendered, and the next one of its shot waits for the "
+           "agent's verdict (accept or redo)" if gate else ""))
     done = threading.Event()
-    remaining = {}
-    for sid, _, _ in groups:
-        remaining[sid] = remaining.get(sid, 0) + 1
-    collected: dict[str, list[dict]] = {}
-    lock = threading.Lock()
+    groups_of: dict[str, list[int]] = {}
+    for index, (sid, _, _) in enumerate(groups):
+        groups_of.setdefault(sid, []).append(index)
+    results_by_group: dict[int, list[dict]] = {}
+    final: set[int] = set()
+    awaiting: dict[int, str] = {}
 
     def heartbeat(started=time.monotonic()):
         while not done.wait(120):
             states = [read(state_path(job, f"{s}:{g['id']}")).get("status", "pending")
                       if state_path(job, f"{s}:{g['id']}").is_file() else "pending" for s, _, g in todo]
             counts = {name: states.count(name) for name in sorted(set(states))}
-            log(f"still rendering ({(time.monotonic() - started) / 60:.0f} min): {counts}")
+            log(f"still rendering ({(time.monotonic() - started) / 60:.0f} min): {counts}"
+                + (f"; waiting for the agent: {', '.join(sorted(awaiting.values()))}" if awaiting else ""))
     threading.Thread(target=heartbeat, daemon=True).start()
 
     def one(sid, row, seg, previous, prev_seg):
@@ -516,50 +569,80 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
             except Exception as error:     # the summary lists every failed segment; the rest continue
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
 
-    def chain(group):
+    def chain(group) -> tuple[list[dict], str | None]:
+        """Render (or reuse) the chain's segments in order and check each; returns the results and the segment the
+        rest of the chain waits for (the agent's verdict), if any. Taken up again from the start when that segment is
+        cleared: finished segments and their checks are reused."""
         sid, row, members = group
-        results, previous, prev_seg = [], None, None
+        results, previous, prev_seg, blocker = [], None, None, None
         for position, seg in enumerate(members):
             key = f"{sid}:{seg['id']}"
-            if previous is not None and (previous.get("error") or previous.get("held") or previous.get("waiting")):
-                blocker = previous.get("blocker") or previous["key"]
-                why = "held by the segment check" if previous.get("held") or previous.get("waiting") else "failed"
-                results.append({"key": key, "waiting": True, "blocker": blocker,
-                                "error" if previous.get("error") else "note": f"waits for {blocker} ({why})"})
+            if previous is not None and (previous.get("error") or previous.get("awaiting") or previous.get("waiting")):
+                held_by = previous.get("blocker") or previous["key"]
+                why = ("waits for the agent's check (accept or redo)" if previous.get("awaiting") or previous.get("waiting")
+                       else "failed")
+                results.append({"key": key, "waiting": True, "blocker": held_by,
+                                "error" if previous.get("error") else "note": f"waits for {held_by} ({why})"})
                 previous = results[-1]
                 continue
             result = one(sid, row, seg, previous, prev_seg)
-            if gate and not result.get("error") and position + 1 < len(members):
+            if gate and not result.get("error"):
                 index = next(i for i, s in enumerate(row["segments"]) if s["id"] == seg["id"])
                 try:
                     verdict = GATE.check(job, state, row, sid, index)
                     result["gate"] = verdict
                     result["held"] = GATE.holds(verdict)
+                    result["pending"] = GATE.pending(verdict)
+                    if result["pending"] and position + 1 < len(members):
+                        result["awaiting"] = True
+                        blocker = key
                 except Exception as error:      # a failed check never blocks production; say so
                     log(f"{key}: segment check failed ({type(error).__name__}: {error}); continuing unchecked")
                     result["gate_error"] = f"{type(error).__name__}: {error}"
             previous, prev_seg = result, seg
             results.append(result)
-        finish(sid, results)
-        return results
+        return results, blocker
 
-    def finish(sid, results):
-        if on_source_done is None:
+    def finish(sid):
+        if on_source_done is None or not all(i in final for i in groups_of[sid]):
             return
-        with lock:
-            collected.setdefault(sid, []).extend(results)
-            remaining[sid] -= 1
-            complete = remaining[sid] == 0
-        if complete:
-            try:
-                on_source_done(sid, collected[sid])
-            except Exception as error:
-                log(f"{sid}: follow-up after rendering failed: {type(error).__name__}: {error}")
+        try:
+            on_source_done(sid, [r for i in groups_of[sid] for r in results_by_group[i]])
+        except Exception as error:
+            log(f"{sid}: follow-up after rendering failed: {type(error).__name__}: {error}")
+
     try:
         with ThreadPoolExecutor(max(1, workers)) as executor:
-            return [result for results in executor.map(chain, groups) for result in results]
+            futures = {executor.submit(chain, group): index for index, group in enumerate(groups)}
+            while futures or awaiting:
+                if futures:
+                    finished, _ = wait(list(futures), timeout=AGENT_POLL, return_when=FIRST_COMPLETED)
+                elif wait_checks:
+                    finished = set()
+                    done.wait(AGENT_POLL)
+                else:
+                    break           # nothing renders any more: the agent has to look (checks), then run again
+                for future in finished:
+                    index = futures.pop(future)
+                    results, blocker = future.result()
+                    results_by_group[index] = results
+                    if blocker:
+                        awaiting[index] = blocker
+                        log(f"{blocker}: waits for the agent's check (stills and card under review/segments/); the "
+                            "rest of its shot renders once it is accepted or sent back")
+                    else:
+                        final.add(index)
+                        finish(groups[index][0])
+                for index, blocker in list(awaiting.items()):
+                    if unblocked(job, blocker):
+                        del awaiting[index]
+                        futures[executor.submit(chain, groups[index])] = index
+                        log(f"{blocker}: cleared by the agent; its shot goes on")
+                run_status(job, running=True, awaiting=sorted(awaiting.values()))
     finally:
         done.set()
+        run_status(job, running=False, awaiting=sorted(awaiting.values()))
+    return [result for index in sorted(results_by_group) for result in results_by_group[index]]
 
 
 _REDO_LOCK = threading.Lock()

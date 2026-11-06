@@ -10,6 +10,10 @@ from reskin import credentials, net
 
 BASE = "https://lumos.diandian.info/winky"
 REVIEW_MODEL = "gemini-3.8-flash"
+# How finely Gemini samples pictures and video frames. Measured on Winky 2026-11-06: a video frame costs 66 tokens by
+# default (detail too coarse to see small flaws even in a 1080p clip) and 264 at HIGH; pictures are 1100 either way;
+# ULTRA_HIGH is refused.
+MEDIA_RESOLUTION = "MEDIA_RESOLUTION_HIGH"
 
 
 class PermissionDenied(RuntimeError):
@@ -59,10 +63,13 @@ def check_key() -> dict:
 
 
 def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW_MODEL, system: str | None = None,
-           temperature: float = 0.2, timeout: float = 600) -> dict | str:
-    """generateContent; with a schema the JSON answer is parsed."""
+           temperature: float = 0.2, timeout: float = 900, media_resolution: str | None = MEDIA_RESOLUTION) -> dict | str:
+    """generateContent; with a schema the JSON answer is parsed. `media_resolution` (default HIGH) sets how finely
+    pictures and video frames are read."""
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": temperature}}
+    if media_resolution:
+        body["generationConfig"]["mediaResolution"] = media_resolution
     if schema:
         body["generationConfig"].update(responseMimeType="application/json", responseSchema=schema)
     if system:

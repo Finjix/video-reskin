@@ -140,44 +140,46 @@ def cmd_keyframes(args) -> int:
     lines = [f"keyframes: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"
              + (f" (via {', '.join(backends)})" if made else "")]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-keyframes.jpg: original | styled)")
+    lines.append(f"sheets: {job / 'sheets'} (<id>-keyframes.jpg: original | styled; <id>-subjects.jpg: original "
+                 "crops | subject reference sheet)")
     lines.append("next: " + ("fix the failures and run keyframes again" if failed else
-                             "look at every keyframe sheet (make a bad one again with keyframes --redo <id>:<key> "
-                             "after adjusting the edits), then render"))
+                             "look at every keyframe sheet and subject sheet (make a bad one again with keyframes "
+                             "--redo <id>:<key> or <id>:<subject id> after adjusting the edits), then render"))
     show(lines)
     return RULE_FAILURE if failed else 0
 
 
 def render_lines(job: Path, results: list[dict]) -> tuple[list[str], bool]:
-    """The render summary: ready / reused / held / waiting / failed segments, with the gate stills."""
+    """The render summary: ready / reused / waiting for the agent / waiting behind them / failed segments, with the
+    check cards."""
     segments = [r for r in results if r.get("key", "").count(":") == 1]
     failed = [r for r in results if r.get("error") and not r.get("waiting")]
-    held = [r for r in segments if r.get("held")]
+    pending = [r for r in segments if r.get("pending")]
     waiting = [r for r in segments if r.get("waiting")]
     ready = [r for r in segments if not r.get("error") and not r.get("waiting")]
-    lines = [f"segments: {len(ready)} ready ({sum(1 for r in ready if r.get('reused'))} reused), {len(held)} held by "
-             f"the segment check, {len(waiting)} waiting behind them, {len(failed)} failed"]
-    for r in held:
+    blocking = [r for r in pending if r.get("awaiting")]
+    lines = [f"segments: {len(ready)} ready ({sum(1 for r in ready if r.get('reused'))} reused), {len(pending)} "
+             f"waiting for the agent's check ({len(blocking)} with the rest of their shot behind them, "
+             f"{sum(1 for r in pending if r.get('held'))} held by findings), {len(waiting)} waiting behind them, "
+             f"{len(failed)} failed"]
+    for r in pending:
         gate = r["gate"]
-        lines.append(f"  {r['key']} held: {'; '.join(gate.get('reasons') or [])}")
+        lines.append(f"  {r['key']} {'HELD: ' + '; '.join(gate.get('reasons') or []) if gate.get('held') else 'to check'}"
+                     + (" (its shot waits)" if r.get("awaiting") else "") + f"; card {gate.get('card')}")
         if gate.get("realism"):
             from reskin import review as REVIEW
             lines.append(f"    realism (5 = real footage): {REVIEW.realism_line(gate['realism'])}")
-        for wipe in gate.get("wipes") or []:
-            if wipe.get("verdict") in ("smeared", "soft"):
-                lines.append(f"    wiped corner {wipe['what']}: {wipe['verdict']} (detail {wipe['share']} of the scene "
-                             f"around it)")
-        for issue in gate.get("issues") or []:
+        for issue in [i for i in gate.get("issues") or [] if i["severity"] in ("high", "medium")]:
             lines.append(f"    #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s: "
                          f"{issue['description']}")
-        lines += [f"    stills: {sheet}" for sheet in gate.get("sheets") or []]
     lines += [f"  {r['key']}: {r.get('error') or r.get('note')}" for r in failed + waiting]
     steps = []
     if failed:
         steps.append("fix the failures and render again (finished segments are kept)")
-    if held:
-        steps.append("look at each held segment's stills: a confirmed flaw -> redo it (with --prompt); a false alarm "
-                     "-> accept --segment <key> --reason <why>; then render again")
+    if pending:
+        steps.append("work through every check card (checks lists them; a sub-agent per card where you can): look at "
+                     "every still, confirm Gemini's findings on them; no visible flaw -> accept --segment <key> "
+                     "(--reason <why> for a held one); a confirmed flaw -> redo it (with --prompt); then run again")
     if not steps:
         steps.append("assemble")
     lines.append("next: " + "; ".join(steps))
@@ -194,7 +196,7 @@ def cmd_render(args) -> int:
     waits = RENDER.twin_waits(job, state, plan, selection(args.only))
     with job_lock(job, "render"):
         results = RENDER.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers,
-                                 gate=not args.no_gate, hold=set(waits))
+                                 gate=not args.no_gate, hold=set(waits), wait_checks=args.wait_checks)
     lines, failed = render_lines(job, results)
     show(wait_lines(waits) + lines)
     return RULE_FAILURE if failed else 0
@@ -293,13 +295,18 @@ def review_lines(result: dict, limit: int) -> list[str]:
     if result.get("wipe_sheets"):
         lines.append(f"  wiped corners over time (original above, delivered below): "
                      f"{', '.join(result['wipe_sheets'])}")
+    for seam in result.get("seam_checks") or []:
+        lines.append(f"  seam {seam['before']}|{seam['segment']} at {seam['time']:.2f} s: "
+                     f"{'FLAGGED' if seam['flagged'] else 'nothing found'}; card {seam['card']}")
     return lines
 
 
-REVIEW_NEXT = ("next: confirm each high issue on its stills (upper row original, lower row restyled; the triage hint "
-               "is Gemini's, not a verdict); redo only confirmed flaws a viewer sees at once (seams, kept logos or warning lines unlike the original, smeared or "
-               "leftover removed elements, garbled text, morphing or vanishing objects, wrong colours of prominent objects), "
-               "then run again; medium and low issues are reported, not redone")
+REVIEW_NEXT = ("next: work through every seam card (stills a second apart and on both sides of the switch; a sub-agent "
+               "per card where you can) and confirm each high issue on its stills (upper row original, lower row "
+               "restyled); no visible change at a seam -> accept --seam <id>:<Kxx> (--reason for a flagged one); redo "
+               "only confirmed flaws a viewer sees at once (seams, static logos, warning lines or text blurred, garbled "
+               "or unlike the original, smeared or leftover removed elements, morphing or vanishing objects, wrong "
+               "colours of prominent objects), then run again; medium and low issues are reported, not redone")
 
 
 def cmd_review(args) -> int:
@@ -419,14 +426,79 @@ def cmd_preview(args) -> int:
 
 
 def cmd_accept(args) -> int:
-    from reskin import gate as GATE
+    """The agent passes segment checks (its stills show no visible flaw) or seam checks of the delivered video."""
+    from reskin import gate as GATE, review as REVIEW
     job = args.job_dir.resolve()
     JOB.load(job)
     lines = []
+    reason = args.reason or ""
+    if not args.segment and not args.seam:
+        raise ValueError("name what you passed: --segment S01:K02 and/or --seam S01:K03")
     for key in sorted(selection(args.segment) or []):
-        GATE.accept(job, key, args.reason)
-        lines.append(f"{key}: accepted ({args.reason}); the rest of its shot renders on the next render")
-    show(lines + ["next: render"])
+        GATE.accept(job, key, reason)
+        lines.append(f"{key}: passed ({reason or 'stills checked: no visible flaw'}); the rest of its shot renders on "
+                     "(a running render takes it up within a minute)")
+    for key in sorted(selection(args.seam) or []):
+        source_id, _, segment = key.partition(":")
+        REVIEW.accept_seam(job, source_id, segment, reason)
+        lines.append(f"{key}: seam passed ({reason or 'stills checked: no visible change'})")
+    show(lines + ["next: checks (what is left to look at), or run"])
+    return 0
+
+
+def pending_checks(job: Path, plan: dict) -> list[dict]:
+    """Every check waiting for the agent: segment checks of current renders and seam checks of current deliveries."""
+    from reskin import gate as GATE, review as REVIEW
+    found = []
+    for source_id, row in plan["sources"].items():
+        for seg in row["segments"]:
+            if seg.get("live"):
+                continue
+            key = f"{source_id}:{seg['id']}"
+            verdict = GATE.stored(job, key)
+            if GATE.pending(verdict):
+                found.append({"kind": "segment", "key": key, "held": bool(verdict.get("held")),
+                              "card": verdict.get("card"), "reasons": verdict.get("reasons") or []})
+        record_path = job / "state/assembled" / f"{source_id}.json"
+        report = REVIEW.last_round(job, source_id)
+        if report and record_path.is_file() and read(record_path).get("inputs") == report.get("assembled"):
+            for entry in REVIEW.pending_seams(job, source_id, report):
+                found.append({"kind": "seam", "key": f"{source_id}:{entry['segment']}", "held": entry["flagged"],
+                              "card": entry["card"], "reasons": []})
+    return found
+
+
+def check_lines(items: list[dict]) -> list[str]:
+    lines = [f"checks waiting for the agent: {len(items)} ({sum(1 for i in items if i['kind'] == 'segment')} segments, "
+             f"{sum(1 for i in items if i['kind'] == 'seam')} seams; {sum(1 for i in items if i['held'])} held or "
+             "flagged)"]
+    for item in items:
+        lines.append(f"  {item['kind']} {item['key']}{' HELD' if item['held'] else ''}: {item['card']}"
+                     + (f" ({'; '.join(item['reasons'])})" if item["reasons"] else ""))
+    return lines
+
+
+def cmd_checks(args) -> int:
+    """The check cards waiting for the agent; --wait blocks until there is one or the running render ends."""
+    import time
+    job = args.job_dir.resolve()
+    JOB.load(job)
+    deadline = time.monotonic() + args.timeout * 60
+    while True:
+        plan = load_plan(job)
+        items = pending_checks(job, plan)
+        status_path = job / "state/run.json"
+        running = status_path.is_file() and read(status_path).get("running")
+        if items or not args.wait or not running or time.monotonic() > deadline:
+            break
+        time.sleep(15)
+    lines = check_lines(items)
+    lines.append(f"render: {'running' if running else 'not running'}")
+    lines.append("next: " + ("each card lists its stills and what to look for; give each card to a sub-agent where you "
+                             "can, confirm what they report on the same stills, then accept or redo"
+                             if items else "nothing to check" + ("; checks --wait again to wait for the next card"
+                                                                 if running else "")))
+    show(lines)
     return 0
 
 
@@ -462,10 +534,13 @@ def cmd_run(args) -> int:
         show([f"  {r['key']}: {r['error']}" for r in failed] + ["next: fix the failures and run again"])
         return RULE_FAILURE
     if made:
-        show([f"new keyframes: {', '.join(made)}", f"sheets: {job / 'sheets'} (<id>-keyframes.jpg)",
-              "next: look at every new keyframe sheet; fix the edits or keyframes --redo <key> where needed (a "
-              "preview --only <id> --at <t> only for a moment the keyframes do not show); then run again (it "
-              "renders once nothing new needs looking at)"])
+        show([f"new keyframes and subject sheets: {', '.join(made)}",
+              f"sheets: {job / 'sheets'} (<id>-keyframes.jpg: original | styled; <id>-subjects.jpg: original crops | "
+              "reference sheet)",
+              "next: look at every new sheet: a subject sheet shows one subject only, on a plain background, no text, "
+              "with the original's design, proportions and colours in real materials; fix the edits or keyframes "
+              "--redo <key> where needed (a preview --only <id> --at <t> only for a moment the keyframes do not show); "
+              "then run again (it renders once nothing new needs looking at)"])
         return 0
     limit = int(state["options"].get("review_rounds", 0))
     reports: dict[str, list[str]] = {}
@@ -501,22 +576,23 @@ def cmd_run(args) -> int:
     futures = []
 
     def done(source_id, chain_results):
-        if any(r.get("error") or r.get("held") or r.get("waiting") for r in chain_results):
-            log(f"{source_id}: not complete (held or failed segments); no assembly yet")
+        if any(r.get("error") or r.get("awaiting") or r.get("waiting") for r in chain_results):
+            log(f"{source_id}: not complete (failed segments, or segments waiting for the agent); no assembly yet")
             return
         log(f"{source_id}: all segments ready; assembling and reviewing while the rest renders")
         futures.append(pool.submit(follow_up, source_id))
     waits = RENDER.twin_waits(job, state, plan, only)
     with job_lock(job, "render"):
         results = RENDER.run_all(job, state, plan, style, only, workers=args.workers, gate=not args.no_gate,
-                                 on_source_done=done, hold=set(waits))
+                                 on_source_done=done, hold=set(waits), wait_checks=args.wait_checks)
     pool.shutdown(wait=True)
     lines, failed = render_lines(job, results)
     lines = wait_lines(waits) + lines[:-1]
     for source_id in plan["sources"]:
         lines += reports.get(source_id, [])
-    lines.append(REVIEW_NEXT + "; held segments: look at their stills first (accept or redo); run again afterwards "
-                 "(only what changed renders, unchanged videos are not reviewed again)")
+    lines += check_lines(pending_checks(job, plan))
+    lines.append("next: segment cards first (the rest of a shot waits for them), then " + REVIEW_NEXT[len("next: "):]
+                 + "; run again afterwards (only what changed renders, unchanged videos are not reviewed again)")
     show(lines)
     return RULE_FAILURE if failed else 0
 
@@ -536,20 +612,22 @@ def cmd_status(args) -> int:
         keys = [s["id"] for s in row["segments"] if not s.get("live")]
         needed = ["anchor", *(s["id"] for s in row["segments"] if s["seam"] != "continuous" and not s.get("live"))]
         frames_ready = sum(1 for k in needed if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
+        needed += [f"subject-{s['id']}" for s in row.get("subjects") or [] if not row.get("subjects_owner")]
+        frames_ready = sum(1 for k in needed if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
         rendered, held = 0, []
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
             value = read(record) if record.is_file() else {}
             rendered += value.get("status") == "done"
             gate = value.get("gate") or {}
-            if gate.get("held") and not gate.get("accepted") and gate.get("generation_id") == value.get("generation_id"):
-                held.append(k)
+            if gate and not gate.get("accepted") and gate.get("generation_id") == value.get("generation_id"):
+                held.append(k + ("!" if gate.get("held") else ""))
         assembled = (job / "state/assembled" / f"{source_id}.json").is_file()
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
         lines.append(f"{source_id}: keyframes {frames_ready}/{len(needed)}, segments {rendered}/{len(keys)}"
-                     + (f" (held: {', '.join(held)})" if held else "")
+                     + (f" (waiting for the agent's check: {', '.join(held)}; ! = held by findings)" if held else "")
                      + f", assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
             if frames_ready < len(needed):
@@ -562,6 +640,11 @@ def cmd_status(args) -> int:
                 step = "review"
     from reskin import ledger
     lines += ledger.markdown(ledger.summary(job))
+    if plan["sources"]:
+        items = pending_checks(job, plan)
+        if items:
+            lines += check_lines(items)
+            step = step or "work through the check cards (checks), accept or redo"
     show(lines + [f"next: {step or 'confirm review issues, redo what is broken, or deliver'}"])
     return 0
 
@@ -612,7 +695,10 @@ def main() -> None:
     render.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     render.add_argument("--no-gate", action="store_true",
-                        help="do not check segments before the next segment of their shot starts")
+                        help="no segment checks (the next segment of a shot does not wait for the agent)")
+    render.add_argument("--wait-checks", action="store_true",
+                        help="keep running while segments wait for the agent's check (run it in the background and "
+                             "work through 'checks --wait'); ends when every chain is done")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
     assemble.add_argument("--only", nargs="*", help="source IDs")
     compare = command("compare", cmd_compare, help="the delivered video beside its original (<name>_对比.mp4)")
@@ -653,9 +739,19 @@ def main() -> None:
     run_cmd.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     run_cmd.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     run_cmd.add_argument("--no-gate", action="store_true", help="no segment checks")
-    accept = command("accept", cmd_accept, help="let a segment held by the segment check through")
-    accept.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
-    accept.add_argument("--reason", required=True, help="why the reported flaw is not one (as seen on the stills)")
+    run_cmd.add_argument("--wait-checks", action="store_true",
+                         help="keep running while segments wait for the agent's check (run it in the background and "
+                              "work through 'checks --wait'); ends when every chain is done")
+    accept = command("accept", cmd_accept, help="pass a segment check or a seam check after looking at its stills")
+    accept.add_argument("--segment", nargs="+", help="segment checks: keys like S01:K02")
+    accept.add_argument("--seam", nargs="+", help="seam checks of the delivered video: the segment after the seam, "
+                                                  "e.g. S01:K03")
+    accept.add_argument("--reason", help="why a held or flagged finding is not a flaw (as seen on the stills); "
+                                         "required for those")
+    checks = command("checks", cmd_checks, help="the check cards waiting for the agent")
+    checks.add_argument("--wait", action="store_true",
+                        help="block until a card waits or the running render ends (instead of polling)")
+    checks.add_argument("--timeout", type=float, default=30, help="minutes --wait waits at most")
     cost = command("cost", cmd_cost, help="what was sent to Seedance, GPT Image and Gemini, and why")
     cost.add_argument("--json", action="store_true")
     command("status", cmd_status, help="progress per source and the next step")

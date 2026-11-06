@@ -14,11 +14,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from reskin import images
+from reskin import images, subjects as SUBJECTS
 from reskin.analyze import font
 from reskin.common import digest, log, read, sha, write
 from reskin.keyframes import grab
-from reskin.prompts import compose
+from reskin.plan import SUBJECT_SHEETS
+from reskin.prompts import compose, subjects_clause, subjects_in
 
 LIMIT = 4            # previews per call at most
 WORKERS = 4          # GPT Image previews in flight at once
@@ -59,8 +60,13 @@ def make(job: Path, state: dict, source_id: str, row: dict, style: dict, moment:
         raise ValueError(f"{moment:g} s lies in a live-action span: delivered from the original, nothing to preview")
     original = grab(Path(sources[source_id]["path"]), frame, row["fps"], folder / f"{name}-src.png")
     anchor = job / "keyframes" / f"{source_id}-anchor.png"
-    prompt = compose(style, "keyframe", row, extra=corrections(job, source_id, row, moment), span=(moment, moment))
-    inputs = {"images": [sha(original), sha(anchor)], "prompt": prompt, "size": [row["width"], row["height"]]}
+    shown = [s["id"] for s, _ in subjects_in(row, (moment, moment))][:SUBJECT_SHEETS]
+    sheets = SUBJECTS.sheets_for(job, source_id, row, shown)
+    clause = subjects_clause("keyframe", [(s["what"], "") for s, _ in sheets], first=3)
+    prompt = compose(style, "keyframe", row, extra=corrections(job, source_id, row, moment), span=(moment, moment),
+                     subjects=clause)
+    references = [original, anchor, *(path for _, path in sheets)]
+    inputs = {"images": [sha(p) for p in references], "prompt": prompt, "size": [row["width"], row["height"]]}
     output = folder / f"{name}.png"
     record_path = job / "state/preview.json"
     with lock:
@@ -68,7 +74,7 @@ def make(job: Path, state: dict, source_id: str, row: dict, style: dict, moment:
     if output.is_file() and known.get("digest") == digest(inputs) and not redo:
         return {"key": name, "reused": True}
     log(f"{source_id}: preview at {moment:.2f} s")
-    made = images.edit([original, anchor], prompt, output, width=row["width"], height=row["height"], job=job,
+    made = images.edit(references, prompt, output, width=row["width"], height=row["height"], job=job,
                        key=f"{source_id}@{moment:.2f}", purpose="preview")
     with lock:
         data = read(record_path) if record_path.is_file() else {}

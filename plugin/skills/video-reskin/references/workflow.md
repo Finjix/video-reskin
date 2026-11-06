@@ -11,20 +11,22 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
 | `lint [--edits <json>] [--only S01]` | Gemini lists objects (colours, times), logos and warning lines, screen-fixed text, HUD, live-action stretches and the end card; checks the edits; drafts `config/edits.draft.json` → `catalog/lint.md`, `catalog/<id>-lint.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `keyframes [--only K] [--redo K]` | anchor + the keyframe of every shot's first segment (GPT Image on Lumos, quality high, 2K) → `keyframes/`, `sheets/<id>-keyframes.jpg` | ~1 min per image, 3 at a time |
+| `keyframes [--only K] [--redo K]` | anchor, then one reference sheet per subject (after the anchor), then the keyframe of every shot's first segment with the sheets of the subjects in it (GPT Image on Lumos, quality high, 2K) → `keyframes/`, `sheets/<id>-keyframes.jpg`, `sheets/<id>-subjects.jpg`; keys `S01:anchor`, `S01:K02`, `S01:<subject id>` | ~1 min per image, 3 at a time |
 | `preview --only S01 --at T [T...] [--redo]` | GPT Image previews of at most 4 moments of one source, with the texts the video prompt uses there and the segment's corrective sentences; only looked at → `sheets/<id>-preview.jpg` | ~1-2 min per image |
-| `render [--only K] [--workers 4] [--no-gate]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot one after another, each later one starting with the previous result's last second, longest shots first; each segment with a successor is checked first (seam and wiped-corner measures + Gemini) and held when flawed | several minutes per segment, 4 shots at a time |
-| `run [--only K] [--no-gate]` | keyframes (stops when any are new, to be looked at); then render with checks, and assemble and review each source as soon as its segments are done (unchanged videos are not reviewed again) | as render |
-| `accept --segment S01:K02 --reason R` | lets a held segment through (the check was wrong, as seen on its stills) | - |
+| `render [--only K] [--workers 4] [--no-gate] [--wait-checks]` | Seedance 2.5 video edit of every segment at 1080p → `ai/` (reference pictures: the keyframe, then the subject sheets of the segment); segments of one shot one after another, each later one starting with the previous result's last second, longest shots first; every segment is checked as soon as it is rendered (measures, Gemini on the video, stills and a card for the agent) and the next one of its shot waits for the agent's `accept` or `redo`; a waiting shot gives its worker up. Without `--wait-checks` it ends when nothing else can render; with it, it keeps going (background) until every chain is done | several minutes per segment, 4 shots at a time |
+| `run [--only K] [--no-gate] [--wait-checks]` | keyframes and subject sheets (stops when any are new, to be looked at); then render with checks, and assemble and review each source as soon as its segments are done and passed (unchanged videos are not reviewed again); lists the cards waiting for the agent | as render |
+| `accept [--segment S01:K02 ...] [--seam S01:K03 ...] [--reason R]` | passes segment checks (the stills show no visible flaw; the rest of the shot renders on) and seam checks of the current delivery (named by the segment after the seam); a held or flagged card needs `--reason` | - |
+| `checks [--wait] [--timeout 30]` | the segment and seam cards waiting for the agent, with their paths; `--wait` blocks until one waits or the running render ends | - |
 | `cost [--json]` | Seedance seconds by cause (new, redo, upstream, auto-retry, plan, keyframe, wipe, unusable), resolution and source; GPT Image and Gemini calls | - |
 | `assemble [--only S01]` | retime, colour-match, switch at the best-matching frame, join with the source audio → delivery folder (1080p, 24 fps); seam and wiped-corner measurements, `sheets/<id>-seams.jpg` | ~1 min per video |
-| `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2), reports its realism, checks that every recurring character and object keeps its keyframe look (close-ups → `review/<id>-identity-r<n>-subjects.jpg`), checks every seam and wiped corner close up; measured seams and corners added; stills of every issue with a Gemini triage hint → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 1-2 min per video |
+| `review [--only S01] [--fps F]` | Gemini compares original and result (4 fps up to 75 s, else 2, each frame at the HIGH media resolution), reports its realism, checks that every subject keeps its look (close-ups → `review/<id>-identity-r<n>-subjects.jpg`), checks every seam (Gemini on the 4 s around it at the video's frame rate; stills and a card for the agent → `review/seams/<id>-<Kxx>/`), the kept `ui` elements and wiped corners; measured seams and corners added; stills of every issue → `reports/review/<id>-r<n>.md/json`, `review/issues/` | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--replace-prompt] [--keyframe]` | sends confirmed segments back for another attempt; corrective sentences accumulate over attempts, `--replace-prompt` drops the earlier ones first | - |
 | `compare [--only S01] [--layout left\|top] [--with <video>...] [--labels <text>...]` | the delivered video beside its original (original left or top, each side at the original's size, delivered audio) → `<name>_写实_对比.mp4` in the delivery folder; `--with` puts earlier versions on the delivered clock (a previous delivery) between the two, `--labels` captions each column (original, each `--with`, result); only when the user asks for a comparison | ~20 s per minute of video, more with `--with` |
 | `status` | progress per source and the next step | - |
 
-Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key).
+Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key); a
+subject sheet `S01:<subject id>`; a seam is named by the segment after it (`S01:K03`: the join of K02 and K03).
 
 ## Work order (`init`)
 
@@ -72,7 +74,11 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
                  {"box": [0.73, 0.02, 1.0, 0.11], "what": "the game logo \"WHITEOUT SURVIVAL\" in white and ice-blue letters in the top-right corner", "start": 0, "end": 36},
                  {"box": [0.0, 0.85, 0.36, 1.0], "what": "the game logo \"WHITEOUT SURVIVAL\" in white and ice-blue letters in the bottom-left corner", "start": 35, "end": 65.7},
                  {"box": [0.1, 0.955, 0.9, 1.0], "what": "one line of small white text \"健康游戏忠告：抵制不良游戏，拒绝盗版游戏\" along the bottom edge"},
-                 {"what": "the caption \"Caught a big tuna!\" in bold yellow letters with a black outline at the bottom centre", "start": 3, "end": 6}],
+                 {"what": "the caption \"Caught a big tuna!\" in bold yellow letters with a black outline at the bottom centre", "start": 3, "end": 6, "dynamic": true}],
+          "subjects": [{"id": "hero", "what": "the protagonist: a chibi fisherman in a light blue-white winter coat and a white fur hat",
+                        "view": "2.5d", "from": [{"at": 12.4, "box": [0.41, 0.30, 0.58, 0.72]}, {"at": 31.0, "box": [0.20, 0.35, 0.36, 0.80]}]},
+                       {"id": "truck", "what": "a blue pickup truck", "view": "2.5d",
+                        "from": [{"at": 60.2, "box": [0.55, 0.40, 0.95, 0.75]}], "on": [[56, 65.7]]}],
           "anchor": 36.5},
   "S02": {"keep": [0, 61.0], "style_from": "S01"},
   "S03": {"like": "S01",
@@ -130,6 +136,24 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
     perspective) is part of the scene: the models keep it with the rest of the picture.
   - Long lines of small Chinese text and many changing digits are what the models get wrong most often: check them
     on the keyframes first.
+  - `dynamic: true` for animated text and HUD (counting digits, popping, zooming or flying text, a HUD effect): the
+    checks tolerate a little blur or trailing on it while it moves (low), never garbled characters or wrong digits.
+    Every other item is static and must stay crisp: a blurred, soft-edged, haloed, garbled or changed static text,
+    logo or warning line is high.
+- `subjects`: what must keep one look and is hard to restyle from one picture: the protagonist (always), characters,
+  vehicles, animals or machines seen again and again or moving a lot, and objects or characters that come into view
+  after the first frame of their shot. Each becomes one multi-view reference sheet (GPT Image, after the anchor, in
+  its look; `keyframes/<id>-subject-<subject id>.png`) that goes with every shot keyframe showing it and every
+  Seedance segment it is on screen in (at most 4 per keyframe or segment, in order of appearance). Item:
+  `{"id": lowercase name, "what": English description (shape, build, clothes, colours), "view": "2d" | "2.5d" | "3d",
+  "views": text (optional: replaces the view's preset), "from": [{"at": s, "box": [x0, y0, x1, y1]}] (1-3 crops of
+  the original where it shows large and unhidden), "on": [[start, end], ...] (optional: when it is on screen; the whole
+  kept range by default)}`. `view` follows the game's camera: `2d` side and front views, `2.5d` four views from a
+  fixed high three-quarter camera, `3d` a turnaround. Time `on` like a timed material: a sheet named where the
+  subject is not shown gets drawn there. `reports/plan.md` lists per segment its sheets, the subjects new after its
+  reference frame and the timed materials that come into view without a sheet. A `like` source takes its twin's
+  subjects and sheets.
+- `subject_refs`: per source, default true; false gives the sheets to the keyframes only, not to Seedance.
 - `style_ref`: a texture reference for the anchor keyframe: an image path, or `{"path": <image or video>, "at":
   <seconds, for a video>, "box": [x0, y0, x1, y1]}` (fractions; crop away logos, warning lines and objects that could
   be copied). Stored as `keyframes/<id>-styleref.png`; keyframes and segments follow the anchor.
@@ -144,7 +168,7 @@ boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
   too. To leave a live-action opening out of the delivery instead, start `keep` after it.
 - `like`: the same ad in another size (the portrait of a landscape source; a separate framing, not a crop). The
   source takes the named twin's `keep`, `materials`, `extra`, `anchor`, `split_at`, `max_segment_seconds`,
-  `chain_prefix` and `live` (its own keys win; an inherited `keep` ends at its own length) and `style_from` the twin; `remove`
+  `chain_prefix`, `live`, `subjects` and `subject_refs` (with the twin's sheets; its own keys win; an inherited `keep` ends at its own length) and `style_from` the twin; `remove`
   and `ui` are its own, since the boxes and places sit elsewhere in another framing. The twin must have its own edits,
   no `like` and no `skip`; lengths more than 0.3 s apart need an own `keep` (another cut: check the times). Each
   segment spanning the same seconds as one of the twin's (within 0.1 s, the same seam kind) also takes that segment's
@@ -181,6 +205,16 @@ rest of its chain again. Edit the edits file, not the plan.
 - Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, 24 fps, H.264, AAC, the source audio
   of the kept range); `<source name>_写实_对比.mp4` after `compare`.
 - `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.jpg`.
+- `temp/keyframes/<id>-subject-<subject id>.png` (the reference sheet) and `-src<n>.png` (its crops of the original);
+  `temp/sheets/<id>-subjects.jpg` (crops | sheet per subject).
+- `temp/review/segments/<id>-<Kxx>/`: the segment check: `card.md`, `original-<t>.jpg` (every 2 s, original above),
+  `previous-<t>.jpg` (every 2 s, the segment before above), `vs-original.mp4` and `vs-previous.mp4` (what Gemini
+  watched), `issue-p<k>.jpg` (around the findings); the verdict is in `state/render/<id>-<Kxx>.json` (`gate`:
+  `held`, `accepted`, `note`).
+- `temp/review/seams/<id>-<Kxx>/`: the seam check of the join before Kxx: `card.md`, the stills (`<n>-<t>.jpg`,
+  original above) and `seam.mp4`; verdicts in `state/checks/<id>-seams.json` (for one delivery: a new assembly asks
+  again).
+- `temp/state/run.json`: whether a render runs and which segments wait for the agent (`checks --wait` reads it).
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, slightly shorter than the source clip: `assemble`
   stretches them back exactly).
 - `temp/state/assembled/<id>.json`:
@@ -193,9 +227,7 @@ rest of its chain again. Edit the edits file, not the plan.
     with the moments it was smeared.
   - colour corrections, segment times in the delivered video.
 - `temp/sheets/<id>-seams.jpg`: the frames on both sides of each switch.
-- `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments, description and triage
-  hint; `temp/review/issues/<id>-r<n>-p<k>.jpg`: the stills of every issue (upper row original, lower row restyled).
-- `temp/review/gate/<id>-<Kxx>-p<k>.jpg`: stills of a held segment's findings; the verdict is in
-  `state/render/<id>-<Kxx>.json` (`gate`).
+- `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description, and the
+  seam cards; `temp/review/issues/<id>-r<n>-p<k>.jpg`: the stills of every issue (upper row original, lower row restyled).
 - `temp/state/ledger.jsonl`: one line per paid call (Seedance segment, GPT Image keyframe or preview, Gemini check)
   with its cause; `cost` sums it.

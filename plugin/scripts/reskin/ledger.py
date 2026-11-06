@@ -10,8 +10,8 @@ from pathlib import Path
 
 _LOCK = threading.Lock()
 # Why a Seedance segment was sent: what changed since its last finished render.
-CAUSES = ("new", "redo", "auto-retry", "upstream", "keyframe", "wipe", "plan", "resolution", "model", "unusable",
-          "resume")
+CAUSES = ("new", "redo", "auto-retry", "upstream", "keyframe", "subjects", "wipe", "plan", "resolution", "model",
+          "unusable", "resume")
 
 
 def path(job: Path) -> Path:

@@ -76,12 +76,42 @@ def wiped_clause(items: list, span: tuple[float, float] | None) -> str:
     return read(PROMPTS).get("wiped", "").format(where=listing(spots)) + " " if spots else ""
 
 
+def subject_spans(subject: dict, keep: list[float]) -> list[list[float]]:
+    """When a subject is on screen (source seconds): its `on` stretches, the whole kept range by default."""
+    spans = subject.get("on") or [list(keep)]
+    return [[float(a), float(b)] for a, b in spans]
+
+
+def subjects_in(row: dict, span: tuple[float, float]) -> list[tuple[dict, float]]:
+    """The row's subjects on screen during `span` with the first source second each shows there, in order of
+    appearance. A moment (start == end) takes the subjects on screen at that moment."""
+    found = []
+    for subject in row.get("subjects") or []:
+        starts = [max(a, span[0]) for a, b in subject_spans(subject, row["keep"]) if a <= span[1] and span[0] <= b]
+        if starts:
+            found.append((subject, min(starts)))
+    return sorted(found, key=lambda item: item[1])
+
+
+def subjects_clause(kind: str, named: list[tuple[str, str]], first: int) -> str:
+    """The sentence that tells the image or video model what the subject reference sheets are: `named` lists
+    (description, when) per sheet in image order, from image `first`."""
+    if not named:
+        return ""
+    texts = read(PROMPTS)
+    items = "; ".join(f"image {first + n}: {what}" + (f" ({when})" if when else "") for n, (what, when) in enumerate(named))
+    template = texts["subjects_keyframe" if kind != "video" else "subjects_video"]
+    return template.format(first=first, last=first + len(named) - 1, items=items)
+
+
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
-            style_ref: bool = False) -> str:
+            style_ref: bool = False, subjects: str = "") -> str:
     """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
     source time the text is for (a frame: start == end). `style_ref`: the anchor gets a texture reference picture as
-    its second image (the style's `style_ref` sentence says how to use it)."""
-    wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
+    its second image (the style's `style_ref` sentence says how to use it). `subjects`: the sentence naming the subject
+    reference sheets that go along (subjects_clause)."""
+    wishes = " ".join(part.strip() for part in (subjects or "", row.get("extra") or "", extra or "")
+                      if part and part.strip())
     materials = "; ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
     items = row.get("remove") or []
     if kind == "video":

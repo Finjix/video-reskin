@@ -6,7 +6,7 @@ from pathlib import Path
 from reskin import ledger, lumos, net
 from reskin.common import log as _log
 
-IMAGE_MODEL = "gpt-image-2.5-sunburst"
+IMAGE_MODEL = "gpt-image-2.6-sunburst"     # Lumos, from 2026-11-06 (2.5 before)
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
            "4:5": 4 / 5, "5:4": 5 / 4}
 

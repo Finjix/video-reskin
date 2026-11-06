@@ -1,23 +1,38 @@
 # Review loop
 
-`review` sends Gemini (`gemini-3.8-flash`) one clip with the original and the restyled video side by side (left/right
-for vertical videos, top/bottom for horizontal ones), frame-synchronised, with the seam times and the removal list,
-then a close-up of every seam at 10 fps (from 1.5 s before the switch to 1.5 s after the moment the later segment's
-own frames start) with one question: does the restyled scene change there? Every in-shot seam is then checked
-twice more, because a seam between two renders hides in a pan (GOF3D10012 at 26.4 s: the river less saturated, the
-fish bluer, a tree crown at the top edge in the game's cone shape; every grey-level measure and the 3 s close-up passed
-it):
-- `measured` look step (from `assemble`, `look` in the seam entry): for every pair of consecutive frames of the whole
-  video, the change of saturation and of colour after the camera's shift (from the original) is taken out and the
-  original's own change over the same pair subtracted; the seam's step is scored against the video's ordinary pairs
-  (robust z: 8 or more visible, 5 slight). 26.4 s scored saturation 2.31 against a usual 0.19 (z 9.4); of 1291
-  ordinary pairs of that video one reached z 8, in the original's own end-card flash.
-- `gemini-seam-pair`: the last frame before the seam and the first after it at full size, the original's two moments
-  below (`review/<id>-seam-<Kxx>-<t>-pair.jpg`), with the question which differences the original does not show.
-  Medium or high is a high issue; low is the flicker any frame pair has (an ordinary pair of the same video: low). It adds the
-seams `assemble` measured as `slight` (low: rarely visible in playback) or `visible` (high), and the wiped logo
-corners it measured as `soft` (low) or `smeared` (high). It draws the stills of every issue and asks Gemini once more,
-on those stills, whether each is visible and whether the original shows the same: the `triage` hint.
+The review has two layers that see different things, at two moments.
+
+- **Gemini watches the video.** Every clip it gets is the video itself, uncut, each panel at the delivery's size
+  (1080p, crf 18), read at the HIGH media resolution (264 tokens a frame; the default read a frame at 66, too coarse
+  for small flaws even in a 1080p clip). It judges motion, continuity and the whole.
+- **The agent looks at stills.** Full-size frames (JPEG 95), one moment per picture, the original above the restyle
+  (side by side for portrait videos). Garbled letters, soft logo edges, a morphing hand or a colour step show there.
+  Each check writes a card listing its stills, what to look for and the report format; sub-agents can take one card
+  each.
+
+Right after each segment renders (the segment check, before the next segment of its shot starts from it):
+- Gemini: the segment beside its original (6 fps: continuity, bugs, UI, realism over time); when the segment before
+  it in the video is rendered, both segments beside their originals in a 2 x 2 grid (one look across them: colour,
+  brightness, scenery, subjects; changes the originals show too do not count).
+- Agent: every 2 s the original above the segment; every 2 s the previous segment above this one at the same seconds
+  into each.
+- Measured: the seam to the segment before it inside the shot, wiped logo corners.
+
+In each review round of the assembled video:
+- Gemini: the whole video beside its original (4 fps up to 75 s, else 2: drifts across parts and cuts, end card,
+  added text, realism timeline); every seam (none beside a live-action stretch): the 4 s around it, original beside
+  delivery, at the video's frame rate, with one question: does the restyled picture change there (a jump, a fade, a
+  colour or brightness step, other scenery or objects)?
+- Agent: per seam, stills every second from 2 s before to 2 s after the switch and the frames on both sides of it
+  (and of where the later segment's own frames start), on `review/seams/<id>-<Kxx>/card.md`; the stills of every
+  issue.
+- Measured: the `look` step (from `assemble`, `look` in the seam entry): for every pair of consecutive frames of the
+  whole video, the change of saturation and of colour after the camera's shift (from the original) is taken out and
+  the original's own change over the same pair subtracted; the seam's step is scored against the video's ordinary
+  pairs (robust z: 8 or more visible, 5 slight). GOF3D10012's 26.4 s seam (the river less saturated, the fish bluer, a
+  tree crown at the top edge in the game's cone shape) scored saturation 2.31 against a usual 0.19 (z 9.4); of 1291
+  ordinary pairs of that video one reached z 8, in the original's own end-card flash. Seams `assemble` measured as
+  `slight` (low) or `visible` (high) and wiped corners measured `soft` (low) or `smeared` (high) are added too.
 
 The goal it judges against is a stable video with real materials and the original's shapes kept, not the most
 realistic look. Gemini rates the realism over time (`realism`, 5 = looks like real camera footage, 3 = mixed, 1 =
@@ -26,13 +41,14 @@ cartoon) and lists what still looks game-like; the timeline is reported (`realis
 editor accepted go along to every later check and to the review, which do not report them again.
 
 The identity check keeps every recurring character and object at one look from the first second to the last: Gemini
-finds the recurring subjects on the original frames (the protagonist always, up to three more), the program cuts
+follows the edits' `subjects` on the original frames (without them it picks the protagonist and up to three more), the program cuts
 close-ups of each from the styled keyframes (REF) and from moments across the video, and Gemini judges each pair on
 build, rendering and colours (`identity` issues, sheets `review/<id>-identity-r<n>-subjects.jpg`). It runs in the
 review only (not per segment or per preview).
 
 The kept-element check holds every `ui` item with a `box` (game logos, warning lines, counters, captions, buttons)
-to the original: the review draws a sheet per item, `review/<id>-kept-r<n>-<k>.jpg` (eight moments, upper row
+to the original (static items strictly: any blur, soft or haloed edge is high; items marked `dynamic` may blur or
+trail a little while they move, which is low; garbled characters are high on both): the review draws a sheet per item, `review/<id>-kept-r<n>-<k>.jpg` (eight moments, upper row
 original, lower row delivered), on which Gemini compares the element character by character (`gemini-keep`):
 garbled, blurred, doubled (a second copy beside it), changed (moved, resized, recoloured, restyled letters, partly
 missing) are always high. The models draw these elements, so a fix renders: wrong on the keyframe too, sharpen the
@@ -66,8 +82,8 @@ Each issue lists the segments it falls in (`S01:K03`). Gemini is a second pair o
 ## Confirm on stills
 
 For every high issue look at its stills in `review/issues/<id>-r<n>-p<k>.jpg` (more moments: `frames --source <id>
---at <start> [<end>]`): the upper row is the original, the lower row the result, at T-0.3 s, T and T+0.3 s. The triage
-hint is a second opinion only. Decide:
+--at <start> [<end>]`): the upper row is the original, the lower row the result, at T-0.3 s, T and T+0.3 s. Gemini's
+description is a second opinion only. Decide:
 
 - **Confirmed**: the bottom row shows the flaw and the top row does not. Note what exactly is wrong.
 - **Dismissed**: the original shows the same thing (game physics, clipping, motion blur), the flaw is not visible on
@@ -116,15 +132,19 @@ that morphs, vanishes or appears, a prominent object in the wrong colour.
   round is numbered; keep going until a round shows no visible flaw (no limit by default; a work order's
   `review_rounds` caps it), then deliver and list the medium and low issues.
 
-## Held segments (segment check)
+## Segment and seam cards
 
-`run`/`render` checks every segment that has a successor in its shot before the successor starts: the seam to the
-segment before it and the segment's wiped logo corners are measured, and Gemini compares the segment with its
-original (same categories, the `ui` elements included). A visible seam, a smeared corner or a high
-Gemini finding holds the segment; the rest of the shot waits, other shots go on. Confirm on
-`review/gate/<id>-<Kxx>-p<k>.jpg` like a review issue: `redo` (one segment renders again instead of the whole shot) or
-`accept --segment <key> --reason <why>`. An accepted finding (and its reason) is passed to the later checks, so the
-same flaw continuing in the next segments does not hold them again.
+`run`/`render` checks every segment as soon as it is rendered and writes `review/segments/<id>-<Kxx>/card.md`; the
+next segment of its shot waits until the agent passes it (`accept --segment <key>`) or sends it back (`redo`). A card
+is HELD for a visible measured seam, a smeared corner or a high Gemini finding: confirm each on its stills (and
+`issue-p<k>.jpg` around the findings); passing it needs `--reason`. An accepted finding (and its reason) is passed to
+the later checks and the review, so the same flaw continuing in the next segments is not reported again. Each review
+round writes a seam card per join, `review/seams/<id>-<Kxx>/card.md`; pass each with `accept --seam <id>:<Kxx>`
+(FLAGGED ones with `--reason`), or `redo` the segment after the seam. A new assembly asks for the seams again.
 
-- `segment check failed (...); continuing unchecked` (a Gemini error): the successor renders without the check; look
-  at that segment's frames (`frames` after assembly) before you trust the review alone.
+`checks` lists every card waiting; `checks --wait` blocks until one waits or the running render ends. With
+sub-agents, give each a card (several in parallel) and confirm what they report on the same stills before acting.
+
+- `segment check failed (...); continuing unchecked` (an error before the card was written): the successor renders
+  without the check; look at that segment's frames (`frames` after assembly) before you trust the review alone.
+- A card that says Gemini failed: judge from its stills alone.

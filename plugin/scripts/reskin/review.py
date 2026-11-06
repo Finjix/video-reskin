@@ -70,26 +70,93 @@ INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline v
 PROXY_CRF = 18                 # review proxy quality; raised step by step only when the clip would not fit inline
 
 
+REVIEW_FPS = 24               # frame rate of the clips Gemini gets (the delivery's); it samples them at its own rate
+
+
+def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF) -> Path:
+    """Panels on one clip, each at the delivery's own `size` (Gemini judges the delivered detail) and labelled: two
+    panels stacked (top/bottom for landscape, left/right for portrait), four as a 2 x 2 grid (rows: panels 1-2, 3-4).
+    A panel is {"path", "start" (seconds), "end" (None: to its end), "label"}; all share one clock from their starts,
+    a shorter one holding its last frame. `crf` goes up only when the clip would exceed INLINE_LIMIT."""
+    width, height = round(size[0] / 2) * 2, round(size[1] / 2) * 2
+    portrait = height >= width
+    lengths = []
+    inputs = []
+    for panel in panels:
+        start = max(0.0, float(panel.get("start") or 0.0))
+        end = panel.get("end")
+        length = (float(end) - start) if end is not None else video_info(Path(panel["path"]))["duration"] - start
+        lengths.append(max(1 / REVIEW_FPS, length))
+        inputs += ["-ss", f"{start:.6f}", "-t", f"{lengths[-1]:.6f}", "-i", str(panel["path"])]
+    longest = max(lengths)
+    chains = []
+    for index, (panel, length) in enumerate(zip(panels, lengths)):
+        chains.append(f"[{index}:v]setpts=PTS-STARTPTS,fps={REVIEW_FPS},scale={width}:{height}:flags=lanczos,setsar=1,"
+                      f"tpad=stop_mode=clone:stop_duration={longest - length + .2:.3f},trim=duration={longest:.6f}"
+                      f"{_drawtext(panel.get('label', ''))}[p{index}]")
+    if len(panels) == 2:
+        stack = f"[p0][p1]{'hstack' if portrait else 'vstack'}=inputs=2"
+    elif len(panels) == 4:
+        stack = "[p0][p1][p2][p3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0"
+    else:
+        raise ValueError("a review clip has 2 or 4 panels")
+    graph = ";".join(chains) + f";{stack},format=yuv420p[v]"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", "-an",
+             "-c:v", "libx264", "-preset", "fast", "-crf", str(crf), "-r", str(REVIEW_FPS), output])
+        if output.stat().st_size <= INLINE_LIMIT or crf >= 36:
+            return output
+        crf += 4
+
+
 def side_by_side(source_path: str, start: float, end: float, result_path: str, size: tuple[int, int],
                  output: Path, crf: int = PROXY_CRF) -> tuple[Path, str]:
     """Original (left or top) and restyled (right or bottom) on one clip, the same clock for both: the source from
-    `start` to `end`, the result from its first frame. Each half keeps the result's own size (1080p) at 24 fps, so
-    Gemini judges the delivered detail; `crf` goes up only when the clip would exceed INLINE_LIMIT."""
+    `start` to `end`, the result from its first frame, each at the delivery's size (grid_clip)."""
+    portrait = size[1] >= size[0]
+    grid_clip([{"path": source_path, "start": start, "end": end, "label": "ORIGINAL"},
+               {"path": result_path, "start": 0.0, "end": end - start, "label": "RESTYLED"}], size, output, crf)
+    return output, ("left" if portrait else "top")
+
+
+def video_part(path: Path, fps: float) -> dict:
+    """An inline video part Gemini samples at `fps` (frames per second it reads, each at the HIGH media
+    resolution)."""
+    part = winky.inline(path, "video/mp4")
+    part["videoMetadata"] = {"fps": fps}
+    return part
+
+
+def every(length: float, step: float, fps: float) -> list[float]:
+    """Moments from 0 every `step` seconds over a clip of `length` seconds, its last frame included (when it lies
+    more than a third of a step after the last moment)."""
+    last = max(0.0, length - 1 / fps)
+    moments = [round(i * step, 3) for i in range(int(last / step) + 1)]
+    if last - moments[-1] > step / 3:
+        moments.append(round(last, 3))
+    return moments
+
+
+def still_pair(upper: tuple[str, float, str], lower: tuple[str, float, str], size: tuple[int, int],
+               output: Path) -> Path:
+    """Two frames at the delivery's full size, each (path, seconds, label): stacked for a landscape video, side by
+    side for a portrait one, labelled above each; JPEG quality 95 (the agent judges detail on them)."""
+    from reskin.common import font as _font
     width, height = size
     portrait = height >= width
-    side = (round(width / 2) * 2, round(height / 2) * 2)
+    band = 34
+    pictures = [(frame_at(path, t, width, height), label) for path, t, label in (upper, lower)]
+    canvas = Image.new("RGB", ((2 * width if portrait else width), (height + band) * (1 if portrait else 2)), "white")
+    draw = ImageDraw.Draw(canvas)
+    text = _font("regular", 24)
+    for number, (picture, label) in enumerate(pictures):
+        x, y = (number * width, 0) if portrait else (0, number * (height + band))
+        draw.text((x + 8, y + 4), label, fill="black", font=text)
+        canvas.paste(picture, (x, y + band))
     output.parent.mkdir(parents=True, exist_ok=True)
-    stack = "hstack" if portrait else "vstack"
-    while True:
-        graph = (f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,fps=24,"
-                 f"scale={side[0]}:{side[1]}:flags=lanczos{_drawtext('ORIGINAL')}[a];"
-                 f"[1:v]setpts=PTS-STARTPTS,fps=24,scale={side[0]}:{side[1]}:flags=lanczos{_drawtext('RESTYLED')}[b];"
-                 f"[a][b]{stack}=inputs=2:shortest=1,format=yuv420p[v]")
-        run([FFMPEG, "-v", "error", "-y", "-i", source_path, "-i", result_path, "-filter_complex", graph,
-             "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), output])
-        if output.stat().st_size <= INLINE_LIMIT or crf >= 36:
-            return output, ("left" if portrait else "top")
-        crf += 4
+    canvas.save(output, quality=95)
+    return output
 
 
 def proxy(job: Path, state: dict, source_id: str, assembled: dict) -> tuple[Path, str]:
@@ -120,10 +187,26 @@ def _known(notes: list[str] | None) -> list[str]:
             "continues in this clip):", *[f"- {note}" for note in notes]]
 
 
+def ui_listing(items) -> str:
+    """The `ui` items for a review prompt, the animated ones marked (a little blur or ghosting is tolerated on them
+    while they move; static text and logos must stay crisp)."""
+    parts = []
+    for item in items or []:
+        text = describe([item])
+        parts.append(text + (" [animated]" if isinstance(item, dict) and item.get("dynamic") else " [static]"))
+    return "; ".join(parts)
+
+
+UI_RULE = ("Static elements (text, logos, warning lines, labels that stay still) must be crisp: any blur, soft or "
+           "haloed edge, garbled or changed character, doubling, restyle or move is high. Animated elements (counting "
+           "digits, popping, zooming or flying text, HUD effects) may blur or trail a little while they move (low at "
+           "most); garbled characters or wrong digits are still defects.")
+
+
 def _goal(state: dict, plan_row: dict, layout: str, what: str) -> list[str]:
     other = "right" if layout == "left" else "bottom"
     removal = describe(plan_row["remove"]) or "nothing named"
-    ui = describe(plan_row.get("ui") or [])
+    ui = ui_listing(plan_row.get("ui") or [])
     style = state["style"] if isinstance(state["style"], str) else state["style"].get("label")
     return [
         "You are a strict quality reviewer for AI-restyled game advertising videos.",
@@ -135,7 +218,7 @@ def _goal(state: dict, plan_row: dict, layout: str, what: str) -> list[str]:
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         *([f"Screen-fixed interface and text the models must draw exactly as in the original (same characters, "
            f"digits, place, size and colours; report any garbled, missing, doubled, restyled or changed one as "
-           f"added_text or artifact): {ui}."] if ui else []),
+           f"added_text or artifact): {ui}. {UI_RULE}"] if ui else []),
     ]
 
 
@@ -179,6 +262,9 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str, known: lis
         f"The restyled video was rendered in segments and joined at: {seams}. Check these moments closely: inside a "
         "shot the restyled scene must continue unchanged (same terrain, objects, rope and cable colours, textures, "
         "light); any change, dissolve or double image there is a seam_color defect.",
+        "Each segment was already checked on its own; watch above all for what only the whole video shows: the look, "
+        "the scenery and every recurring character or object changing from one part to another (the first seconds "
+        "against the last), drifts across camera cuts, the end card, and added text.",
         *([f"These stretches are live-action footage, not the game, delivered unchanged from the original on purpose: "
            f"{', '.join(f'{a:.2f}-{b:.2f} s' for a, b in live)}. Both sides show the same there; do not report them "
            "as unchanged, not restyled or not realistic, and leave them out of `realism`."] if live else []),
@@ -381,7 +467,14 @@ def overview_sheet(frames: list[dict], size: tuple[int, int], output: Path) -> P
     return output
 
 
-def detect_prompt(count: int) -> str:
+def detect_prompt(count: int, named: list[dict] | None = None) -> str:
+    if named:
+        listing = "; ".join(f"{s['id']}: {s['what']}" for s in named[:SUBJECTS])
+        return (f"These are {count} frames of one game video, each after its number. Follow exactly these subjects, "
+                f"whose look must stay the same through the video: {listing}. Use each id as `name` and describe the "
+                "subject in Chinese in `description`. For every frame list the box of each subject visible in it: "
+                "box_2d = [ymin, xmin, ymax, xmax], normalised to 0-1000 on that frame. Leave a subject out of a frame "
+                "it is not in.")
     return (f"These are {count} frames of one game video, each after its number. Pick the recurring subjects whose "
             "look must stay the same through the video: always the player character (the one the player controls: "
             f"it walks around, fishes, carries and sells things), and up to {SUBJECTS - 1} more that show in several "
@@ -392,8 +485,9 @@ def detect_prompt(count: int) -> str:
             "group (a queue) box the nearest two or three members. Leave a subject out of a frame it is not in.")
 
 
-def detect(job: Path, key: str, frames: list[dict]) -> dict:
-    """Gemini finds the recurring subjects on the original frames: {"subjects": [...], "boxes": {index: {name: box}}}."""
+def detect(job: Path, key: str, frames: list[dict], named: list[dict] | None = None) -> dict:
+    """Gemini finds the recurring subjects on the original frames (the edits' `subjects` when there are any):
+    {"subjects": [...], "boxes": {index: {name: box}}}."""
     import io
     parts = []
     for number, frame in enumerate(frames, 1):
@@ -401,7 +495,7 @@ def detect(job: Path, key: str, frames: list[dict]) -> dict:
         frame["original"].save(buffer, "JPEG", quality=85)
         parts.append({"text": f"Frame {number}:"})
         parts.append(winky.inline_bytes(buffer.getvalue(), "image/jpeg"))
-    parts.append({"text": detect_prompt(len(frames))})
+    parts.append({"text": detect_prompt(len(frames), named)})
     answer = winky.gemini(parts, schema=DETECT_SCHEMA)
     ledger.add(job, kind="gemini", purpose="identity", key=key, seconds=0)
     names = [s.get("name", "") for s in answer.get("subjects") or [] if s.get("name")][:SUBJECTS]
@@ -622,7 +716,7 @@ def identity_check(job: Path, key: str, frames: list[dict], plan_row: dict, what
     overview = overview_sheet(frames, size, stem.with_name(stem.name + "-frames.jpg"))
     closeups, pairs = None, []
     try:
-        found = detect(job, key, frames)
+        found = detect(job, key, frames, plan_row.get("subjects"))
         closeups = subjects_sheet(frames, found, stem.with_name(stem.name + "-subjects.jpg"))
         pairs = pair_images(frames, found)
         write(stem.with_name(stem.name + "-subjects.json"),
@@ -758,15 +852,16 @@ def box_sheets(items: list[dict], assembled: dict, source_path: str, stem: Path,
         if not columns:
             continue
         w, h = pixels[2] - pixels[0], pixels[3] - pixels[1]
-        scale = min(1.0, 300 / w)
+        scale = min(1.0, BOX_TILE / w)          # the crop at its own pixels (wide ones fitted to BOX_TILE)
         tile = (max(2, round(w * scale)), max(2, round(h * scale)))
         number = len(found) + 1
-        sheet = _pairs_sheet(columns, tile, 4, f"sheet {number}: {item.get('what', '')} | {legend}")
+        animated = " [animated]" if item.get("dynamic") else ""
+        sheet = _pairs_sheet(columns, tile, 4, f"sheet {number}{animated}: {item.get('what', '')} | {legend}")
         path = Path(f"{stem}-{number}.jpg")
         path.parent.mkdir(parents=True, exist_ok=True)
         sheet.save(path, quality=90)
         found.append({"sheet": str(path), "what": item.get("what", ""), "times": [_seconds(c[0]) for c in columns],
-                      "box": item["box"]})
+                      "box": item["box"], "dynamic": bool(item.get("dynamic"))})
     return found
 
 
@@ -846,6 +941,8 @@ KEEP_SCHEMA = {
         "required": ["sheet", "column", "problem", "severity", "description"]}}},
     "required": ["problems"]}
 KEEP_STRICT = ("garbled", "blurred", "doubled", "changed")    # always high: kept elements must stay faithful
+KEEP_MOTION = ("blurred", "doubled")    # tolerated on animated elements (low): blur or a trail while they move
+BOX_TILE = 900          # px: the widest a box close-up is drawn (its own pixels below that)
 
 
 def keep_prompt(count: int) -> str:
@@ -860,7 +957,10 @@ def keep_prompt(count: int) -> str:
         "these:", *[f"- {name}: {text}" for name, text in KEEP_PROBLEMS.items()],
         "Give the sheet number and column number (1 = leftmost, counting along each row of the sheet). Report "
         "nothing for faithful columns; an empty list when every column is faithful. Be strict: a single wrong or "
-        "blurred character is a defect.",
+        "blurred character or a soft, haloed edge of static text or a logo is a defect.",
+        "Sheets titled [animated] show an element that moves or changes (counting digits, popping or flying text, "
+        "a HUD effect): a little blur or trailing while it moves is acceptable there (report it as low); garbled "
+        "characters or wrong digits are not.",
     ])
 
 
@@ -882,7 +982,8 @@ def keep_issues(answer: dict, sheets: list[dict]) -> list[dict]:
                 runs.append([hit])
         times = sheets[index]["times"]
         for span in runs:
-            severity = ("high" if kind in KEEP_STRICT else
+            severity = ("low" if kind in KEEP_MOTION and sheets[index].get("dynamic") else
+                        "high" if kind in KEEP_STRICT else
                         max((hit[1].get("severity", "medium") for hit in span), key=lambda s: SEVERITY_RANK.get(s, 0)))
             moments = f"（{len(span)} 个时刻）" if len(span) > 1 else ""
             issues.append({"start": round(max(0.0, times[span[0][0]] - .3), 2), "end": round(times[span[-1][0]] + .3, 2),
@@ -926,70 +1027,200 @@ SEAM_SCHEMA = {
         "changed": {"type": "ARRAY", "items": {"type": "STRING"}},
         "description": {"type": "STRING"}},
     "required": ["consistent", "severity", "changed", "description"]}
-SEAM_WINDOW = 1.5       # seconds on either side of a join in the close-up clip
+SEAM_WINDOW = 2.0       # seconds on either side of a join that Gemini watches and the agent's stills cover
+SEAM_STEP = 1.0         # seconds between the agent's stills of a seam (plus the frames on both sides of the switch)
 
 
-def seam_prompt(seam: dict, layout: str) -> str:
+def seam_prompt(seam: dict, layout: str, switch: float, inside: float | None, length: float) -> str:
     other = "right" if layout == "left" else "bottom"
-    base = (f"This {2 * SEAM_WINDOW:g}-second clip shows the ORIGINAL game video on the {layout} and an AI-restyled "
-            f"version on the {other}, frame-synchronised. At {SEAM_WINDOW:g} s two separately generated parts of the "
-            "restyled video meet. ")
+    base = (f"This {length:.1f}-second clip shows the ORIGINAL game video on the {layout} and an AI-restyled version "
+            f"on the {other}, frame-synchronised, at the video's own frame rate. At {switch:.2f} s two separately "
+            "generated parts of the restyled video meet"
+            + (f"; the later part's own frames start at {inside:.2f} s: watch that moment as closely" if inside is not None
+               else "") + ". ")
     if seam["seam"] == "continuous":
         task = ("In the original this is one continuous shot: nothing changes at that moment. Look only at the restyled "
-                "side and decide whether a viewer could notice the join: any change of terrain, ground, water, rocks, "
-                "trees, objects, rope or cable colour, textures, lighting, colour grading or realism, any object that "
-                "pops, morphs or vanishes, any dissolve or double image. consistent = false for any such change.")
+                "side, frame by frame around it, and decide whether a viewer could notice the join: a jump; a dissolve "
+                "or a gradual change over a second or so; a step in colour, brightness, contrast or saturation; any "
+                "change of terrain, ground, water, rocks, trees, objects, rope or cable colour, textures, lighting or "
+                "realism; an object that pops, morphs or vanishes; a double image. consistent = false for any such "
+                "change.")
     else:
         task = ("The original has a camera cut there, so the content may change. Decide only whether the restyled look "
-                "(materials, colour grading, realism level, the same objects rendered the same way) stays consistent "
-                "across the cut as it does in the original. consistent = false if the look visibly changes.")
-    return (base + task + " List what changed in `changed`; write `description` in Chinese; severity none when "
-            "consistent, high when a casual viewer notices it at once.")
+                "(colour grading, brightness, materials, realism level, the same objects and characters rendered the "
+                "same way) stays consistent across the cut as it does in the original. consistent = false if the look "
+                "visibly changes.")
+    return (base + task + " List what changed in `changed` and write `description` in Chinese; severity none when "
+            "consistent, high when a casual viewer notices it at once, medium when noticeable on a closer look, low "
+            "when minor.")
 
 
-def seam_checks(job: Path, source_id: str, assembled: dict, clip: Path, layout: str) -> list[dict]:
-    """Gemini close-up of every join at 10 fps, one question each: from SEAM_WINDOW before the switch to SEAM_WINDOW
-    after the moment the later segment's own frames start (a chained segment changed its look there, 0.9 s after
-    the switch, at the edge of a window centred on the switch: GOF3D10012 at 26.4 s)."""
+def seam_moments(switch: float, inside: float | None, fps: float, duration: float) -> list[tuple[float, str]]:
+    """The agent's stills of a seam: every SEAM_STEP s from SEAM_WINDOW before the switch to SEAM_WINDOW after it (after
+    the moment the later part's own frames start, when that is later), and the last frame before and the first frame
+    after the switch (and that moment): (seconds on the delivered clock, label)."""
+    last = duration - 1 / fps
+    end = max(switch, inside if inside is not None else switch)
+    wanted = {round(switch - 1 / fps, 4): "last frame before the switch", round(switch, 4): "first frame after the switch"}
+    if inside is not None and abs(inside - switch) > .02:
+        wanted.setdefault(round(inside - 1 / fps, 4), "last frame before its own frames")
+        wanted.setdefault(round(inside, 4), "first of its own frames")
+    step = -SEAM_WINDOW
+    while step <= SEAM_WINDOW + 1e-6:
+        if step:
+            moment = round((switch if step < 0 else end) + step, 4)
+            wanted.setdefault(moment, f"{step:+.0f} s")
+        step += SEAM_STEP
+    return [(t, label) for t, label in sorted(wanted.items()) if 0 <= t <= last]
+
+
+def seam_folder(job: Path, source_id: str, segment: str) -> Path:
+    return job / "review/seams" / f"{source_id}-{segment}"
+
+
+def seam_check(job: Path, source_id: str, source_path: str, assembled: dict) -> list[dict]:
+    """Every join of the delivered video (none beside a live-action stretch): Gemini watches the original and the
+    delivery side by side, SEAM_WINDOW s on either side, at the video's own frame rate; the agent gets full-size
+    stills (original above, delivered below) every SEAM_STEP s and of the frames on both sides of the switch, on a
+    card `review/seams/<id>-<Kxx>/card.md`. Returns one entry per seam with Gemini's answer."""
+    import shutil
+    from reskin import credentials
+    size = tuple(assembled["size"])
+    fps = assembled["fps"]
+    duration = assembled["duration"]
+    keep_start = assembled["keep"][0]
+    order = [s["id"] for s in assembled["segments"]]
+    live = {s["id"] for s in assembled["segments"] if s.get("live")}
+    try:
+        credentials.winky_key()
+        has_key = True
+    except credentials.MissingCredential:
+        has_key = False
+    layout = "left" if size[1] >= size[0] else "top"
     found = []
     for seam in assembled["seams"]:
-        inside = (seam.get("inside") or {}).get("time", seam["time"])
-        start = max(0.0, min(seam["time"], inside) - SEAM_WINDOW)
-        length = max(seam["time"], inside) + SEAM_WINDOW - start
-        piece = job / "review" / f"{source_id}-seam-{seam['segment'].replace(':', '-')}.mp4"
-        run([FFMPEG, "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", clip,
-             "-c:v", "libx264", "-preset", "medium", "-crf", str(PROXY_CRF), "-an", piece])
-        part = winky.inline(piece, "video/mp4")
-        part["videoMetadata"] = {"fps": 10}
-        answer = winky.gemini([part, {"text": seam_prompt({**seam, "time": seam["time"] - start}, layout)
-                                       + (f" The later part's own frames start at {inside - start:.1f} s: watch that "
-                                          "moment as closely as the join." if inside != seam["time"] else "")}],
-                              schema=SEAM_SCHEMA)
-        ledger.add(job, kind="gemini", purpose="seam", key=f"{source_id}:{seam['segment']}", seconds=2 * SEAM_WINDOW)
-        found.append({**seam, "answer": answer})
-        log(f"{source_id}: seam {seam['segment']} at {seam['time']:.2f} s: "
-            + ("consistent" if answer.get("consistent") else f"changes ({', '.join(answer.get('changed') or [])})"))
+        segment = seam["segment"]
+        before = order[order.index(segment) - 1] if segment in order and order.index(segment) else None
+        if segment in live or before in live:
+            continue
+        switch = seam["time"]
+        inside = (seam.get("inside") or {}).get("time")
+        inside = inside if inside is not None and abs(inside - switch) > .02 else None
+        a = max(0.0, min(switch, inside if inside is not None else switch) - SEAM_WINDOW)
+        b = min(duration, max(switch, inside if inside is not None else switch) + SEAM_WINDOW)
+        here = seam_folder(job, source_id, segment)
+        shutil.rmtree(here, ignore_errors=True)
+        here.mkdir(parents=True, exist_ok=True)
+        stills = []
+        for number, (t, label) in enumerate(seam_moments(switch, inside, fps, duration), 1):
+            title = f"seam {before}|{segment} {label} (video {t:.3f} s)"
+            stills.append(str(still_pair((source_path, keep_start + t, f"ORIGINAL {title}"),
+                                         (assembled["output"], t, f"DELIVERED {title}"), size,
+                                         here / f"{number:02d}-{t:08.3f}.jpg")))
+        entry = {**seam, "before": before, "window": [round(a, 3), round(b, 3)], "stills": stills, "answer": None}
+        if has_key:
+            clip = grid_clip([{"path": source_path, "start": keep_start + a, "end": keep_start + b, "label": "ORIGINAL"},
+                              {"path": assembled["output"], "start": a, "end": b, "label": "RESTYLED"}],
+                             size, here / "seam.mp4")
+            entry["clip"] = str(clip)
+            try:
+                answer = winky.gemini([video_part(clip, fps), {"text": seam_prompt(
+                    seam, layout, switch - a, (inside - a) if inside is not None else None, b - a)}], schema=SEAM_SCHEMA)
+                ledger.add(job, kind="gemini", purpose="seam", key=f"{source_id}:{segment}", seconds=round(b - a, 2))
+                entry["answer"] = answer
+                log(f"{source_id}: seam {segment} at {switch:.2f} s: "
+                    + ("consistent" if answer.get("consistent") else
+                       f"{answer.get('severity')} ({', '.join(answer.get('changed') or [])})"))
+            except (RuntimeError, ValueError) as error:
+                entry["error"] = str(error)
+                log(f"{source_id}: Gemini seam check {segment} failed ({error}); the stills are on its card")
+        entry["flagged"] = bool((entry["answer"] and not entry["answer"].get("consistent")
+                                 and entry["answer"].get("severity") in ("medium", "high"))
+                                or seam.get("jump") == "visible" or (seam.get("look") or {}).get("jump") == "visible")
+        entry["card"] = str(seam_card(here, source_id, entry))
+        found.append(entry)
     return found
 
 
-PAIR_SCHEMA_SEAM = {
-    "type": "OBJECT",
-    "properties": {
-        "changed": {"type": "BOOLEAN"},
-        "severity": {"type": "STRING", "enum": ["high", "medium", "low", "none"]},
-        "differences": {"type": "ARRAY", "items": {"type": "STRING"}},
-        "description": {"type": "STRING"}},
-    "required": ["changed", "severity", "differences", "description"]}
-STILLS_SPAN = .5        # kept for the issue sheets of seam findings
-PAIR_PROMPT_SEAM = (
-    "A and B are two CONSECUTIVE frames (1/24 s apart) of one continuous camera shot of an AI-restyled video; below "
-    "them the same two moments of the ORIGINAL game footage. In 1/24 s only the camera moves a little and objects move "
-    "slightly, exactly as the ORIGINAL pair shows. Compare A with B very closely, region by region (water colour and "
-    "saturation, snow, trees and their shape, ground texture, every object, people, the edges of the frame) and list "
-    "every difference that the ORIGINAL pair does not show: other colours, brightness, saturation, textures, a tree or "
-    "object drawn differently or in the game's cartoon look, something appearing or vanishing. changed = true for any "
-    "such difference; severity: low = the flicker any frame pair of such a video has (fish highlights, spray), medium "
-    "or high = a viewer would see the picture jump. Write `differences` and `description` in Chinese.")
+def seam_card(here: Path, source_id: str, entry: dict) -> Path:
+    key = f"{source_id}:{entry['segment']}"
+    answer = entry.get("answer") or {}
+    lines = [f"# Seam check {source_id} {entry['before']}|{entry['segment']}", "",
+             f"switch at {entry['time']:.3f} s of the delivered video ({'inside a shot' if entry['seam'] == 'continuous' else 'at a camera cut'})"
+             + (f"; the later segment's own frames start at {entry['inside']['time']:.3f} s"
+                if (entry.get("inside") or {}).get("time") not in (None, entry["time"]) else ""),
+             f"status: {'FLAGGED' if entry['flagged'] else 'nothing found by the measures or Gemini'} - waiting for the agent",
+             "", "## Measured",
+             f"- switch: {entry.get('jump', '?')} (mismatch {entry.get('mismatch')} vs motion {entry.get('motion')}, "
+             f"local {entry.get('local')})"]
+    if entry.get("look"):
+        look = entry["look"]
+        lines.append(f"- look step over the whole video: {look.get('jump')} (saturation z {look['saturation']['z']}, "
+                     f"colour z {look['colour']['z']})")
+    lines += ["", "## Gemini (the 4 s around it, at the video's frame rate)"]
+    if entry.get("error"):
+        lines.append(f"- failed: {entry['error']} (judge from the stills alone)")
+    elif answer:
+        lines.append(f"- {'consistent' if answer.get('consistent') else 'changes'} [{answer.get('severity')}]: "
+                     f"{answer.get('description', '')}" + (f" ({'、'.join(answer['changed'])})" if answer.get("changed") else ""))
+    else:
+        lines.append("- not asked (no Winky key)")
+    lines += ["", "## Stills (upper original, lower delivered; every one, at full size)", *[f"- {p}" for p in entry["stills"]],
+              "", "## What to look for",
+              "- Inside a shot the delivered picture must not change at the switch or where the later segment's own frames "
+              "start: compare the last frame before and the first frame after, region by region (water colour and "
+              "saturation, snow, trees at the edges, ground texture, every object and character), then the stills a "
+              "second apart for a gradual change (a fade, a slow regrade). A change the original also shows is no flaw.",
+              "- At a camera cut: the same look on both sides (colour grade, brightness, materials, realism, the same "
+              "subjects rendered the same way).",
+              "", "## Report (a sub-agent writes this back)",
+              "`pass` or one line per flaw: `<still file> | <what changes, where in the frame> | <high / medium / low>`.",
+              "", "## Verdict",
+              f"- no visible change: `accept --seam {key}`" + (" --reason \"<why the finding is none>\"" if entry["flagged"] else ""),
+              f"- a confirmed jump: `redo --segment {key} --reason \"<what>\"` (the segment after the seam)"]
+    path = here / "card.md"
+    write_text(path, "\n".join(lines) + "\n")
+    return path
+
+
+def seam_record_path(job: Path, source_id: str) -> Path:
+    return job / "state/checks" / f"{source_id}-seams.json"
+
+
+def seam_verdicts(job: Path, source_id: str) -> dict:
+    path = seam_record_path(job, source_id)
+    return read(path) if path.is_file() else {}
+
+
+def pending_seams(job: Path, source_id: str, report: dict | None = None) -> list[dict]:
+    """The seam checks of the newest review round that the agent has not passed for the current delivery."""
+    report = report if report is not None else last_round(job, source_id)
+    if not report:
+        return []
+    verdicts = seam_verdicts(job, source_id)
+    return [entry for entry in report.get("seam_checks") or []
+            if not (verdicts.get(entry["segment"], {}).get("assembled") == report.get("assembled")
+                    and verdicts.get(entry["segment"], {}).get("accepted"))]
+
+
+def accept_seam(job: Path, source_id: str, segment: str, note: str = "") -> dict:
+    """The agent looked at a seam's stills and passes it, for the current delivery (a new assembly asks again); a
+    flagged seam needs the reason its finding is none."""
+    report = last_round(job, source_id)
+    entry = next((e for e in (report or {}).get("seam_checks") or [] if e["segment"] == segment), None)
+    if entry is None:
+        raise ValueError(f"{source_id}:{segment} has no seam check in the last review round (review first)")
+    record = read(job / "state/assembled" / f"{source_id}.json")
+    if record.get("inputs") != report.get("assembled"):
+        raise ValueError(f"{source_id} was assembled again after its last review: review it first")
+    if entry.get("flagged") and not note.strip():
+        raise ValueError(f"{source_id}:{segment} is flagged: accept it only with --reason saying why the stills show no "
+                         "jump")
+    verdicts = seam_verdicts(job, source_id)
+    verdicts[segment] = {"assembled": report.get("assembled"), "accepted": True,
+                         "note": note.strip() or "stills checked: no visible change"}
+    write(seam_record_path(job, source_id), verdicts)
+    return verdicts[segment]
 
 
 def _frame(path: str, t: float, width: int, height: int) -> Image.Image:
@@ -998,75 +1229,19 @@ def _frame(path: str, t: float, width: int, height: int) -> Image.Image:
     return Image.frombytes("RGB", (width, height), raw[: width * height * 3])
 
 
-def seam_pair_sheet(source_path: str, offset: float, result_path: str, at: float, fps: float,
-                    size: tuple[int, int], output: Path) -> Path:
-    """The frame before `at` and the frame at `at` of the restyled video at full size (A | B), the original's two
-    moments below at half size."""
-    width, height = size
-    a, b = _frame(result_path, at - 1 / fps, width, height), _frame(result_path, at + .001, width, height)
-    sa = _frame(source_path, offset + at - 1 / fps, width // 2, height // 2)
-    sb = _frame(source_path, offset + at + .001, width // 2, height // 2)
-    canvas = Image.new("RGB", (2 * width, height + height // 2 + 60), "white")
-    draw = ImageDraw.Draw(canvas)
-    label = font(18)
-    canvas.paste(a, (0, 30))
-    canvas.paste(b, (width, 30))
-    canvas.paste(sa, (width // 4, height + 60))
-    canvas.paste(sb, (width + width // 4, height + 60))
-    draw.text((6, 4), f"A: RESTYLED {at - 1 / fps:.3f} s", fill="black", font=label)
-    draw.text((width + 6, 4), f"B: RESTYLED {at:.3f} s (next frame)", fill="black", font=label)
-    draw.text((width // 4 + 6, height + 34), "ORIGINAL at A", fill="black", font=label)
-    draw.text((width + width // 4 + 6, height + 34), "ORIGINAL at B", fill="black", font=label)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output, quality=92)
-    return output
-
-
-def seam_stills(job: Path, source_id: str, source_path: str, assembled: dict) -> list[dict]:
-    """Every in-shot seam: its two consecutive frames at full size, the original's below, with one question: does any
-    region change beyond what the original changes? (Stills 0.5 s apart at a third of the size passed GOF3D10012's
-    26.4 s seam; this pair found its cartoon tree crown, while an ordinary pair of the video got only `low`.) Chained
-    seams with a blended switch are asked about the switch and the moment the later segment's own frames start."""
-    found = []
-    for seam in assembled["seams"]:
-        if seam.get("seam") != "continuous":
-            continue
-        moments = [seam["time"]]
-        inside = (seam.get("inside") or {}).get("time")
-        if inside is not None and abs(inside - seam["time"]) > .02:
-            moments.append(inside)
-        for at in moments:
-            sheet = seam_pair_sheet(source_path, assembled["keep"][0], assembled["output"], at, assembled["fps"],
-                                    tuple(assembled["size"]),
-                                    job / "review" / f"{source_id}-seam-{seam['segment']}-{at:06.2f}-pair.jpg")
-            try:
-                answer = winky.gemini([winky.inline(sheet, "image/jpeg"), {"text": PAIR_PROMPT_SEAM}],
-                                      schema=PAIR_SCHEMA_SEAM)
-            except (RuntimeError, ValueError) as error:
-                log(f"{source_id}: seam pair {seam['segment']} at {at:.2f} s skipped ({error})")
-                continue
-            ledger.add(job, kind="gemini", purpose="seam", key=f"{source_id}:{seam['segment']}:pair", seconds=0)
-            found.append({**seam, "answer": {**answer, "areas": answer.get("differences") or []}, "sheet": str(sheet),
-                          "until": at, "time": at})
-            log(f"{source_id}: seam pair {seam['segment']} at {at:.2f} s: {answer.get('severity')}"
-                + (f" ({'; '.join(answer.get('differences') or [])})" if answer.get("changed") else ""))
-    return found
+def frame_at(path: str, t: float, width: int, height: int) -> Image.Image:
+    """The frame at `t` (full quality scaling); a moment past the last frame takes the last one."""
+    for moment in (t, t - .05, t - .15, t - .4):
+        raw = run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, moment):.4f}", "-i", path, "-frames:v", "1", "-vf",
+                   f"scale={width}:{height}:flags=lanczos", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], binary=True)
+        if len(raw) >= width * height * 3:
+            return Image.frombytes("RGB", (width, height), raw[: width * height * 3])
+    raise RuntimeError(f"no frame at {t:.2f} s in {Path(path).name}")
 
 
 def segment_for(time_a: float, time_b: float, assembled: dict) -> list[str]:
     hits = [s["id"] for s in assembled["segments"] if s["start"] - .25 <= time_b and time_a <= s["end"] + .25]
     return hits or [assembled["segments"][-1]["id"]]
-
-
-TRIAGE_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {"issues": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-        "n": {"type": "INTEGER"},
-        "visible": {"type": "BOOLEAN"},
-        "original_same": {"type": "BOOLEAN"},
-        "note": {"type": "STRING"}},
-        "required": ["n", "visible", "original_same", "note"]}}},
-    "required": ["issues"]}
 
 
 def issue_moment(issue: dict) -> float:
@@ -1120,35 +1295,6 @@ def issue_sheets(source_path: str, source_offset: float, result_path: str, resul
     return pages
 
 
-def triage(job: Path, key: str, issues: list[dict], sheets: list[Path]) -> None:
-    """A second look by Gemini at the stills of each reported issue (is it visible, does the original show the same?):
-    a hint for the agent, who still decides on the stills."""
-    if not issues or not sheets:
-        return
-    listing = "\n".join(f"#{i['n']} [{i['severity']}] {i['category']} {i['start']:.2f}-{i['end']:.2f} s: {i['description']}"
-                        for i in issues)
-    parts = [winky.inline(sheet, "image/jpeg") for sheet in sheets]
-    parts.append({"text": (
-        "These images show stills for reported defects of an AI-restyled video. For each issue (#n in the grey band): "
-        "the upper row is the ORIGINAL, the lower row the RESTYLED video, at t-0.3 s, t and t+0.3 s. Decide per issue: "
-        "visible = the described defect can be seen in the lower row; original_same = the upper row shows the same "
-        "thing (so it is not a defect of the restyle). Seam issues compare the left and right stills of the lower row. "
-        "Write `note` in Chinese, one short sentence.\nIssues:\n" + listing)})
-    try:
-        answer = winky.gemini(parts, schema=TRIAGE_SCHEMA)
-    except (RuntimeError, ValueError) as error:
-        log(f"{key}: triage skipped ({error})")
-        return
-    ledger.add(job, kind="gemini", purpose="triage", key=key, seconds=0)
-    verdicts = {row.get("n"): row for row in answer.get("issues") or []}
-    for issue in issues:
-        row = verdicts.get(issue["n"])
-        if row:
-            hint = ("likely dismiss: the original shows the same" if row.get("original_same") else
-                    "likely real" if row.get("visible") else "not visible on the stills")
-            issue["triage"] = {"hint": hint, "note": row.get("note", "")}
-
-
 def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: float | None = None) -> dict:
     record = job / "state/assembled" / f"{source_id}.json"
     newest = max((p.stat().st_mtime for p in (job / "ai").glob(f"{source_id}-*.mp4")), default=0.0)
@@ -1163,8 +1309,7 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         raise RuntimeError(f"{source_id}: review proxy is {size / 1e6:.0f} MB, over the {INLINE_LIMIT / 1e6:.0f} MB "
                            "inline limit even at the lowest quality")
     log(f"{source_id}: asking Gemini to review ({size / 1e6:.1f} MB comparison clip, {fps:g} fps)")
-    part = winky.inline(clip, "video/mp4")
-    part["videoMetadata"] = {"fps": fps}
+    part = video_part(clip, fps)
     answer = winky.gemini([part, {"text": prompt(state, plan_row, assembled, layout,
                                                  known=accepted_notes(job, source_id))}], schema=SCHEMA)
     ledger.add(job, kind="gemini", purpose="review", key=source_id, seconds=assembled["duration"])
@@ -1243,36 +1388,31 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         add(**issue, source="gemini-keep", segments=segment_for(issue["start"], issue["end"], assembled))
     if keep_sheet_list:
         log(f"{source_id}: kept-element check: {len(keep_sheet_list)} elements, {len(kept_found)} problems")
-    # Gemini close-up of every join.
-    for seam in seam_checks(job, source_id, assembled, clip, layout):
-        reply = seam["answer"]
-        if not reply.get("consistent") and reply.get("severity") != "none":
+    # Every join: Gemini watches the 4 s around it at the video's frame rate; the agent gets its stills (a card).
+    seam_checks = seam_check(job, source_id, source["path"], assembled)
+    for seam in seam_checks:
+        reply = seam.get("answer") or {}
+        if reply and not reply.get("consistent") and reply.get("severity") not in (None, "none"):
             add(start=round(seam["time"] - .3, 2), end=round(seam["time"] + .3, 2), category="seam_color",
                 severity=reply.get("severity", "medium"), where="whole frame", source="gemini-seam",
                 description=f"接缝 {seam['segment']}：{reply.get('description', '')}"
                             + (f"（变化：{'、'.join(reply['changed'])}）" if reply.get("changed") else ""),
-                segments=[seam["segment"]])
-    for seam in seam_stills(job, source_id, source["path"], assembled):
-        reply = seam["answer"]
-        # low is the flicker every frame pair has; anything above it at a seam is a jump a viewer sees: high
-        if reply.get("changed") and reply.get("severity") in ("medium", "high"):
-            add(start=round(seam["time"] - 1 / assembled["fps"], 2), end=round(seam["time"], 2),
-                category="seam_color", severity="high", where="whole frame", source="gemini-seam-pair",
-                description=f"接缝 {seam['segment']}：{reply.get('description', '')}"
-                            + (f"（变化：{'、'.join(reply['areas'])}）" if reply.get("areas") else ""),
                 segments=[seam["segment"]])
     verdict = "fail" if answer.get("verdict") == "fail" or judge(issues) == "fail" else "pass"
     rounds_path = job / "state/review" / f"{source_id}.json"
     history = read(rounds_path) if rounds_path.is_file() else {"rounds": []}
     sheets = issue_sheets(source["path"], assembled["keep"][0], assembled["output"], assembled["duration"],
                           tuple(assembled["size"]), issues, job / "review/issues" / f"{source_id}-r{number}")
-    triage(job, source_id, issues, sheets)
     result = {"source": source_id, "round": number, "output": assembled["output"], "verdict": verdict,
               "summary": answer.get("summary", ""), "realism": realism, "identity": subjects,
               "identity_sheets": [str(p) for p in identity_sheets],
               "wipe_sheets": [entry["sheet"] for entry in wipe_sheet_list],
               "keep_sheets": [entry["sheet"] for entry in keep_sheet_list], "issues": issues, "compare": str(clip),
-              "sheets": [str(p) for p in sheets], "assembled": assembled.get("inputs")}
+              "sheets": [str(p) for p in sheets], "assembled": assembled.get("inputs"),
+              "seam_checks": [{"segment": s["segment"], "before": s["before"], "time": s["time"], "seam": s["seam"],
+                               "flagged": s["flagged"], "card": s["card"], "stills": s["stills"],
+                               "gemini": (s.get("answer") or {}).get("severity"), "error": s.get("error")}
+                              for s in seam_checks]}
     history["rounds"].append({k: result[k] for k in ("round", "verdict", "summary", "assembled")} | {"issues": len(issues)})
     write(rounds_path, history)
     write(job / "reports/review" / f"{source_id}-r{number}.json", result)
@@ -1291,9 +1431,8 @@ def last_round(job: Path, source_id: str) -> dict | None:
 
 
 def describe_issue(issue: dict) -> str:
-    hint = f" [triage: {issue['triage']['hint']}: {issue['triage']['note']}]" if issue.get("triage") else ""
     return (f"#{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
-            f"({', '.join(issue['segments'])}; {issue.get('where', '')}; {issue['source']}): {issue['description']}{hint}")
+            f"({', '.join(issue['segments'])}; {issue.get('where', '')}; {issue['source']}): {issue['description']}")
 
 
 def markdown(result: dict) -> str:
@@ -1314,6 +1453,11 @@ def markdown(result: dict) -> str:
     if result.get("keep_sheets"):
         lines += ["", "Kept logos, warning lines, counters and screen text over time (upper row original, lower "
                   "row delivered, must match): " + ", ".join(Path(p).name for p in result["keep_sheets"])]
+    if result.get("seam_checks"):
+        lines += ["", "Seam checks (the agent passes each on its stills: accept --seam <id>:<Kxx>):"]
+        lines += [f"- {s['before']}|{s['segment']} at {s['time']:.2f} s ({s['seam']}): "
+                  f"{'FLAGGED' if s['flagged'] else 'nothing found'}, Gemini {s.get('gemini') or s.get('error') or '-'}; "
+                  f"card {s['card']}" for s in result["seam_checks"]]
     return "\n".join(lines) + "\n"
 
 

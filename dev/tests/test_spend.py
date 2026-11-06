@@ -148,7 +148,7 @@ class GateTests(unittest.TestCase):
         order = [(sid, [s["id"] for s in members]) for sid, _, members in render.plan_order(three_segment_plan())]
         self.assertEqual(order, [("S01", ["K01", "K02"]), ("S02", ["K01"]), ("S01", ["K03"])])
 
-    def test_held_segment_stops_its_chain_only(self):
+    def test_a_chain_waits_for_the_agent(self):
         rendered, checked, finished = [], [], []
 
         def fake_render(job, state, row, sid, seg, style, previous, prev_seg):
@@ -157,16 +157,41 @@ class GateTests(unittest.TestCase):
 
         def fake_check(job, state, row, sid, index):
             checked.append(f"{sid}:{row['segments'][index]['id']}")
-            return {"held": True, "accepted": False, "reasons": ["Gemini: [high] continuity"]}
-        with mock.patch("reskin.render.render_segment", fake_render), mock.patch("reskin.gate.check", fake_check):
-            results = render.run_all(Path(tempfile.gettempdir()), {}, three_segment_plan(), {}, workers=1,
-                                     on_source_done=lambda sid, rows: finished.append(sid))
-        self.assertEqual(sorted(rendered), ["S01:K01", "S01:K03", "S02:K01"])
-        self.assertEqual(checked, ["S01:K01"])          # only segments with a successor in their shot
-        waiting = next(r for r in results if r["key"] == "S01:K02")
-        self.assertTrue(waiting["waiting"])
-        self.assertNotIn("error", waiting)
-        self.assertEqual(sorted(finished), ["S01", "S02"])
+            return {"held": False, "accepted": False}
+        job = tmp()
+        try:
+            with mock.patch("reskin.render.render_segment", fake_render), mock.patch("reskin.gate.check", fake_check):
+                results = render.run_all(job, {}, three_segment_plan(), {}, workers=1,
+                                         on_source_done=lambda sid, rows: finished.append(sid))
+            self.assertEqual(sorted(rendered), ["S01:K01", "S01:K03", "S02:K01"])
+            self.assertEqual(sorted(checked), ["S01:K01", "S01:K03", "S02:K01"])     # every rendered segment
+            first = next(r for r in results if r["key"] == "S01:K01")
+            self.assertTrue(first["awaiting"])            # its successor waits for the agent's look
+            waiting = next(r for r in results if r["key"] == "S01:K02")
+            self.assertTrue(waiting["waiting"])
+            self.assertNotIn("error", waiting)
+            self.assertFalse(next(r for r in results if r["key"] == "S01:K03").get("awaiting"))  # nothing after it
+            self.assertEqual(finished, ["S02"])           # S01 has a chain still waiting
+            self.assertEqual(common.read(job / "state/run.json")["awaiting"], ["S01:K01"])
+        finally:
+            shutil.rmtree(job, ignore_errors=True)
+
+    def test_accepted_or_redone_segments_release_their_chain(self):
+        job = tmp()
+        try:
+            path = gate.record_path(job, "S01:K01")
+            common.write(path, {"generation_id": "g", "attempt": 1, "gate": {"generation_id": "g", "held": False}})
+            self.assertFalse(render.unblocked(job, "S01:K01"))
+            gate.accept(job, "S01:K01")
+            self.assertTrue(render.unblocked(job, "S01:K01"))
+            common.write(path, {"generation_id": "g", "attempt": 1, "gate": {"generation_id": "g", "held": True,
+                                                                             "reasons": ["visible seam"]}})
+            with self.assertRaises(ValueError):           # a held check needs the reason it is no flaw
+                gate.accept(job, "S01:K01")
+            render.bump(job, "S01:K01", "the fish turned red")
+            self.assertTrue(render.unblocked(job, "S01:K01"))
+        finally:
+            shutil.rmtree(job, ignore_errors=True)
 
     def test_accept(self):
         job = tmp()
