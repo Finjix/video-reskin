@@ -58,25 +58,6 @@ def previous(plan_row: dict, seg: dict) -> dict | None:
     return plan_row["segments"][ids.index(seg["id"]) - 1]
 
 
-def refreshed(job: Path, style: dict, plan_row: dict, key: str, chained: Path, look: Path, output: Path,
-              moment: float) -> Path:
-    """The previous result's frame at a continuing segment's start, redrawn by GPT Image with the surface detail of
-    the segment's own keyframe and nothing else changed. Seedance smooths texture and falls back to the game's flat
-    snow the further a clip moves from its first picture; starting each segment from the earlier result's frame
-    with its detail restored keeps the seam and renews the detail (GOF3D10232, 2026-11-06)."""
-    from reskin import images
-    from reskin.common import digest
-    stamp = output.with_suffix(".json")
-    prompt = compose(style, "refresh", plan_row, span=(moment, moment))
-    want = digest({"chained": sha(chained), "look": sha(look)})
-    if output.is_file() and stamp.is_file() and read(stamp).get("digest") == want:
-        return output
-    log(f"{key}: redrawing the previous result's frame with the keyframe's surface detail (GPT Image)")
-    made = images.edit([chained, look], prompt, output, width=plan_row["width"], height=plan_row["height"])
-    write(stamp, {"digest": want, "prompt": prompt, **made})
-    return output
-
-
 def references(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> list[dict]:
     """The segment's reference pictures in order (Image 1, 2, ...): its start (the previous result's frame there when
     it continues a shot, else its keyframe), the reveal frames of objects new in it, then the earlier results' frames
@@ -94,15 +75,12 @@ def references(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     stem = f"{source_id}-{seg['id']}"
     prev = previous(plan_row, seg)
     if prev is not None:
+        # The previous result's own frame, untouched: a GPT redraw of it (refreshed) or the segment's separately
+        # converted keyframe as a second look reference differ in shading and snow from what the previous segment
+        # drew, and the seam jumped (GOF3D10232, 2026-11-06). Seam continuity comes first.
         chained = REFS.result_frame(job, plan_row, source_id, seg["render_frames"][0], folder / f"{stem}-chain.png", prev)
-        look = folder / f"{stem}.png"
-        if not look.is_file():
-            raise ValueError(f"{key}: keyframe {look.name} is missing; run keyframes first")
-        start = refreshed(job, style, plan_row, key, chained, look, folder / f"{stem}-start.png",
-                          seg["render_frames"][0] / plan_row["fps"])
-        pictures = [{"path": start, "role": "start",
-                     "after": read(state_path(job, f"{source_id}:{prev['id']}"))["generation_id"]},
-                    {"path": look, "role": "look"}]
+        pictures = [{"path": chained, "role": "start",
+                     "after": read(state_path(job, f"{source_id}:{prev['id']}"))["generation_id"]}]
     else:
         keyframe = folder / f"{stem}.png"
         if not keyframe.is_file():
@@ -130,8 +108,9 @@ def references_clause(pictures: list[dict], clip_start: float) -> str:
     parts = []
     for number, picture in enumerate(pictures, 1):
         if picture["role"] == "start" and number == 1 and picture.get("after"):
-            parts.append("Image 1 is this video's previous part at the clip's first moment, with its surface detail "
-                         "restored: continue exactly from it.")
+            parts.append("Image 1 is this video's previous part at the clip's first moment: continue exactly from it, "
+                         "with the same materials, textures, lighting, brightness and colour grading for the whole clip "
+                         "and no gradual change of look.")
         if picture["role"] == "look":
             parts.append(f"Image {number} is the same first moment converted as a still: it sets the material detail "
                          "for the whole clip. Match its surfaces exactly and keep them that detailed to the last frame: "
