@@ -7,8 +7,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from check_skill import PARTS
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -20,13 +18,7 @@ def main():
     folder = Path(tempfile.mkdtemp(prefix="vr-bootstrap-")) / "中文 路径"
     folder.mkdir()
     plugin = folder / "video-reskin"
-    for part in PARTS:
-        source = ROOT / part
-        if source.is_dir():
-            shutil.copytree(source, plugin / part, ignore=shutil.ignore_patterns("__pycache__"))
-        else:
-            plugin.mkdir(exist_ok=True)
-            shutil.copy2(source, plugin / part)
+    shutil.copytree(ROOT / "skill/video-reskin", plugin, ignore=shutil.ignore_patterns("runtime-cache", "__pycache__", "dependencies", "*.npz"))
     before = snapshot(plugin)
     environment = {**os.environ, "VIDEO_RESKIN_CACHE_DIR": str(folder / "cache"), "VIDEO_RESKIN_HOME": str(folder / "home"),
                    "VIDEO_RESKIN_OFFLINE": "0", "PATH": str(Path(os.environ["SystemRoot"]) / "System32")}

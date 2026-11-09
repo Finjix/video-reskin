@@ -5,5 +5,5 @@ __pycache__/
 /dist/
 /dev/smoke/latest.json
 # Runtime downloads stay local and must not be committed.
-/runtime-cache/
+/skill/video-reskin/runtime-cache/
 *.partial
