@@ -53,6 +53,8 @@ class SizeTests(unittest.TestCase):
         self.assertEqual(assemble.target_size(1920, 1080, "1080p"), (1920, 1080))
         self.assertEqual(assemble.target_size(3840, 2160, "1080p"), (1920, 1080))
         self.assertEqual(assemble.target_size(1080, 1350, "1080p"), (1080, 1350))
+        self.assertEqual(assemble.target_size(1080, 1920, "2K"), (1440, 2560))
+        self.assertEqual(assemble.target_size(1920, 1080, "2K"), (2560, 1440))
 
     def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")

@@ -1,9 +1,9 @@
 """Reference pictures every segment of a source shares (they replace per-segment keyframes and chained frames):
 
 - one scene map per scene: GPT Image joins the survey's view frames into one big overview of the whole location in
-  realistic materials (4K, quality max), with the look taken from the style's reference picture (or, for a sister
+  realistic materials (4K, quality high), with the look taken from the style's reference picture (or, for a sister
   cut, `style_from`, from that source's scene map);
-- one three-view sheet per subject (front, side, back; 1K, quality high) for the characters, objects and props
+- one three-view sheet per subject (front, side, back; 1K, quality medium) for the characters, objects and props
   that come into view during the video, drawn at the scene map's realism.
 
 Every H3 segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so segments

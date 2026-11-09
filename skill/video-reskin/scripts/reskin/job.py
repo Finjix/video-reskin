@@ -10,8 +10,8 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-RESOLUTION = "1080p"       # deliveries: one size for every job (the user's choice, 2026-11-05)
-RENDER_RESOLUTIONS = ("2K", "768P")     # what MiniMax H3 renders at (2K by default, scaled to 1080p)
+RESOLUTION = "2K"          # deliveries: 1440 on the short side for every job (the user's choice, 2026-11-09)
+RENDER_RESOLUTIONS = ("2K", "768P")     # what MiniMax H3 renders at (2K by default, as delivered)
 # Segments as long as MiniMax H3 takes (15 s); seams inside a shot go where the camera moves fast (plan).
 DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "render_resolution": "2K", "max_segment_seconds": 15.0,
             "fps": 24, "remove_end_card": True}

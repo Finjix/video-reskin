@@ -15,7 +15,7 @@ from reskin import credentials, net
 BASE = "https://lumos.diandian.info"
 SERVER = BASE + "/legil/server"
 VIDEO_MODEL = "MiniMax-H3"          # from 2026-11-09 (Seedance 2.5 before); clips of 4-15 whole seconds
-VIDEO_RESOLUTION = "2K"             # H3 offers 768P and 2K; deliveries are 1080p
+VIDEO_RESOLUTION = "2K"             # H3 offers 768P and 2K; deliveries are 2K (1440 on the short side)
 VIDEO_IMAGES = 9                    # reference images H3 takes at most (the page suggests 5 or fewer)
 DONE = {"Succeeded", "Failed", "PartiallySucceeded", "Cancelled"}
 _TOKEN = {"value": None, "expires": 0.0}

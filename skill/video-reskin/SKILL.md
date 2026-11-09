@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 2K deliverables (1440 on the short side) without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -77,8 +77,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    kept range into segments of at most 15 s: at camera cuts where possible, otherwise where the camera moves
    fastest; writes `reports/plan.md` with each segment's references (the scene map and up to two sheets; only
    sheets some segment takes are made).
-5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality max: the views joined into one overview of the
-   whole location, realistic, no characters, UI or text) and one three-view sheet per subject (1K, quality high).
+5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality high: the views joined into one overview of the
+   whole location, realistic, no characters, UI or text) and one three-view sheet per subject (1K, quality medium).
    Look at every `sheets/<id>-refs.png`: the map keeps the layout of the views, realistic materials, no cartoon
    parts, no invented places; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
    rendering: every segment copies them.

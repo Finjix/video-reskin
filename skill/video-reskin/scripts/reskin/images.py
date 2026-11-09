@@ -9,9 +9,9 @@ IMAGE_MODEL = "gpt-image-2.6-sunburst"     # Lumos, from 2026-11-06 (2.5 before)
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
            "4:5": 4 / 5, "5:4": 5 / 4}
 ASPECT_TOLERANCE = .01      # relative; a source further than this from every preset gets "adaptive"
-# The user's settings (2026-11-09): the scene map at 4K and quality max, three-view sheets at 1K and quality high.
-SCENE = {"resolution": "4K", "quality": "max"}
-SUBJECT = {"resolution": "1K", "quality": "high"}
+# The user's settings (2026-11-09): the scene map at 4K and quality high, three-view sheets at 1K and quality medium.
+SCENE = {"resolution": "4K", "quality": "high"}
+SUBJECT = {"resolution": "1K", "quality": "medium"}
 
 
 def aspect_for(width: float, height: float, aspects: dict[str, float] = ASPECTS, exact: bool = False) -> str:

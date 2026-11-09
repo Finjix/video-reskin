@@ -44,7 +44,7 @@ WARP_STEP = .08             # extra cost (share of the median frame difference) 
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
-    short = 1080 if resolution == "1080p" else 720
+    short = {"2K": 1440, "1080p": 1080}.get(resolution, 720)      # 1080p: jobs made before 2026-11-09
     if width >= height:
         return round(short * width / height / 2) * 2, short
     return short, round(short * height / width / 2) * 2

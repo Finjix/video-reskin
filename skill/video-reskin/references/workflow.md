@@ -11,7 +11,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `analyze [--only S01]` | media facts, camera cuts, camera speed, end-card candidate, still overlays, sheets | ~10 s per source |
 | `survey [--only S01] [--redo]` | Gemini watches each whole source: scene views and subjects (re-boxed on stills) → `catalog/survey/<id>.json`, `catalog/<id>-survey.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, max) and three-view sheets (1K, high) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
+| `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
 | `render [--only K] [--workers 4]` | MiniMax H3 video edit of every segment at 2K → `ai/`; segments independent, side by side; results that leave the source's camera are rejected and rendered once more | 13-18 min per 12 s segment at 2K, 4 at a time |
 | `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime frame by frame, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
@@ -38,7 +38,7 @@ Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subjec
   relative to `assets/`) like the preset, for another look. All prompt texts are English. The reference picture goes
   with every scene map as its last image (look only, nothing copied from its content).
 - `options.max_segment_seconds`: 4-15 (default 15; H3 edits clips of 4-15 whole seconds). `render_resolution`: `2K`
-  (default) or `768P`, what H3 renders at; deliveries are 1080p either way. `fps`: output frame rate (default 24,
+  (default) or `768P`, what H3 renders at; deliveries are 2K (1440 on the short side) either way. `fps`: output frame rate (default 24,
   H3's rate, never above the source).
 
 ## Catalog (`analyze`)
@@ -102,7 +102,7 @@ these sheets are made). Edit the edits file, not the plan.
 
 ## Outputs
 
-- Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, H.264, AAC, the source audio of the
+- Delivery folder: `<source name>_写实.mp4` per source (1440 on the short side, H.264, AAC, the source audio of the
   kept range).
 - `temp/refs/<id>-scene1.png`, `<id>-P01.png`; their inputs in `temp/refs/inputs/`; `temp/sheets/<id>-refs.png`.
 - `temp/ai/<id>-<Kxx>.mp4`: H3 results as delivered (24 fps, 2K, uneven pace); `temp/work/` the retimed clips and the

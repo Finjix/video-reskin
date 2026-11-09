@@ -363,7 +363,7 @@ def main() -> None:
     survey.add_argument("--redo", action="store_true", help="ask Gemini again even if a survey exists")
     plan = command("plan", cmd_plan, help="apply the edits file and cut every kept range into segments")
     plan.add_argument("--edits", type=Path, help="edits JSON (kept range, materials, removals, scenes and subjects per source)")
-    refs = command("refs", cmd_refs, help="scene maps (4K, max) and three-view subject sheets (1K, high) with GPT Image")
+    refs = command("refs", cmd_refs, help="scene maps (4K, high) and three-view subject sheets (1K, medium) with GPT Image")
     refs.add_argument("--only", nargs="*", help="source IDs or keys like S01:scene1 S01:P02")
     refs.add_argument("--redo", nargs="*", help="keys or source IDs to make again even if unchanged")
     refs.add_argument("--workers", type=int, default=3)
