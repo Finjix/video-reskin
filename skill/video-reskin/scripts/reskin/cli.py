@@ -203,8 +203,9 @@ def cmd_assemble(args) -> int:
             lines.append(f"{source_id}: not assembled: {error}")
             continue
         colour = "; ".join(f"{c['before']} diff {c['raw_difference']} -> {c['residual']}" for c in result["colour"])
-        checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['mode']} {s['verdict']} ({s['difference']} vs "
-                            f"motion {s['motion']}, region {s['local']})" for s in result["seams"] if "verdict" in s)
+        checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['mode']} (jump {s['ratio']} / region "
+                            f"{s['local_ratio']} of the frame change, drawings {s['same']} apart)"
+                            for s in result["seams"] if "mode" in s)
         warped = ", ".join(f"{t['segment']} {t['held']} held/{t['skipped']} skipped" for t in result["timing"]
                            if t["held"] or t["skipped"])
         if warped:
@@ -371,8 +372,9 @@ def main() -> None:
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
     assemble.add_argument("--only", nargs="*", help="source IDs")
-    assemble.add_argument("--seams", choices=("masked", "cut"), default="masked",
-                          help="seams inside a shot: masked (blurred cross-fade, default) or cut (plain switch, to compare)")
+    assemble.add_argument("--seams", choices=("auto", "cut", "dissolve"), default="auto",
+                          help="seams inside a shot: auto (a plain cut where it does not show, else a light dissolve; "
+                               "default), or always cut / always dissolve, to compare")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
     review.add_argument("--only", nargs="*", help="source IDs")
     review.add_argument("--fps", type=float, default=None, help="frames per second Gemini samples (default: 4 up to 75 s, else 2)")

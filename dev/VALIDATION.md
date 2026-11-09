@@ -47,6 +47,10 @@ Findings that changed the skill:
   dear under a strong restyle where right and wrong matches differ little, so it did not follow H3's catch-up at the
   end. The cost now scales with how much the best match beats the typical one, and the holds and skips a result's
   pace needs are spread evenly (running mean) instead of freezing in one place.
+- Seams now take no effect unless needed (the user's rule): the switch goes to the overlap frame with the smallest
+  jump; a plain cut when the jump is at most 1.15 times the ordinary frame change (1.2 in the worst region) and the
+  drawings are at most 30 apart, else a 6-frame dissolve without blur. Here 22.25 s cut (1.00 / 0.99 / 25), 11.54 s
+  dissolved (1.14 / 1.05 / 49): six frames of the two drawings fading into each other, no other effect.
 
 ## 2026-11-03: first end-to-end runs on `.素材`
 

@@ -97,7 +97,7 @@ def _shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
 
 def camera_motion(gray: np.ndarray, fps: float, cuts: list[int]) -> list[list[float]]:
     """Per frame, the camera's speed on screen: [x, y] in frame widths / heights per second (0 at camera cuts).
-    Seams go where the camera moves fast (plan) and assemble blurs a seam along this direction."""
+    Seams go where the camera moves fast (plan): motion hides a switch best."""
     step = max(1, round(fps / 12))          # compare frames 1/12 s apart: slow pans move a pixel or more
     height, width = gray.shape[1:]
     starts = sorted(set(cuts))

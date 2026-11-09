@@ -11,7 +11,7 @@ Gemini seam close-ups; the seams are yours (below). It returns issues in seven c
 | `continuity` | 穿帮: something differs from the original (cartoon material left, an object changes shape, colour or count, things appear or vanish, motion no longer matches) |
 | `artifact` | bug: morphing, melting, flicker, jitter, frozen frames, garbled HUD text or numbers, strong noise or a fragmented look |
 | `added_text` | captions, warning lines, watermarks or garbled characters the original does not have (the model draws them when a prompt names text that is not on screen) |
-| `seam_color` | 拼接色差: a jump in colour, brightness, texture or realism, mostly at seams; `measured` issues come from `assemble`: a `visible` seam inside a shot (medium: the two results differ clearly more than the picture moves there, masked by the switch; check its sheet) or a colour residual above 6 after matching |
+| `seam_color` | 拼接色差: a jump in colour, brightness, texture or realism, mostly at seams; `measured` issues come from `assemble`: a dissolved seam inside a shot whose two drawings differ a lot (medium; check its sheet) or a colour residual above 6 after matching |
 | `leftover_overlay` | a logo, watermark or warning line still visible |
 | `end_card` | closing-card content still visible |
 | `style_drift` | the look changes between parts of the video |
@@ -28,7 +28,7 @@ Gemini misses things. Every round, look at all stills yourself; they are lossles
   colours, counts, garbled text. Look hard at the ground: flat, smooth or uniform soil and snow is the first thing
   that makes a result look fake.
 - `review/seams/<id>-<Kxx>.png`: each seam at -1, -0.5, 0, +0.5 and +1 s (original row above, restyled row below).
-  Inside a shot the 0 s frame is the middle of the switch and blurred on purpose; judge whether the -1/-0.5 frames
+  Inside a shot the 0 s frame is the switch (a plain cut, or the middle of a light 6-frame dissolve); judge whether the -1/-0.5 frames
   and the +0.5/+1 frames show the same place, objects, colours, materials and realism: a step between the two
   sides is a seam issue, also when the measure calls the seam clean. At a camera cut only the look must carry over.
 

@@ -13,7 +13,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, max) and three-view sheets (1K, high) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
 | `render [--only K] [--workers 4]` | MiniMax H3 video edit of every segment at 2K → `ai/`; segments independent, side by side; results that leave the source's camera are rejected and rendered once more | 13-18 min per 12 s segment at 2K, 4 at a time |
-| `assemble [--only S01] [--seams masked\|cut]` | retime frame by frame, colour-match, masked switches at seams inside shots (`cut`: plain switches, to compare), join with the source audio → delivery folder | ~1 min per video |
+| `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime frame by frame, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most); `--replace` drops the earlier corrective sentences | - |
@@ -48,7 +48,7 @@ Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subjec
 the frame). Still overlays are candidates only: logos and warning lines (remove) and HUD counters (keep) both show
 up, scene objects that stand still too. `catalog/<id>.jpg` shows a frame every 1-2 s with cuts marked and overlay
 boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s. `catalog/motion/<id>-camera.json` holds the
-camera's screen speed per frame (frame widths/heights per second), used to place seams and to blur them.
+camera's screen speed per frame (frame widths/heights per second), used to place seams.
 
 ## Survey (`survey`)
 
@@ -108,8 +108,9 @@ these sheets are made). Edit the edits file, not the plan.
 - `temp/ai/<id>-<Kxx>.mp4`: H3 results as delivered (24 fps, 2K, uneven pace); `temp/work/` the retimed clips and the
   seam switches. `temp/state/render/<id>-<Kxx>.json` `follow`: how well the result follows the source clip (matched /
   typical difference of edges and of coarse layouts; both above 0.93 / 0.80 means it left the source).
-- `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` whip/soft, `blur`,
-  `camera_px`, `difference`, `motion`, `local`, `verdict` clean/visible), `colour` (raw difference and residual per
+- `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and
+  `local_ratio`: the jump at the switch frame against the ordinary frame change, overall and in the worst region,
+  `same`: how far apart both drawings are there, 0-255; a plain cut passes up to 1.15 / 1.2 / 30), `colour` (raw difference and residual per
   seam inside a shot, 0-255), `timing` (per segment: frames `held`/`skipped` by the retiming, `matched` vs `typical`
   edge difference), segment times in the delivered video.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

@@ -75,28 +75,28 @@ class SeamTests(unittest.TestCase):
     def test_different_drawings_are_visible(self):
         self.assertEqual(assemble.measure(self.moving(seed=1), self.moving(seed=2))["verdict"], "visible")
 
-    def test_fast_camera_gets_a_directional_blur_slow_a_soft_one(self):
-        fast = assemble.transition_plan([0.0, 0.5], (1080, 1920), 24.0, 1.0)   # half a frame height per second
-        self.assertEqual(fast["mode"], "whip")
-        self.assertAlmostEqual(abs(fast["direction"][1]), 1.0, places=3)
-        self.assertLessEqual(fast["blur"], assemble.WHIP_LIMITS[1])
-        self.assertEqual(assemble.transition_plan([0.001, 0.0], (1080, 1920), 24.0, 1.0)["mode"], "soft")
+    def test_a_cut_passes_where_both_results_match(self):
+        before = self.moving(count=12)
+        found = assemble.choose_cut(assemble.cut_options(before, before + 1.0), 6)
+        self.assertEqual(found["mode"], "cut")
+        self.assertEqual(found["frame"], 6)              # every frame equal: the planned one
 
-    def test_transition_runs_from_the_first_clip_to_the_second(self):
+    def test_different_drawings_get_a_dissolve_at_the_least_visible_frame(self):
         import numpy as np
-        a, b = np.zeros((40, 30, 3), np.float32), np.full((40, 30, 3), 200.0, np.float32)
-        how = {"mode": "whip", "direction": [1.0, 0.0], "blur": 12.0}
-        first, middle, last = (assemble.transition_frame(a, b, u, how).mean() for u in (.05, .5, .95))
-        self.assertLess(first, 5)
-        self.assertAlmostEqual(middle, 100, delta=5)
-        self.assertGreater(last, 195)
+        before, after = self.moving(count=12, seed=1), self.moving(count=12, seed=2)
+        after[8] = before[8] * .5 + after[8] * .5        # the drawings come closest around frame 8
+        options = assemble.cut_options(before, after)
+        found = assemble.choose_cut(options, 3)
+        self.assertEqual(found["mode"], "dissolve")
+        self.assertEqual(found["frame"], min(options, key=lambda o: max(o["ratio"], o["local_ratio"]))["frame"])
 
-    def test_blurs_keep_the_brightness(self):
+    def test_dissolve_runs_from_the_first_clip_to_the_second_without_blur(self):
         import numpy as np
-        image = np.random.default_rng(3).uniform(0, 255, (50, 40, 3)).astype(np.float32)
-        self.assertAlmostEqual(assemble.directional_blur(image, (0.6, 0.8), 15).mean(), image.mean(), delta=3)
-        self.assertAlmostEqual(assemble.box_blur(image, 3).mean(), image.mean(), delta=3)
-        self.assertEqual(assemble.box_blur(image, 3).shape, image.shape)
+        rng = np.random.default_rng(4)
+        a, b = rng.uniform(0, 100, (40, 30, 3)).astype(np.float32), rng.uniform(150, 250, (40, 30, 3)).astype(np.float32)
+        self.assertTrue(np.allclose(assemble.dissolve_frame(a, b, 0.0), a))
+        self.assertTrue(np.allclose(assemble.dissolve_frame(a, b, 1.0), b))
+        self.assertTrue(np.allclose(assemble.dissolve_frame(a, b, .5), (a + b) / 2))     # a blend, detail kept
 
 
 class WarpTests(unittest.TestCase):

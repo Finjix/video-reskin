@@ -5,11 +5,11 @@
    matched to the result frame showing the same moment (dynamic time warping on edge maps), and the clip is
    rewritten frame by frame at the output rate and size.
 2. Colours: gain/offset per clip so colours meet across every seam inside a shot (least squares per run).
-3. Seams: at a camera cut the clips are simply joined. Inside a shot the seam sits where the camera moves fast
-   (plan); there both results cross-fade over TRANSITION_SECONDS under a motion blur along the camera's direction
-   that swells to the middle of the switch ("whip"), or a soft blur when the camera barely moves ("soft"). The
-   blur turns the two drawings' differences into what fast motion looks like anyway; the two clips' difference is
-   still measured (`visible` seams go to the review).
+3. Seams: at a camera cut the clips are simply joined. Inside a shot (where the camera moves fast, plan) both
+   results cover an overlap; the switch goes to the frame there where the jump from the one to the other is
+   smallest. When that jump is no larger than the picture's ordinary change from frame to frame there, and the two
+   drawings are close, it is a plain cut; otherwise a very light dissolve over DISSOLVE_SECONDS, nothing more (the
+   user's rule, 2026-11-09: no effects at seams unless needed, then only a slight dissolve).
 4. Join with the source's own audio of the kept range.
 """
 from __future__ import annotations
@@ -28,11 +28,16 @@ GRID = (10, 6)              # rows, columns of the regions a seam is measured in
 SEAM_EXCESS = 6.0           # switch difference minus motion, 0-255
 SEAM_RATIO = 2.5            # switch difference / motion
 SEAM_LOCAL = 30.0           # largest region difference, 0-255 (and SEAM_RATIO times that region's own motion)
-TRANSITION_SECONDS = .375   # the masked switch inside a shot (9 frames at 24 fps)
-WHIP_MIN = 3.0              # px per output frame of camera motion from which a seam is blurred along it
-WHIP_GAIN = 1.2             # blur length (px) per px of camera motion per frame
-WHIP_LIMITS = (10.0, 48.0)  # blur length at the middle of the switch, px at 1080 on the short side (64 read as a swish)
-SOFT_RADIUS = 4.0           # box blur radius at the middle of a soft switch, px
+DISSOLVE_SECONDS = .25      # the light dissolve when a plain cut would show (6 frames at 24 fps)
+# A plain cut passes when the jump at the cut frame is at most CUT_RATIO times the ordinary frame-to-frame change
+# (CUT_LOCAL for the worst region) and the two drawings differ by at most CUT_SAME levels at that moment.
+# GOF3D10232 (2026-11-09): a cut at 1.00 / 0.99 / 24 showed only a block popping in; one at 1.14 / 1.05 / 49 jumped
+# in brightness and drawing.
+CUT_RATIO = 1.15
+CUT_LOCAL = 1.2
+CUT_SAME = 30.0
+SEAM_WIDTH = 192            # width of the frames seams are judged on
+SEAM_REVIEW = 45.0          # drawings this far apart at a dissolved seam go to the review as an issue
 FEATURE = (48, 84)          # width, height of the edge maps clips are aligned on (portrait; swapped for landscape)
 WARP_BAND = 1.5             # seconds a result may run ahead of or behind the source
 WARP_STEP = .08             # extra cost (share of the median frame difference) of holding or skipping a frame
@@ -358,57 +363,33 @@ def measure(before: np.ndarray, after: np.ndarray) -> dict:
             "local_motion": round(local_motion, 2), "verdict": "visible" if visible else "clean"}
 
 
-def directional_blur(image: np.ndarray, direction: tuple[float, float], length: float) -> np.ndarray:
-    """Average of copies shifted along `direction` (unit vector) over `length` px, edges clamped."""
-    if length < 1.5:
-        return image
-    samples = max(2, int(length / 2))
-    reach = int(math.ceil(length / 2)) + 1
-    padded = np.pad(image, ((reach, reach), (reach, reach), (0, 0)), mode="edge")
-    height, width = image.shape[:2]
-    total = np.zeros_like(image)
-    for k in range(samples + 1):
-        t = (k / samples - .5) * length
-        dx, dy = round(t * direction[0]), round(t * direction[1])
-        total += padded[reach + dy: reach + dy + height, reach + dx: reach + dx + width]
-    return total / (samples + 1)
+def cut_options(before: np.ndarray, after: np.ndarray) -> list[dict]:
+    """Every frame i (1..n-1) of an overlap where the switch could go (the earlier clip up to i-1, the later from i):
+    the jump there against the ordinary change from frame to frame in both clips, overall and in the worst region,
+    and how different both drawings are at that moment."""
+    options = []
+    for i in range(1, min(len(before), len(after))):
+        jump = float(np.abs(before[i - 1] - after[i]).mean())
+        normal = (float(np.abs(before[i - 1] - before[i]).mean()) + float(np.abs(after[i - 1] - after[i]).mean())) / 2
+        local = regional(before[i - 1], after[i])
+        local_normal = (regional(before[i - 1], before[i]) + regional(after[i - 1], after[i])) / 2
+        options.append({"frame": i, "ratio": round(jump / max(normal, .5), 3),
+                        "local_ratio": round(local / max(local_normal, .5), 3),
+                        "same": round(float(np.abs(before[i] - after[i]).mean()), 2)})
+    return options
 
 
-def box_blur(image: np.ndarray, radius: float) -> np.ndarray:
-    r = int(round(radius))
-    if r < 1:
-        return image
-    out = image
-    for axis in (0, 1):
-        padded = np.pad(out, [(r + 1, r) if a == axis else (0, 0) for a in range(3)], mode="edge")
-        summed = np.cumsum(padded, axis=axis, dtype=np.float32)
-        upper = np.take(summed, np.arange(2 * r + 1, summed.shape[axis]), axis=axis)
-        lower = np.take(summed, np.arange(0, summed.shape[axis] - 2 * r - 1), axis=axis)
-        out = (upper - lower) / (2 * r + 1)
-    return out
+def choose_cut(options: list[dict], planned: int) -> dict:
+    """The least visible switch frame (nearest the planned seam on a tie) and whether a plain cut passes there."""
+    best = min(options, key=lambda o: (round(max(o["ratio"], o["local_ratio"]), 2), abs(o["frame"] - planned)))
+    plain = best["ratio"] <= CUT_RATIO and best["local_ratio"] <= CUT_LOCAL and best["same"] <= CUT_SAME
+    return {**best, "mode": "cut" if plain else "dissolve"}
 
 
-def transition_plan(camera: list[float], size: tuple[int, int], out_fps: float, scale: float) -> dict:
-    """Mode, direction and peak blur of a masked switch from the camera's screen speed at the seam."""
-    vx, vy = camera[0] * size[0] / out_fps, camera[1] * size[1] / out_fps      # px per output frame
-    speed = math.hypot(vx, vy)
-    if speed >= WHIP_MIN * scale:
-        length = min(max(WHIP_GAIN * speed, WHIP_LIMITS[0] * scale), WHIP_LIMITS[1] * scale)
-        return {"mode": "whip", "direction": [vx / speed, vy / speed], "blur": round(length, 1),
-                "camera_px": round(speed, 2)}
-    return {"mode": "soft", "direction": [1.0, 0.0], "blur": round(SOFT_RADIUS * scale, 1), "camera_px": round(speed, 2)}
-
-
-def transition_frame(a: np.ndarray, b: np.ndarray, u: float, how: dict) -> np.ndarray:
-    """One frame of the switch at progress u (0-1): cross-fade (smoothstep over the middle 70 %) under a blur that
-    swells to the middle."""
-    x = min(1.0, max(0.0, (u - .15) / .7))
-    alpha = x * x * (3 - 2 * x)
-    mixed = (1 - alpha) * a + alpha * b
-    strength = math.sin(math.pi * u)
-    if how["mode"] == "whip":
-        return directional_blur(mixed, tuple(how["direction"]), how["blur"] * strength)
-    return box_blur(mixed, how["blur"] * strength)
+def dissolve_frame(a: np.ndarray, b: np.ndarray, u: float) -> np.ndarray:
+    """One frame of the light dissolve at progress u (0-1): a smoothstep blend, nothing else."""
+    alpha = u * u * (3 - 2 * u)
+    return (1 - alpha) * a + alpha * b
 
 
 def read_full(path: Path, start: int, count: int, size: tuple[int, int]) -> np.ndarray:
@@ -430,38 +411,41 @@ def write_transition(frames: list[np.ndarray], size: tuple[int, int], out_fps: f
     return output
 
 
-SEAM_MODES = ("masked", "cut")     # masked: blurred cross-fade (default); cut: a plain switch at the seam frame
+SEAM_MODES = ("auto", "cut", "dissolve")   # auto: a plain cut where it does not show, else a light dissolve
 
 
 def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], index: int,
-              corrections: list[tuple], size: tuple[int, int], out_fps: float, seams: str = "masked") -> dict:
-    """The switch between clips index-1 and index, centred on the planned seam inside their overlap: masked (a
-    blurred cross-fade), or with `seams` "cut" a plain switch at the seam frame (to compare)."""
+              corrections: list[tuple], size: tuple[int, int], out_fps: float, seams: str = "auto") -> dict:
+    """The switch between clips index-1 and index inside their overlap: at the least visible frame, a plain cut when
+    it does not show (or always with `seams` "cut"), else a light dissolve centred there (always with "dissolve")."""
     before, after = lines[index - 1], lines[index]
     a, b = overlap(before, after)
-    length = max(2, round(TRANSITION_SECONDS * out_fps))
-    start = after["body"][0] - length // 2
-    start = max(a, min(start, b - length))
+    first = corrected(frames_rgb(clips[index - 1], a - before["out"][0], b - a, SEAM_WIDTH), corrections[index - 1])
+    second = corrected(frames_rgb(clips[index], a - after["out"][0], b - a, SEAM_WIDTH), corrections[index])
+    choice = choose_cut(cut_options(first, second), after["body"][0] - a)
+    mode = choice["mode"] if seams == "auto" else seams
+    window = slice(max(0, choice["frame"] - 3), choice["frame"] + 3)
+    found = measure(first[window], second[window])
+    found["verdict"] = "clean" if choice["mode"] == "cut" else "visible"      # as a plain cut
+    judged = {k: choice[k] for k in ("ratio", "local_ratio", "same")}
+    if mode == "cut":
+        return {"start": a + choice["frame"], "length": 0, "clip": None, "mode": "cut", **judged, **found}
+    length = max(2, round(DISSOLVE_SECONDS * out_fps))
+    start = max(a, min(a + choice["frame"] - length // 2, b - length))
     length = min(length, b - start)
-    small_before = corrected(frames_rgb(clips[index - 1], a - before["out"][0], b - a), corrections[index - 1])
-    small_after = corrected(frames_rgb(clips[index], a - after["out"][0], b - a), corrections[index])
-    found = measure(small_before[start - a: start - a + length], small_after[start - a: start - a + length])
-    how = transition_plan(after["camera"], size, out_fps, min(size) / 1080)
-    if seams == "cut":
-        return {"start": after["body"][0], "length": 0, "clip": None, **how, "mode": "cut", "blur": 0.0, **found}
-    first = read_full(clips[index - 1], start - before["out"][0], length, size)
-    second = read_full(clips[index], start - after["out"][0], length, size)
-    count = min(len(first), len(second), length)
-    frames = [transition_frame(corrected(first[i].astype(np.float32), corrections[index - 1]),
-                               corrected(second[i].astype(np.float32), corrections[index]), (i + .5) / count, how)
+    left = read_full(clips[index - 1], start - before["out"][0], length, size)
+    right = read_full(clips[index], start - after["out"][0], length, size)
+    count = min(len(left), len(right), length)
+    frames = [dissolve_frame(corrected(left[i].astype(np.float32), corrections[index - 1]),
+                             corrected(right[i].astype(np.float32), corrections[index]), (i + .5) / count)
               for i in range(count)]
     clip = write_transition(frames, size, out_fps, job / "work" / f"{source_id}-{after['id']}-seam.mp4")
-    return {"start": start, "length": count, "clip": clip, **how, **found}
+    return {"start": start, "length": count, "clip": clip, "mode": "dissolve", **judged, **found}
 
 
 # --- 4. join ---------------------------------------------------------------------------------------------------
 
-def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict, seams: str = "masked") -> dict:
+def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict, seams: str = "auto") -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
@@ -553,12 +537,12 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         if index in switches:
             s = switches[index]
             entry = {**entry, "time": round((s["start"] + s["length"] / 2 - origin) / out_fps, 3),
-                     "frames": s["length"], **{k: s[k] for k in ("mode", "blur", "camera_px", "difference", "motion",
-                                                                 "local", "local_motion", "verdict")}}
-            if s["verdict"] == "visible":
-                problems.append(f"seam before {line['id']} at {entry['time']:.2f} s: the two results differ "
-                                f"({s['difference']} vs motion {s['motion']}, region {s['local']}); masked by a "
-                                f"{s['mode']} switch, check the seam stills")
+                     "frames": s["length"], **{k: s[k] for k in ("mode", "ratio", "local_ratio", "same", "difference",
+                                                                 "motion", "local", "local_motion", "verdict")}}
+            if s["mode"] == "dissolve" and s["same"] > SEAM_REVIEW:
+                problems.append(f"seam before {line['id']} at {entry['time']:.2f} s: the two results differ a lot "
+                                f"(drawings {s['same']} apart, jump {s['ratio']} of the frame change): joined with a "
+                                f"light dissolve, check the seam sheet")
         seam_times.append(entry)
     result = {"source": source_id, "output": str(output), "duration": round(made["duration"], 3),
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,

@@ -2,8 +2,8 @@
 
 MiniMax H3 edits clips of 4-15 whole seconds, so each kept range is cut into segments of at most 15 s: at camera cuts
 where possible (a hard cut hides the seam), otherwise inside a shot at the moment the camera moves fastest (or the
-picture jumps anyway: a flash, a burst, a whip pan), where `assemble` hides the join under a motion-blurred
-cross-fade. Segments do not depend on each other: every one gets the same scene map and subject sheets (refs), so
+picture jumps anyway: a flash, a burst, a whip pan), where `assemble` joins them with a plain cut (or a very light
+dissolve where a cut would show). Segments do not depend on each other: every one gets the same scene map and subject sheets (refs), so
 they render side by side and a redo re-renders only itself.
 
 Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side), and every render is

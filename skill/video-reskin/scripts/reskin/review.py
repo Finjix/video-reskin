@@ -203,8 +203,8 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if (look := job_style(state).get("look")) else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "
-        "motion-blurred cross-fade while the camera moves fast; report it only when a viewer would notice a jump in "
-        "colour, brightness, materials, objects or realism, or a double image.",
+        "plain cut or a very short dissolve while the camera moves fast; report it only when a viewer would notice a "
+        "jump in colour, brightness, materials, objects or realism, or a double image.",
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "
         "Do not report flaws that the original shows identically (game physics, clipping already in the original), "
         "and do not report the intended material change itself.",
@@ -241,12 +241,11 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         issues.append({"n": number, **issue, "start": round(a, 2), "end": round(b, 2),
                        "segments": segment_for(a, b, assembled), "source": "gemini"})
     for seam in assembled.get("seams") or []:
-        if seam.get("verdict") == "visible":
+        if seam.get("mode") == "dissolve" and seam.get("same", 0) > 45:
             issues.append({"n": len(issues) + 1, "start": round(seam["time"] - .25, 2), "end": round(seam["time"] + .25, 2),
                            "category": "seam_color", "severity": "medium", "where": "whole frame", "source": "measured",
-                           "description": f"段内接缝 {seam['segment']} 处两段画面差异较大（差异 {seam['difference']}，"
-                                          f"正常帧间变化 {seam['motion']}，最大区域差异 {seam['local']}），已用"
-                                          f"{'方向模糊' if seam.get('mode') == 'whip' else '柔化'}过渡遮挡，看接缝图确认是否可见",
+                           "description": f"段内接缝 {seam['segment']} 处两段画面差异较大（两版画面相差 {seam['same']}，"
+                                          f"跳变为正常帧间变化的 {seam['ratio']} 倍），直接切会跳，已用轻微叠化，看接缝图确认",
                            "segments": [seam["segment"]]})
     for seam in assembled.get("colour") or []:
         if seam["residual"] > 6:
@@ -289,7 +288,8 @@ def markdown(result: dict) -> str:
     if result.get("stills"):
         lines.append(f"- whole video every {STILL_STEP:g} s: {Path(result['stills'][0]).parent} ({len(result['stills'])} pairs)")
     for seam in result.get("seams") or []:
-        how = seam["seam"] + (f", {seam['mode']} switch, measured {seam['verdict']}" if seam.get("mode") else "")
+        how = seam["seam"] + (f", {seam['mode']} (jump {seam['ratio']} of the frame change, drawings {seam['same']} "
+                              "apart)" if seam.get("mode") else "")
         lines.append(f"- seam {seam['segment']} at {seam['time']:.2f} s ({how}): {seam['sheet']}")
     return "\n".join(lines) + "\n"
 

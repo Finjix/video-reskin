@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and hidden under motion-blurred switches, reassembly on the source clock with the original audio, and a review with at most two redos per segment.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -88,7 +88,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    often with more sheets): a result that no longer shows the source's camera and layout is rejected and rendered
    once more by itself with the scene map only (not counted as a redo).
 7. `assemble` retimes every result frame by frame onto the source clock (H3's pace is uneven), matches colours
-   across seams inside a shot, hides each such seam under a motion-blurred cross-fade along the camera's movement,
+   across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain
+   cut, or with a very light 6-frame dissolve where a cut would show (no other effects at seams: the user's rule),
    joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
 8. `review` has Gemini watch each whole video beside its original, and writes stills for you: the whole video every
    3 s and one five-frame sheet per seam (-1, -0.5, 0, +0.5, +1 s). Look at all of them yourself, confirm every
