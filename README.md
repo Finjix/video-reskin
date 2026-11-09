@@ -13,24 +13,31 @@ AI 阅读 `SKILL.md` 后通过统一入口操作：
 ```powershell
 & "skill/video-reskin/scripts/video_reskin.cmd" --help
 & "skill/video-reskin/scripts/video_reskin.cmd" auth --key <Winky API key>
-& "skill/video-reskin/scripts/video_reskin.cmd" login
+& "skill/video-reskin/scripts/video_reskin.cmd" login --no-open
 ```
 
-`init` → `analyze` → `plan` → `keyframes` → `render` → `assemble` → `review`（→ `frames` / `redo` → 重新 `render`、`assemble`、`review`）。
+`init` → `analyze` → `survey` → `plan` → `refs` → `render` → `assemble` → `review`（→ `frames` / `redo` → 重新 `render`、`assemble`、`review`）。
 
-1. **分析**（`analyze`）：识别镜头切换，找出尾板起点候选和静止叠加物（logo、警示语、HUD），生成联系表。AI 看图后写 edits 文件，内容包括保留区间、画面里的真实材质、要去除的元素和锚点帧。
-2. **分段**（`plan`）：把保留区间切成最长 30 秒的片段（Seedance 上限），优先在硬切处断开。镜头内部按能放下的最少段数平均切分（接缝越多跳变越多，不要为了细节缩短分段），每个断点选在平均位置附近画面最静止的时刻，后一段多渲染 0.5 秒作重叠。
-3. **关键帧**（`keyframes`）：参考飞书案例，先用 `gpt-image-2.6-sunburst` 把锚点帧转成写实材质，风格不变，纹理突出。转锚点帧时附上风格参考图 `skill/video-reskin/assets/styles/realistic.jpg`，只取它的观感（材质、光线、明暗和色调），提示词不再单独强调暗沉。之后以锚点为参考，把镜头开头和硬切后每段的首帧转换成同一风格；镜头内部的后续段也生成关键帧，但只当“材质细节”参考（见下）。后段里第一次出现、前段都没有的物体（带时间的 `materials` 条目），会按它出现的时刻各生成一张写实化的“揭示帧”。所有提示词都是英文（`skill/video-reskin/assets/prompts.json`）。图片统一走 Lumos 图生图接口（用 Lumos 登录态，不用 Winky key）。
-4. **视频编辑**（`render`）：在 Lumos 上逐段调用 Seedance 2.5（`doubao-seedance-2-5-260628`）。模式是 `video_edit`，分辨率 1080p，同一视频的各段依次渲染，后段的参考图都取自前段已生成的画面：图 1 是前一段在本段起点那一帧，原样使用、不经 GPT 重画，也不再附本段单独转换的关键帧（两者的明暗和雪地都与前段画的不同，接缝会跳，GOF3D10232 实测），保证接缝连贯；硬切后的段用本段关键帧；接着是本段的揭示帧；再按原片画面匹配，从前段成片里挑最多 3 帧本段会再次出现的场景（如回到河边时的树和码头），总共最多 6 张。提示词说明每张图的用途，并要求只取观感、不加画面里没有的东西，同时要求去掉 logo 和警示语。不同视频同时进行 4 条，可以断点续跑；前段重做时，后面的段也会跟着重做。
-5. **拼接**（`assemble`）：Seedance 返回的是 24fps 视频（成片也是 24fps），时长比原片段略短，所以每段都会按原时长精确拉伸。镜头内部的接缝先做颜色匹配，先在重叠里检查后一段是否比前一段慢 1–2 帧（拉伸后会出现，镜头平移时会让同一物体错位），慢了就去掉开头几帧、补齐末帧；再在 0.5 秒重叠里找两段最接近的那一帧，用 3 帧短过渡切换（不再用整段交叉淡化，避免两次生成叠在一起出现重影），画面运动比两段差异还大时（如平移）直接在该帧切换、不做过渡，并测量切换处的差异：明显超过正常帧间变化或某个区域差异很大时，判为可见接缝；硬切处直接拼接。最后铺上原片对应区间的音频，输出 1080p H.264。
-6. **质检**（`review`）：Gemini 看整条视频——原片和成片按成片原尺寸并排、24fps、近无损编码（crf 4），码率上限按 Gemini 接口的 256,000,000 字节算满，只在放不下时才压低，媒体分辨率 HIGH，检查穿帮、bug、拼接色差、残留的 logo/文字和尾板；每个接缝再单独看前后各 2 秒。主 agent 自己抽帧审：每 2 秒一张原尺寸无损 PNG 对比图，每个接缝从 -2 秒到 +2 秒、切换处逐帧。程序测得的可见接缝直接记为高优先级问题。确认属实的片段用 `redo` 打回重做，审到没有明显瑕疵为止。
+适用对象是 2.5D 俯视角的游戏视频：镜头在同一个场景里移动，角色走到不同地方，中途会冒出新的角色、物品和道具。为了降低成本，所有片段共用同一套参考图，片段之间不再串联，也不再为了接缝反复重抽。
+
+1. **分析**（`analyze`）：识别镜头切换，逐帧估算镜头在画面上的移动速度和方向（相位相关），找出尾板起点候选和静止叠加物（logo、警示语、HUD），生成联系表。
+2. **看全片**（`survey`）：Gemini 完整看一遍原片，返回两类信息。一是场景：每个地点给出 3–8 个时刻，这些帧拼起来能覆盖镜头走过的整个场景范围。二是主体：中途出现的角色、物品、道具，以及一直在场、会走动的主要角色，最多 8 个，每个给出出场区间、一个清楚的时刻和框。视频里读出的框经常偏一个身位，所以脚本会把那一帧截出来，再让 Gemini 在静帧上重新框一次。截图和裁切汇总在 `catalog/<id>-survey.jpg`，AI 检查后在 edits 里写保留区间、材质、要去除的元素，需要时修正 `scenes` / `subjects`。
+3. **分段**（`plan`）：MiniMax H3 每次最多 15 秒，时长必须是整秒（4–15）。保留区间按最长 15 秒切段，优先在硬切处断开。镜头内部的断点放在可选范围最后 7 秒里镜头移动最快、或者画面本身有跳变（闪光、爆点、甩镜）的时刻。镜头内的接缝两侧各多渲染 0.3 秒作为重叠，每段再补齐到整秒。每段记录它用到的场景图和主体三视图。
+4. **参考图**（`refs`）：都用 GPT Image 2.6（`gpt-image-2.6-sunburst`，Lumos 图生图）。每个场景生成一张完整场景大图，规格 4K、质量 max：把 survey 选出的几帧和风格参考图 `assets/styles/realistic.jpg` 一起交给模型，拼成整个场景的写实俯视全景，不带人物、UI 和文字，宽高比按镜头走过的范围估算。每个主体生成一张三视图（正、侧、背），规格 1K、质量 high：输入是裁切图、原帧和场景大图，写实程度与场景图一致。汇总在 `sheets/<id>-refs.png` 给 AI 检查，不合格的用 `refs --redo` 单独重做。
+5. **视频编辑**（`render`）：在 Lumos 上逐段调用 MiniMax H3（`MiniMax-H3`），2K 渲染，每次输入一段原片。参考图包括该段涉及的场景大图，以及段内出场主体的三视图（本段新出现的排在前面），最多 5 张。只靠提示词时 H3 几乎不改画风（实测仍是卡通），写实效果主要来自这些参考图。H3 不是逐帧锁定的编辑器：它会保留故事和构图，但节奏由自己决定，偶尔还会自己运镜（实测一次重做在 4 秒后推成了切鱼特写）。所以提示词第一句就要求逐帧重绘、机位和取景不变、不推近、不切镜。结果下载后，脚本用边缘图和粗布局两项指标与原片比对，两项都接近随机配对时判为偏离原片，自动重渲一次，不计入回炉次数。各段互不依赖，默认 4 段同时渲染，重做时只重渲那一段。
+6. **拼接**（`assemble`）：
+   - **对时**：H3 的节奏不均匀，实测 6 秒的片段返回 6.58 秒，前 2.5 秒同步，之后慢了半秒，整体拉伸会错位。所以按边缘图把每一帧和原片做动态时间规整，逐帧放回原片时钟，实测误差在 1 帧以内。
+   - **调色**：镜头内的接缝先用最小二乘做颜色匹配。
+   - **障眼法**：在接缝中点做 9 帧（0.375 秒）切换。镜头在动时，沿镜头运动方向加方向模糊（whip），模糊量随镜头速度变化、在切换中点最强，同时交叉淡化。镜头几乎不动时改用轻微柔化（soft）。快速运动本来就带拖影，两次生成之间的差异被模糊吃掉，不会出现叠影或跳变。硬切处直接拼接。
+   - **测量与成片**：脚本照样测量两段在切换处的差异，明显不一致时标为可疑接缝，交给 AI 看图确认。最后铺上原片对应区间的音频，输出 1080p H.264。
+7. **质检**（`review`）：Gemini 只看一次完整的并排对比，原片和成片按原尺寸并排、近无损编码，检查穿帮、bug、拼接色差、残留的 logo/文字和尾板，不再单独看接缝。主 agent 自己看两组图：整片每 3 秒一张原片/成片对比图，每个接缝一张 5 帧对比图（−1、−0.5、0、+0.5、+1 秒）。问题在静帧上确认属实后，用 `redo` 打回对应片段，每个片段最多回炉两次，之后照常交付并列出遗留问题。纠正句只写观感。写“某物在哪里、何时出现”的句子可能让 H3 自己改运镜，可以用 `--replace` 去掉之前加过的纠正句。
 
 成片默认放在桌面的 `视频换风格_YYYYMMDD_HHMMSS/` 下，同级只有一个任务目录 `temp/`。
 
 ## 账号
 
-- **Lumos 登录**：`login` 会用隐藏的 Edge（或 Chrome）打开 Lumos 登录页，把飞书二维码保存成图片并弹出。用户扫码后，技能只保存 refresh token，用它换取访问令牌。
-- **Winky API key**：通过 `auth --key` 保存，只用于 Gemini 审片。
+- **Lumos 登录**：`login` 会用隐藏的 Edge（或 Chrome）打开 Lumos 登录页，把飞书二维码保存成图片。每出一张新码就打印一行 `qr: <路径>`，AI 把图片发给用户扫码。飞书一两分钟换一次码，换了就发新的。页面刚打开时的第一张码会马上被替换，所以只有连续两秒不变的码才会打印。用户扫码后，技能只保存 refresh token，用它换取访问令牌。
+- **Winky API key**：通过 `auth --key` 保存，只用于 Gemini（看全片、审片）。
 - **存储方式**：两者都用 Windows DPAPI 加密，存在 `%APPDATA%\video-reskin\credentials.json`，只有当前 Windows 用户能解密。也可以用环境变量 `VIDEO_RESKIN_WINKY_KEY` 临时指定 key。
 
 ## 接口来源
@@ -39,9 +46,9 @@ AI 阅读 `SKILL.md` 后通过统一入口操作：
 | --- | --- |
 | 登录 | `POST /marauders-map/lumos-auth/refresh`（携带 Cookie `lumos_refresh_token`）→ `lumos_access_token`，请求头为 `Authorization: LumosBearer …` |
 | 上传 | `POST /legil/server/input-media-url` → PUT 到 OSS 签名地址 → `POST /legil/server/upload-callback`（`file_id`）→ `POST /legil/server/output-media-url` |
-| 视频编辑 | `POST /legil/server/generations/video-to-video`，参数 `generation_mode: video_edit`、`resolution: 1080p`、`model: doubao-seedance-2-5-260628`、`reference_videos`、`reference_images`；轮询 `GET /legil/server/generations/{id}` |
-| 图生图（关键帧） | `POST /legil/server/generations/image-to-image`，参数 `model: gpt-image-2.6-sunburst` |
-| 审片 | `POST https://lumos.diandian.info/winky/gemini/v1/models/gemini-3.8-flash:generateContent`（`inlineData` 视频 + `videoMetadata.fps` + `responseSchema`） |
+| 视频编辑 | `POST /legil/server/generations/video-to-video`，参数 `model: MiniMax-H3`、`reference_videos`（1 段，2–15 秒，≤50 MB）、`reference_images`（≤9 张，≤30 MB）、`prompt`（≤7000 字符）、`resolution: 2K`（或 `768P`）、`duration`（4–15 整秒）、`aspect_ratio: adaptive`、`sample_count: 1`；轮询 `GET /legil/server/generations/{id}`。返回 24fps、带音轨、时长略长于输入 |
+| 图生图（参考图） | `POST /legil/server/generations/image-to-image`，参数 `model: gpt-image-2.6-sunburst`、`resolution`（`1K`/`2K`/`4K`，4K 需指定宽高比）、`quality`（`low`/`medium`/`high`/`xhigh`/`max`/`auto`），最多 16 张参考图 |
+| 看全片、审片 | `POST https://lumos.diandian.info/winky/gemini/v1/models/gemini-3.8-flash:generateContent`（`inlineData` 视频或图片 + `videoMetadata.fps` + `responseSchema`） |
 
 Lumos 的接口是从网页的实际请求中整理出来的，网页改版后可能需要跟着调整。
 
@@ -50,7 +57,7 @@ Lumos 的接口是从网页的实际请求中整理出来的，网页改版后�
 | 使用功能 | 自动准备 |
 | --- | --- |
 | 基础命令 | 私有 Python 3.13.15（uv 0.13.4） |
-| 分析、关键帧、渲染、拼接、审片 | NumPy 2.5.3、Pillow 12.3.0、FFmpeg/FFprobe 9.0.2 |
+| 分析、看全片、参考图、渲染、拼接、审片 | NumPy 2.5.3、Pillow 12.3.0、FFmpeg/FFprobe 9.0.2 |
 | 扫码登录 | Playwright 1.64.1（使用系统自带的 Edge，不下载浏览器） |
 
 依赖版本和哈希都已锁定。缓存默认放在技能目录内的 `runtime-cache/`，可以用 `VIDEO_RESKIN_CACHE_DIR` 改到其他位置；设置 `VIDEO_RESKIN_OFFLINE=1` 可禁止联网。退出码：`0` 成功；`2` 输入、凭据或规则问题；`3` 运行时或服务故障。

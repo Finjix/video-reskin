@@ -14,7 +14,17 @@ OVERLAY = 160         # width of the frames used for overlay detection
 END_WINDOW = 10.0     # an end card starts within this many seconds of the end
 
 
+CJK_FONTS = ("msyh.ttc", "msyhl.ttc", "simhei.ttf", "simsun.ttc")     # labels carry Chinese subject names
+
+
 def font(size: int):
+    folder = Path(__import__("os").environ.get("SystemRoot", "C:/Windows")) / "Fonts"
+    for name in CJK_FONTS:
+        if (folder / name).is_file():
+            try:
+                return ImageFont.truetype(str(folder / name), size)
+            except OSError:
+                continue
     try:
         return ImageFont.load_default(size=size)
     except (TypeError, OSError):
@@ -66,6 +76,38 @@ def detect_cuts(frames: np.ndarray, fps: float) -> tuple[list[int], np.ndarray, 
                 continue
             cuts.append(i)
     return cuts, gray, diff
+
+
+def _shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """How far the picture moved from `a` to `b` (pixels, x and y) by phase correlation, to a tenth of a pixel."""
+    window = np.outer(np.hanning(a.shape[0]), np.hanning(a.shape[1]))
+    fa, fb = np.fft.fft2((a - a.mean()) * window), np.fft.fft2((b - b.mean()) * window)
+    cross = fb * np.conj(fa)
+    surface = np.fft.ifft2(cross / (np.abs(cross) + 1e-6)).real
+    y, x = np.unravel_index(int(surface.argmax()), surface.shape)
+
+    def refine(values, index, size):
+        left, mid, right = values[(index - 1) % size], values[index], values[(index + 1) % size]
+        bend = left - 2 * mid + right
+        offset = .5 * (left - right) / bend if bend < 0 else 0.0
+        position = index + max(-.5, min(.5, offset))
+        return position - size if position > size / 2 else position
+    return refine(surface[y, :], x, surface.shape[1]), refine(surface[:, x], y, surface.shape[0])
+
+
+def camera_motion(gray: np.ndarray, fps: float, cuts: list[int]) -> list[list[float]]:
+    """Per frame, the camera's speed on screen: [x, y] in frame widths / heights per second (0 at camera cuts).
+    Seams go where the camera moves fast (plan) and assemble blurs a seam along this direction."""
+    step = max(1, round(fps / 12))          # compare frames 1/12 s apart: slow pans move a pixel or more
+    height, width = gray.shape[1:]
+    starts = sorted(set(cuts))
+    speeds = [[0.0, 0.0] for _ in range(len(gray))]
+    for i in range(step, len(gray)):
+        if any(i - step < c <= i for c in starts):
+            continue
+        dx, dy = _shift(gray[i - step], gray[i])
+        speeds[i] = [round(dx / width * fps / step, 4), round(dy / height * fps / step, 4)]
+    return speeds
 
 
 def overlay_candidates(path: Path, info: dict, shots: list[dict]) -> list[dict]:
@@ -241,6 +283,7 @@ def analyze_source(job: Path, row: dict) -> dict:
     duration = len(frames) / fps
     cuts, gray, diff = detect_cuts(frames, fps)
     write(job / "catalog/motion" / f"{row['id']}.json", [round(float(x), 2) for x in diff])
+    write(job / "catalog/motion" / f"{row['id']}-camera.json", camera_motion(gray, fps, cuts))
     bounds = [0] + cuts + [len(frames)]
     shots = [{"n": n + 1, "start": round(a / fps, 3), "end": round(b / fps, 3), "frames": [a, b]}
              for n, (a, b) in enumerate(zip(bounds[:-1], bounds[1:]))]

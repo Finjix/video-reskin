@@ -1,8 +1,21 @@
-"""Put the restyled segments back on the source's clock: retime, scale to 1080p, match colours across seams inside a
-shot, switch inside each overlap at the frame where both results match best (a short blend, not a long dissolve that
-shows both drawings at once), measure every such seam, join, and lay the source's own audio under it."""
+"""Put the restyled segments back on the source's clock and hide the seams.
+
+1. Retime: MiniMax H3 follows the source's motion at an uneven pace (2026-11-09, GOF3D10232: a 6 s clip came back
+   6.58 s long, on time for 2.5 s, then half a second slow), so a plain stretch drifts. Every output frame is
+   matched to the result frame showing the same moment (dynamic time warping on edge maps), and the clip is
+   rewritten frame by frame at the output rate and size.
+2. Colours: gain/offset per clip so colours meet across every seam inside a shot (least squares per run).
+3. Seams: at a camera cut the clips are simply joined. Inside a shot the seam sits where the camera moves fast
+   (plan); there both results cross-fade over TRANSITION_SECONDS under a motion blur along the camera's direction
+   that swells to the middle of the switch ("whip"), or a soft blur when the camera barely moves ("soft"). The
+   blur turns the two drawings' differences into what fast motion looks like anyway; the two clips' difference is
+   still measured (`visible` seams go to the review).
+4. Join with the source's own audio of the kept range.
+"""
 from __future__ import annotations
 
+import math
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -11,18 +24,18 @@ from reskin.common import FFMPEG, log, read, run, video_info, write
 
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
-BLEND_FRAMES = 3       # the switch inside an overlap: a 3-frame blend at the best-matching moment
-GRID = (10, 6)         # rows, columns of the regions a seam is measured in
-# A seam is visible when the two results differ at the switch clearly more than the picture moves from frame to
-# frame there, or when one region changes a lot (an object drawn differently). Calibrated on GOF3D10232
-# (2026-11-06): independent segments differed 0.66-0.69 SSIM in the overlap against 0.90 frame to frame.
-SEAM_EXCESS = 6.0      # switch difference minus motion, 0-255
-SEAM_RATIO = 2.5       # switch difference / motion
-SEAM_LOCAL = 30.0      # largest region difference, 0-255 (and SEAM_RATIO times that region's own motion)
-# After retiming, a later clip can run a frame or two behind the earlier one in their overlap (GOF3D10232,
-# 2026-11-06: K02 one frame late during a camera pan; the blend showed both drawings and the switch jumped).
-MAX_LAG = 2            # frames a later clip is searched for running behind the earlier one
-LAG_GAIN = .85         # take a lag only when it brings the overlap difference below this share of no lag
+GRID = (10, 6)              # rows, columns of the regions a seam is measured in
+SEAM_EXCESS = 6.0           # switch difference minus motion, 0-255
+SEAM_RATIO = 2.5            # switch difference / motion
+SEAM_LOCAL = 30.0           # largest region difference, 0-255 (and SEAM_RATIO times that region's own motion)
+TRANSITION_SECONDS = .375   # the masked switch inside a shot (9 frames at 24 fps)
+WHIP_MIN = 3.0              # px per output frame of camera motion from which a seam is blurred along it
+WHIP_GAIN = 1.2             # blur length (px) per px of camera motion per frame
+WHIP_LIMITS = (10.0, 48.0)  # blur length at the middle of the switch, px at 1080 on the short side (64 read as a swish)
+SOFT_RADIUS = 4.0           # box blur radius at the middle of a soft switch, px
+FEATURE = (48, 84)          # width, height of the edge maps clips are aligned on (portrait; swapped for landscape)
+WARP_BAND = 1.5             # seconds a result may run ahead of or behind the source
+WARP_STEP = .08             # extra cost (share of the median frame difference) of holding or skipping a frame
 
 
 def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
@@ -33,7 +46,8 @@ def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
 
 
 def timeline(row: dict, out_fps: float) -> list[dict]:
-    """Output frame ranges of every segment on one global clock, so rounding never drifts."""
+    """Output frame ranges of every segment on one global clock (0 = the kept range's start), so rounding never
+    drifts: `out` is what the segment rendered, `body` what it delivers."""
     fps = row["fps"]
     first = round(row["keep"][0] * fps)
     position = lambda frame: round((frame - first) * out_fps / fps)
@@ -41,50 +55,171 @@ def timeline(row: dict, out_fps: float) -> list[dict]:
     for seg in row["segments"]:
         a, b = seg["render_frames"]
         rows.append({"id": seg["id"], "seam": seg["seam"], "out": [position(a), position(b)],
-                     "body": [position(seg["frames"][0]), position(seg["frames"][1])]})
+                     "body": [position(seg["frames"][0]), position(seg["frames"][1])],
+                     "camera": seg.get("seam_camera") or [0.0, 0.0]})
     return rows
 
 
-def normalise(ai: Path, frames: int, seconds: float, out_fps: float, size: tuple[int, int], output: Path) -> Path:
-    """Retime the AI clip to the source duration exactly, at the output rate and size, `frames` frames long."""
-    info = video_info(ai)
-    factor = seconds / info["duration"]
-    chain = (f"setpts=(PTS-STARTPTS)*{factor:.8f},fps={out_fps},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1,"
-             f"tpad=stop_mode=clone:stop=4,trim=end_frame={frames},setpts=PTS-STARTPTS,format=yuv420p")
+# --- 1. retime -------------------------------------------------------------------------------------------------
+
+def edge_maps(path: Path, size: tuple[int, int], *, start: float | None = None, seconds: float | None = None,
+              fps: float | None = None) -> np.ndarray:
+    """Normalised edge maps (frames, h, w) of a clip at `size`: independent of the materials' colours, so a cartoon
+    frame and its realistic version of the same moment match."""
+    command = [FFMPEG, "-v", "error"]
+    if start is not None:
+        command += ["-ss", f"{max(0.0, start):.6f}"]
+    command += ["-i", path]
+    if seconds is not None:
+        command += ["-t", f"{seconds:.6f}"]
+    filters = ([f"fps={fps}"] if fps else []) + [f"scale={size[0]}:{size[1]}:flags=area", "format=gray"]
+    raw = run(command + ["-vf", ",".join(filters), "-f", "rawvideo", "-"], binary=True)
+    data = np.frombuffer(raw, np.uint8)
+    count = data.size // (size[0] * size[1])
+    grey = data[: count * size[0] * size[1]].reshape(count, size[1], size[0]).astype(np.float32)
+    gy, gx = np.gradient(grey, axis=(1, 2))
+    edges = np.hypot(gx, gy)
+    edges /= edges.mean(axis=(1, 2), keepdims=True) + 1e-3
+    return edges.reshape(count, -1)
+
+
+def structure_maps(path: Path, size: tuple[int, int] = (16, 28), fps: float | None = None) -> np.ndarray:
+    """Coarse grey layouts (frames, pixels), each normalised: where things are, not what they are made of."""
+    filters = ([f"fps={fps}"] if fps else []) + [f"scale={size[0]}:{size[1]}:flags=area", "format=gray"]
+    raw = run([FFMPEG, "-v", "error", "-i", path, "-vf", ",".join(filters), "-f", "rawvideo", "-"], binary=True)
+    data = np.frombuffer(raw, np.uint8)
+    count = data.size // (size[0] * size[1])
+    grey = data[: count * size[0] * size[1]].reshape(count, -1).astype(np.float32)
+    return (grey - grey.mean(axis=1, keepdims=True)) / (grey.std(axis=1, keepdims=True) + 1e-3)
+
+
+FOLLOW_EDGES = .93          # matched / typical difference of edge maps above which a result may have left the source
+FOLLOW_STRUCTURE = .80      # ... and of coarse layouts. GOF3D10232 (2026-11-09): results that followed 0.71-0.92 /
+                            # 0.50-0.61; one that cut to a close-up of its own 0.976 / 0.89
+
+
+def follows(clip: Path, ai: Path, out_fps: float = 24.0) -> dict:
+    """Whether an H3 result still shows the source clip's camera and layout (it may set its own pace): both the
+    edge maps and the coarse layouts, matched after time warping, must stay clearly below random pairs."""
+    portrait = video_info(clip)["height"] >= video_info(clip)["width"]
+    ratios = {}
+    for name, read_maps in (("edges", lambda p, fps=None: edge_maps(p, FEATURE if portrait else FEATURE[::-1], fps=fps)),
+                            ("structure", lambda p, fps=None: structure_maps(p, (16, 28) if portrait else (28, 16), fps))):
+        src, res = read_maps(clip, out_fps), read_maps(ai)
+        cost = np.stack([np.abs(res - s).mean(axis=1) for s in src])
+        _, matched = warp(cost, max(4, round(WARP_BAND * out_fps)))
+        ratios[name] = round(matched / max(float(np.median(cost)), 1e-6), 3)
+    ratios["follows"] = not (ratios["edges"] > FOLLOW_EDGES and ratios["structure"] > FOLLOW_STRUCTURE)
+    return ratios
+
+
+def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]:
+    """Monotonic match of every output frame (rows) to one result frame (columns), by dynamic programming inside a
+    band around the even pace: from one output frame to the next the result advances one frame for free, holds
+    (0) or skips ahead (up to `jump` frames: H3 stalls for half a second at times) at a small cost per frame of
+    difference from one; the result may start a few frames late and end early (its last frame is then held)."""
+    rows, cols = cost.shape
+    step = WARP_STEP * float(np.median(cost))
+    inf = np.inf
+    ratio = cols / rows
+    columns = np.arange(cols)
+    penalty = np.array([step] + [step * (k - 1) for k in range(1, jump + 1)])     # advance 0, 1, 2, ... frames
+    total = np.full((rows, cols), inf)
+    came = np.zeros((rows, cols), np.int16)          # how many frames the result advanced into this cell
+    inside = lambda i: np.abs(columns - i * ratio) <= band
+    total[0] = np.where((columns <= max(2, band // 3)) & inside(0), cost[0], inf)
+    for i in range(1, rows):
+        best = np.full(cols, inf)
+        moved = np.zeros(cols, np.int16)
+        for k in range(jump + 1):
+            shifted = np.full(cols, inf)
+            shifted[k:] = total[i - 1, : cols - k] if k else total[i - 1]
+            better = shifted + penalty[k] < best
+            best[better], moved[better] = shifted[better] + penalty[k], k
+        total[i] = np.where(inside(i), best + cost[i], inf)
+        came[i] = moved
+    j = int(np.argmin(total[rows - 1]))
+    if not np.isfinite(total[rows - 1, j]):
+        raise RuntimeError("the result cannot be matched to the source inside the time band")
+    mapping = [0] * rows
+    for i in range(rows - 1, -1, -1):
+        mapping[i] = j
+        j -= int(came[i, j]) if i else 0
+    return mapping, float(np.mean([cost[i, m] for i, m in enumerate(mapping)]))
+
+
+def smooth(mapping: list[int]) -> list[int]:
+    """A running median over up to 5 frames (narrower at the ends, so the ends stay put), kept monotonic: no
+    single-frame back-and-forth from noisy matches."""
+    out, last, n = [], 0, len(mapping)
+    for i in range(n):
+        k = min(2, i, n - 1 - i)
+        window = sorted(mapping[i - k: i + k + 1])
+        last = max(last, window[len(window) // 2])
+        out.append(last)
+    return out
+
+
+def write_frames(ai: Path, mapping: list[int], out_fps: float, size: tuple[int, int], output: Path) -> Path:
+    """The clip whose frame k is result frame mapping[k] (monotonic: streamed, one frame in memory)."""
+    width, height = size
+    frame_bytes = width * height * 3
+    decoder = subprocess.Popen([str(FFMPEG), "-v", "error", "-i", str(ai), "-vf",
+                                f"scale={width}:{height}:flags=lanczos,format=rgb24", "-fps_mode", "passthrough",
+                                "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               creationflags=0x08000000)     # stopped early on purpose: no broken-pipe noise
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
-    run([FFMPEG, "-v", "error", "-y", "-i", ai, "-vf", chain, "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "12",
-         "-r", str(out_fps), partial])
+    encoder = subprocess.Popen([str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                                "-s", f"{width}x{height}", "-r", str(out_fps), "-i", "-", "-an", "-c:v", "libx264",
+                                "-preset", "fast", "-crf", "12", "-pix_fmt", "yuv420p", str(partial)],
+                               stdin=subprocess.PIPE, creationflags=0x08000000)
+    try:
+        index, current = -1, None
+        for wanted in mapping:
+            while index < wanted:
+                block = decoder.stdout.read(frame_bytes)
+                if len(block) < frame_bytes:
+                    break
+                current, index = block, index + 1
+            if current is None:
+                raise RuntimeError(f"{ai.name}: no frames decoded")
+            encoder.stdin.write(current)
+    finally:
+        encoder.stdin.close()
+        decoder.stdout.close()
+        decoder.wait()
+    if encoder.wait():
+        raise RuntimeError(f"encoding {output.name} failed")
     partial.replace(output)
     return output
 
 
-def lag_of(before: np.ndarray, after: np.ndarray, overlap: int) -> tuple[int, list[float]]:
-    """How many frames the later clip runs behind the earlier one: `before` holds the earlier clip's overlap frames,
-    `after` the later clip's first overlap + MAX_LAG frames. Returns the lag and the mean difference per lag."""
-    scores = []
-    for lag in range(MAX_LAG + 1):
-        count = min(overlap, len(before), len(after) - lag)
-        scores.append(float(np.mean([np.abs(before[i] - after[i + lag]).mean() for i in range(count)]))
-                      if count > 0 else float("inf"))
-    best = int(np.argmin(scores))
-    if best and not scores[best] < LAG_GAIN * scores[0]:
-        best = 0
-    return best, scores
+def retime(ai: Path, source: Path, render_frames: list[int], fps: float, frames: int, out_fps: float,
+           size: tuple[int, int], output: Path) -> dict:
+    """The AI clip on the source clock: `frames` output frames from the render's start, each the result frame
+    showing that moment of the source."""
+    feature = FEATURE if size[1] >= size[0] else FEATURE[::-1]
+    start = render_frames[0] / fps
+    src = edge_maps(source, feature, start=start, seconds=frames / out_fps + 1 / out_fps, fps=out_fps)[:frames]
+    if len(src) < frames:
+        src = np.concatenate([src, np.repeat(src[-1:], frames - len(src), axis=0)])
+    res = edge_maps(ai, feature)
+    cost = np.stack([np.abs(res - src[i]).mean(axis=1) for i in range(frames)])
+    mapping, matched = warp(cost, max(4, round(WARP_BAND * out_fps)))
+    mapping = smooth(mapping)
+    write_frames(ai, mapping, out_fps, size, output)
+    even = [round(i * (len(res) - 1) / max(1, frames - 1)) for i in range(frames)]
+    return {"frames": frames, "result_frames": int(len(res)), "matched": round(matched, 3),
+            "typical": round(float(np.median(cost)), 3),
+            "even": round(float(np.mean([cost[i, j] for i, j in enumerate(even)])), 3),
+            "held": sum(1 for a, b in zip(mapping, mapping[1:]) if a == b),
+            "skipped": sum(max(0, b - a - 1) for a, b in zip(mapping, mapping[1:]))}
 
 
-def shifted(clip: Path, lag: int, frames: int, out_fps: float, output: Path) -> Path:
-    """The clip `lag` frames earlier: its first frames dropped, its last frame held, still `frames` frames long."""
-    chain = (f"trim=start_frame={lag},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop={lag},"
-             f"trim=end_frame={frames},setpts=PTS-STARTPTS,format=yuv420p")
-    partial = output.with_name(output.stem + ".partial.mp4")
-    run([FFMPEG, "-v", "error", "-y", "-i", clip, "-vf", chain, "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "12",
-         "-r", str(out_fps), partial])
-    partial.replace(output)
-    return output
+# --- 2. colours ------------------------------------------------------------------------------------------------
 
-
-def frames_rgb(path: Path, start: int, count: int, out_fps: float, width: int = 96) -> np.ndarray:
+def frames_rgb(path: Path, start: int, count: int, width: int = 96) -> np.ndarray:
     raw = run([FFMPEG, "-v", "error", "-i", path, "-vf",
                f"select='between(n\\,{start}\\,{start + count - 1})',scale={width}:-2:flags=area,format=rgb24",
                "-fps_mode", "passthrough", "-f", "rawvideo", "-"], binary=True)
@@ -136,27 +271,36 @@ def solve_run(boundaries: list[dict], count: int) -> list[tuple[np.ndarray, np.n
     return [(gains[k], offsets[k]) for k in range(count)]
 
 
-def match_colours(clips: list[Path], lines: list[dict], out_fps: float) -> tuple[list[tuple], list[dict]]:
-    """Gain/offset per clip so the colours meet across every seam inside a shot (hard cuts may change the look)."""
-    corrections: list[tuple] = [(np.ones(3), np.zeros(3)) for _ in clips]
+def overlap(before: dict, after: dict) -> tuple[int, int]:
+    """The global output frames both neighbours rendered."""
+    return max(before["out"][0], after["out"][0]), min(before["out"][1], after["out"][1])
+
+
+def runs_of(lines: list[dict]) -> list[list[int]]:
+    """Indices of the clips joined by seams inside a shot (a cut or the start opens a new run)."""
     runs: list[list[int]] = []
     for index, line in enumerate(lines):
         if index and line["seam"] == "continuous":
             runs[-1].append(index)
         else:
             runs.append([index])
+    return runs
+
+
+def match_colours(clips: list[Path], lines: list[dict]) -> tuple[list[tuple], list[dict]]:
+    """Gain/offset per clip so the colours meet across every seam inside a shot (hard cuts may change the look)."""
+    corrections: list[tuple] = [(np.ones(3), np.zeros(3)) for _ in clips]
     seams = []
-    for members in runs:
+    for members in runs_of(lines):
         if len(members) < 2:
             continue
         boundaries = []
         for position, index in enumerate(members[1:], 1):
-            line, prev_line = lines[index], lines[index - 1]
-            count = max(2, line["body"][0] - line["out"][0])
-            prev_count = prev_line["out"][1] - prev_line["out"][0]
-            mean_b, std_b = stats(frames_rgb(clips[index - 1], prev_count - count, count, out_fps))
-            mean_a, std_a = stats(frames_rgb(clips[index], 0, count, out_fps))
-            boundaries.append({"index": position, "id": line["id"], "mean_before": mean_b, "std_before": std_b,
+            a, b = overlap(lines[index - 1], lines[index])
+            count = max(2, b - a)
+            mean_b, std_b = stats(frames_rgb(clips[index - 1], a - lines[index - 1]["out"][0], count))
+            mean_a, std_a = stats(frames_rgb(clips[index], a - lines[index]["out"][0], count))
+            boundaries.append({"index": position, "id": lines[index]["id"], "mean_before": mean_b, "std_before": std_b,
                                "mean_after": mean_a, "std_after": std_a})
         solved = solve_run(boundaries, len(members))
         for position, index in enumerate(members):
@@ -177,6 +321,8 @@ def corrected(pixels: np.ndarray, correction: tuple) -> np.ndarray:
     return np.clip(pixels * gain + offset, 0, 255)
 
 
+# --- 3. seams --------------------------------------------------------------------------------------------------
+
 def regional(a: np.ndarray, b: np.ndarray) -> float:
     """The largest mean difference of one region of the frame."""
     rows, cols = GRID
@@ -185,33 +331,119 @@ def regional(a: np.ndarray, b: np.ndarray) -> float:
     return float(max(diff[r * h:(r + 1) * h, c * w:(c + 1) * w].mean() for r in range(rows) for c in range(cols)))
 
 
-def find_switch(before: np.ndarray, after: np.ndarray) -> dict:
-    """Both clips' frames of one overlap (same moments, colours corrected): the blend start where they match best,
-    and how visible the switch is against the ordinary frame-to-frame change there."""
+def measure(before: np.ndarray, after: np.ndarray) -> dict:
+    """How different the two results are across the switch (colours corrected) against how much the picture moves
+    from frame to frame there: `visible` when they differ clearly more than it moves, or one region a lot."""
     count = min(len(before), len(after))
-    blend = min(BLEND_FRAMES, count)
-    per_frame = [float(np.abs(before[i] - after[i]).mean()) for i in range(count)]
-    starts = range(0, count - blend + 1)
-    start = min(starts, key=lambda i: (round(float(np.mean(per_frame[i:i + blend])), 4), -i))
-    middle = start + blend // 2
+    difference = float(np.mean([np.abs(before[i] - after[i]).mean() for i in range(count)]))
     steps = [float(np.abs(clip[i + 1] - clip[i]).mean()) for clip in (before, after) for i in range(count - 1)]
     motion = float(np.median(steps)) if steps else 0.0
-    difference = float(np.mean(per_frame[start:start + blend]))
+    middle = count // 2
     local = regional(before[middle], after[middle])
-    # a region where the picture itself changes fast (a bending stack, a popping bubble) may differ as much
     local_steps = [regional(clip[i], clip[i + 1]) for clip in (before, after) for i in range(count - 1)]
     local_motion = float(np.median(local_steps)) if local_steps else 0.0
-    if difference < motion:
-        # The picture moves more from frame to frame than the two results differ (a camera pan): a blend would
-        # show both drawings, shifted, at once (GOF3D10232, 2026-11-06), so cut at the best-matching frame instead.
-        start = min(range(count), key=lambda i: (round(per_frame[i], 4), -i))
-        blend, middle, difference = 0, start, per_frame[start]
-        local = regional(before[start], after[start])
     visible = ((difference - motion > SEAM_EXCESS and difference > SEAM_RATIO * max(motion, .5))
                or (local > SEAM_LOCAL and local > SEAM_RATIO * max(local_motion, .5)))
-    return {"start": start, "blend": blend, "difference": round(difference, 2), "motion": round(motion, 2),
-            "local": round(local, 2), "local_motion": round(local_motion, 2), "verdict": "visible" if visible else "clean"}
+    return {"difference": round(difference, 2), "motion": round(motion, 2), "local": round(local, 2),
+            "local_motion": round(local_motion, 2), "verdict": "visible" if visible else "clean"}
 
+
+def directional_blur(image: np.ndarray, direction: tuple[float, float], length: float) -> np.ndarray:
+    """Average of copies shifted along `direction` (unit vector) over `length` px, edges clamped."""
+    if length < 1.5:
+        return image
+    samples = max(2, int(length / 2))
+    reach = int(math.ceil(length / 2)) + 1
+    padded = np.pad(image, ((reach, reach), (reach, reach), (0, 0)), mode="edge")
+    height, width = image.shape[:2]
+    total = np.zeros_like(image)
+    for k in range(samples + 1):
+        t = (k / samples - .5) * length
+        dx, dy = round(t * direction[0]), round(t * direction[1])
+        total += padded[reach + dy: reach + dy + height, reach + dx: reach + dx + width]
+    return total / (samples + 1)
+
+
+def box_blur(image: np.ndarray, radius: float) -> np.ndarray:
+    r = int(round(radius))
+    if r < 1:
+        return image
+    out = image
+    for axis in (0, 1):
+        padded = np.pad(out, [(r + 1, r) if a == axis else (0, 0) for a in range(3)], mode="edge")
+        summed = np.cumsum(padded, axis=axis, dtype=np.float32)
+        upper = np.take(summed, np.arange(2 * r + 1, summed.shape[axis]), axis=axis)
+        lower = np.take(summed, np.arange(0, summed.shape[axis] - 2 * r - 1), axis=axis)
+        out = (upper - lower) / (2 * r + 1)
+    return out
+
+
+def transition_plan(camera: list[float], size: tuple[int, int], out_fps: float, scale: float) -> dict:
+    """Mode, direction and peak blur of a masked switch from the camera's screen speed at the seam."""
+    vx, vy = camera[0] * size[0] / out_fps, camera[1] * size[1] / out_fps      # px per output frame
+    speed = math.hypot(vx, vy)
+    if speed >= WHIP_MIN * scale:
+        length = min(max(WHIP_GAIN * speed, WHIP_LIMITS[0] * scale), WHIP_LIMITS[1] * scale)
+        return {"mode": "whip", "direction": [vx / speed, vy / speed], "blur": round(length, 1),
+                "camera_px": round(speed, 2)}
+    return {"mode": "soft", "direction": [1.0, 0.0], "blur": round(SOFT_RADIUS * scale, 1), "camera_px": round(speed, 2)}
+
+
+def transition_frame(a: np.ndarray, b: np.ndarray, u: float, how: dict) -> np.ndarray:
+    """One frame of the switch at progress u (0-1): cross-fade (smoothstep over the middle 70 %) under a blur that
+    swells to the middle."""
+    x = min(1.0, max(0.0, (u - .15) / .7))
+    alpha = x * x * (3 - 2 * x)
+    mixed = (1 - alpha) * a + alpha * b
+    strength = math.sin(math.pi * u)
+    if how["mode"] == "whip":
+        return directional_blur(mixed, tuple(how["direction"]), how["blur"] * strength)
+    return box_blur(mixed, how["blur"] * strength)
+
+
+def read_full(path: Path, start: int, count: int, size: tuple[int, int]) -> np.ndarray:
+    raw = run([FFMPEG, "-v", "error", "-i", path, "-vf", f"select='between(n\\,{start}\\,{start + count - 1})',"
+               f"scale={size[0]}:{size[1]},format=rgb24", "-fps_mode", "passthrough", "-f", "rawvideo", "-"], binary=True)
+    data = np.frombuffer(raw, np.uint8)
+    n = data.size // (size[0] * size[1] * 3)
+    return data[: n * size[0] * size[1] * 3].reshape(n, size[1], size[0], 3)
+
+
+def write_transition(frames: list[np.ndarray], size: tuple[int, int], out_fps: float, output: Path) -> Path:
+    partial = output.with_name(output.stem + ".partial.mp4")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    data = b"".join(np.clip(f, 0, 255).astype(np.uint8).tobytes() for f in frames)
+    run([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{size[0]}x{size[1]}",
+         "-r", str(out_fps), "-i", "-", "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "12", "-pix_fmt", "yuv420p",
+         partial], input=data)
+    partial.replace(output)
+    return output
+
+
+def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], index: int,
+              corrections: list[tuple], size: tuple[int, int], out_fps: float) -> dict:
+    """The masked switch between clips index-1 and index, centred on the planned seam inside their overlap."""
+    before, after = lines[index - 1], lines[index]
+    a, b = overlap(before, after)
+    length = max(2, round(TRANSITION_SECONDS * out_fps))
+    start = after["body"][0] - length // 2
+    start = max(a, min(start, b - length))
+    length = min(length, b - start)
+    small_before = corrected(frames_rgb(clips[index - 1], a - before["out"][0], b - a), corrections[index - 1])
+    small_after = corrected(frames_rgb(clips[index], a - after["out"][0], b - a), corrections[index])
+    found = measure(small_before[start - a: start - a + length], small_after[start - a: start - a + length])
+    how = transition_plan(after["camera"], size, out_fps, min(size) / 1080)
+    first = read_full(clips[index - 1], start - before["out"][0], length, size)
+    second = read_full(clips[index], start - after["out"][0], length, size)
+    count = min(len(first), len(second), length)
+    frames = [transition_frame(corrected(first[i].astype(np.float32), corrections[index - 1]),
+                               corrected(second[i].astype(np.float32), corrections[index]), (i + .5) / count, how)
+              for i in range(count)]
+    clip = write_transition(frames, size, out_fps, job / "work" / f"{source_id}-{after['id']}-seam.mp4")
+    return {"start": start, "length": count, "clip": clip, **how, **found}
+
+
+# --- 4. join ---------------------------------------------------------------------------------------------------
 
 def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
@@ -219,101 +451,54 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
     size = target_size(row["width"], row["height"], state["options"]["resolution"])
     lines = timeline(row, out_fps)
-    clips = []
-    for line in lines:
+    clips, timing = [], []
+    for line, seg in zip(lines, row["segments"]):
         ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
         record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
         record = read(record_path) if record_path.is_file() else {}
         if not ai.is_file() or record.get("status") != "done":
             raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
         frames = line["out"][1] - line["out"][0]
-        seconds = frames / out_fps
         work = job / "work" / f"{source_id}-{line['id']}.mp4"
-        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size)}
+        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size), "retime": 2}
         stamp_path = work.with_suffix(".json")
-        if not (work.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
-            normalise(ai, frames, seconds, out_fps, size, work)
-            write(stamp_path, stamp)
-        clips.append(work)
-    # Inside a shot, line every later clip up in time with the one before it (in order, so each is aligned to an
-    # already aligned clip) before colours are matched and the switch is chosen.
-    lags = []
-    for index, line in enumerate(lines):
-        overlap = line["body"][0] - line["out"][0]
-        if not index or line["seam"] != "continuous" or overlap <= 0:
-            continue
-        prev_count = lines[index - 1]["out"][1] - lines[index - 1]["out"][0]
-        lag, scores = lag_of(frames_rgb(clips[index - 1], prev_count - overlap, overlap, out_fps),
-                             frames_rgb(clips[index], 0, overlap + MAX_LAG, out_fps), overlap)
-        lags.append({"segment": line["id"], "lag": lag, "difference": [round(s, 2) for s in scores]})
-        if lag:
-            frames = line["out"][1] - line["out"][0]
-            aligned = clips[index].with_name(clips[index].stem + "-aligned.mp4")
-            stamp = {"from": read(clips[index].with_suffix(".json")), "before": str(clips[index - 1].name), "lag": lag}
-            stamp_path = aligned.with_suffix(".json")
-            if not (aligned.is_file() and stamp_path.is_file() and read(stamp_path) == stamp):
-                shifted(clips[index], lag, frames, out_fps, aligned)
-                write(stamp_path, stamp)
-            log(f"{source_id}:{line['id']}: runs {lag} frame(s) behind the clip before it in the overlap; aligned")
-            clips[index] = aligned
-    corrections, seams = match_colours(clips, lines, out_fps)
-    # Inside a shot both clips render the overlap: find where they match best and switch there.
-    switches: dict[int, dict] = {}
-    for index, line in enumerate(lines):
-        overlap = line["body"][0] - line["out"][0]
-        if not index or line["seam"] != "continuous" or overlap <= 0:
-            continue
-        prev_count = lines[index - 1]["out"][1] - lines[index - 1]["out"][0]
-        before = corrected(frames_rgb(clips[index - 1], prev_count - overlap, overlap, out_fps), corrections[index - 1])
-        after = corrected(frames_rgb(clips[index], 0, overlap, out_fps), corrections[index])
-        switches[index] = {**find_switch(before, after), "overlap": overlap}
-    # Frames each clip contributes: a later clip from its switch on, an earlier one up to the end of the blend.
-    heads = {index: s["start"] for index, s in switches.items()}
-    tails = {index - 1: lines[index - 1]["out"][1] - lines[index - 1]["out"][0] - s["overlap"] + s["start"] + s["blend"]
-             for index, s in switches.items()}
-    # One filter graph: corrected clips, switched inside shots, joined at cuts, with the source audio.
-    inputs, graph, lengths = [], [], []
-    for index, (clip, (gain, offset)) in enumerate(zip(clips, corrections)):
-        inputs += ["-i", clip]
-        head = heads.get(index, 0)
-        tail = tails.get(index, lines[index]["out"][1] - lines[index]["out"][0])
-        lengths.append(tail - head)
-        chain = f"[{index}:v]trim=start_frame={head}:end_frame={tail},setpts=PTS-STARTPTS"
-        if not (np.allclose(gain, 1) and np.allclose(offset, 0)):
-            chain += f",format=rgb24,{lut(gain, offset)},format=yuv420p"
-        graph.append(chain + f"[c{index}]")
-    runs: list[list[int]] = []
-    for index, line in enumerate(lines):
-        if index and line["seam"] == "continuous":
-            runs[-1].append(index)
+        if work.is_file() and stamp_path.is_file() and read(stamp_path).get("stamp") == stamp:
+            measured = read(stamp_path)["timing"]
         else:
-            runs.append([index])
-    labels = []
-    for number, members in enumerate(runs):
-        label = f"c{members[0]}"
-        length = lengths[members[0]]
-        for index in members[1:]:
-            if index in switches and switches[index]["blend"]:
-                blend = switches[index]["blend"]
-                graph.append(f"[{label}][c{index}]xfade=transition=fade:duration={blend / out_fps:.6f}:"
-                             f"offset={(length - blend) / out_fps:.6f}[x{index}]")
-                length = length + lengths[index] - blend
-            else:
-                graph.append(f"[{label}][c{index}]concat=n=2:v=1:a=0[x{index}]")
-                length += lengths[index]
-            label = f"x{index}"
-        labels.append(label)
-    total = lines[-1]["out"][1] - lines[0]["out"][0]
-    if len(labels) > 1:
-        graph.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=1:a=0[joined]")
-        final = "joined"
-    else:
-        final = labels[0]
-    graph.append(f"[{final}]trim=end_frame={total},setpts=PTS-STARTPTS[vout]")
+            measured = retime(ai, Path(source["path"]), seg["render_frames"], row["fps"], frames, out_fps, size, work)
+            write(stamp_path, {"stamp": stamp, "timing": measured})
+        timing.append({"segment": line["id"], **measured})
+        clips.append(work)
+    corrections, colour = match_colours(clips, lines)
+    switches = {index: make_seam(job, source_id, clips, lines, index, corrections, size, out_fps)
+                for index, line in enumerate(lines) if index and line["seam"] == "continuous"}
+    # Pieces on the global clock: each clip from its body start (or the end of the switch before it) to its body
+    # end (or the start of the switch after it), the switch clips in between.
+    pieces = []
+    for index, line in enumerate(lines):
+        head = switches[index]["start"] + switches[index]["length"] if index in switches else line["body"][0]
+        tail = switches[index + 1]["start"] if index + 1 in switches else line["body"][1]
+        if tail > head:
+            pieces.append({"path": clips[index], "a": head - line["out"][0], "b": tail - line["out"][0],
+                           "correction": corrections[index]})
+        if index + 1 in switches:
+            s = switches[index + 1]
+            pieces.append({"path": s["clip"], "a": 0, "b": s["length"], "correction": None})
+    inputs, graph = [], []
+    for number, piece in enumerate(pieces):
+        inputs += ["-i", piece["path"]]
+        chain = f"[{number}:v]trim=start_frame={piece['a']}:end_frame={piece['b']},setpts=PTS-STARTPTS"
+        if piece["correction"] is not None and not (np.allclose(piece["correction"][0], 1)
+                                                    and np.allclose(piece["correction"][1], 0)):
+            chain += f",format=rgb24,{lut(*piece['correction'])},format=yuv420p"
+        graph.append(chain + f",setsar=1[p{number}]")
+    total = lines[-1]["body"][1] - lines[0]["body"][0]
+    graph.append("".join(f"[p{n}]" for n in range(len(pieces))) + f"concat=n={len(pieces)}:v=1:a=0[joined]")
+    graph.append(f"[joined]trim=end_frame={total},setpts=PTS-STARTPTS[vout]")
     keep_start, keep_end = row["keep"]
     audio = []
     if info["audio"]:
-        index = len(clips)
+        index = len(pieces)
         inputs += ["-i", source["path"]]
         fade = []
         if keep_end < info["duration"] - .1:
@@ -339,24 +524,31 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         problems.append(f"duration {made['duration']:.3f} s, expected {expected:.3f} s")
     if (made["width"], made["height"]) != size:
         problems.append(f"size {made['width']}x{made['height']}, expected {size[0]}x{size[1]}")
+    for entry in timing:
+        # a strong restyle changes the edges too: matches of 0.7-0.92 of the typical difference lined up on the stills
+        # (GOF3D10232, 2026-11-09); near 1 the result no longer follows the source
+        if entry["matched"] > .95 * entry["typical"]:
+            problems.append(f"{entry['segment']}: the result does not follow the source's motion (match "
+                            f"{entry['matched']} vs typical {entry['typical']})")
+    origin = lines[0]["body"][0]
     seam_times = []
     for index, line in enumerate(lines[1:], 1):
-        entry = {"segment": line["id"], "seam": line["seam"],
-                 "time": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3)}
+        entry = {"segment": line["id"], "seam": line["seam"], "time": round((line["body"][0] - origin) / out_fps, 3)}
         if index in switches:
             s = switches[index]
-            moment = line["out"][0] + s["start"] + s["blend"] / 2 - lines[0]["out"][0]
-            entry = {**entry, "time": round(moment / out_fps, 3),
-                     **{k: s[k] for k in ("difference", "motion", "local", "local_motion", "verdict")}}
+            entry = {**entry, "time": round((s["start"] + s["length"] / 2 - origin) / out_fps, 3),
+                     "frames": s["length"], **{k: s[k] for k in ("mode", "blur", "camera_px", "difference", "motion",
+                                                                 "local", "local_motion", "verdict")}}
             if s["verdict"] == "visible":
-                problems.append(f"seam before {line['id']} at {entry['time']:.2f} s is visible (difference "
-                                f"{s['difference']} vs motion {s['motion']}, region {s['local']})")
+                problems.append(f"seam before {line['id']} at {entry['time']:.2f} s: the two results differ "
+                                f"({s['difference']} vs motion {s['motion']}, region {s['local']}); masked by a "
+                                f"{s['mode']} switch, check the seam stills")
         seam_times.append(entry)
     result = {"source": source_id, "output": str(output), "duration": round(made["duration"], 3),
-              "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": seams, "lags": lags,
-              "problems": problems, "keep": row["keep"],
-              "segments": [{"id": line["id"], "start": round((line["body"][0] - lines[0]["out"][0]) / out_fps, 3),
-                            "end": round((line["body"][1] - lines[0]["out"][0]) / out_fps, 3)} for line in lines]}
+              "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
+              "timing": timing, "problems": problems, "keep": row["keep"],
+              "segments": [{"id": line["id"], "start": round((line["body"][0] - origin) / out_fps, 3),
+                            "end": round((line["body"][1] - origin) / out_fps, 3)} for line in lines]}
     write(job / "state/assembled" / f"{source_id}.json", result)
     log(f"{source_id}: assembled {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
     return result

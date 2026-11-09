@@ -6,21 +6,20 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | Command | Does | Typical time |
 | --- | --- | --- |
 | `auth [--key K]` | stores the Winky key; checks the key and the Lumos login | seconds |
-| `login [--timeout 300]` | Feishu QR login to Lumos (opens the QR image; refreshes it when it expires) | until scanned |
+| `login [--no-open] [--timeout 300]` | Feishu QR login to Lumos; prints `qr: <image>` for every new code until scanned | until scanned |
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
-| `analyze [--only S01]` | media facts, camera cuts, end-card candidate, still overlays, sheets | ~10 s per source |
+| `analyze [--only S01]` | media facts, camera cuts, camera speed, end-card candidate, still overlays, sheets | ~10 s per source |
+| `survey [--only S01] [--redo]` | Gemini watches each whole source: scene views and subjects (re-boxed on stills) → `catalog/survey/<id>.json`, `catalog/<id>-survey.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `keyframes [--only K] [--redo K]` | anchor + segment keyframes (GPT Image) → `keyframes/`, `sheets/<id>-keyframes.png` | ~1 min per image, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot chained | 3-8 min per segment, 4 chains at a time |
-| `assemble [--only S01]` | retime, colour-match, switch at the best-matching overlap frame, measure seams, join with the source audio → delivery folder | ~1 min per video |
-| `review [--only S01] [--fps F]` | Gemini watches original and result side by side at full size, and each seam up close → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/`, `review/seams/<id>-<Kxx>/` | 2-4 min per video |
+| `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, max) and three-view sheets (1K, high) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
+| `render [--only K] [--workers 4]` | MiniMax H3 video edit of every segment at 2K → `ai/`; segments independent, side by side; results that leave the source's camera are rejected and rendered once more | 13-18 min per 12 s segment at 2K, 4 at a time |
+| `assemble [--only S01]` | retime frame by frame, colour-match, masked switches at seams inside shots, join with the source audio → delivery folder | ~1 min per video |
+| `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
-| `redo --segment S01:K02 --reason R [--prompt P] [--keyframe]` | sends confirmed segments back for another attempt | - |
+| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most); `--replace` drops the earlier corrective sentences | - |
 | `status` | progress per source and the next step | - |
 
-Keys: a source is `S01`; its anchor keyframe `S01:anchor`; a segment `S01:K02` (its keyframe has the same key; a segment that continues a shot starts
-from `keyframes/S01-K02-chain.png`, the previous result's frame at its first moment, and gets its keyframe as the
-material-detail reference).
+Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subject sheet `S01:P02`.
 
 ## Work order (`init`)
 
@@ -29,17 +28,18 @@ material-detail reference).
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
  "style": "realistic",
- "options": {"max_segment_seconds": 30, "fps": 24, "review_rounds": 3}}
+ "options": {"max_segment_seconds": 15, "fps": 24, "render_resolution": "2K"}}
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
-- `style`: a preset name from `assets/prompts.json` (`realistic`: realistic materials, style unchanged; pronounced textures,
-  brightness and grading looked up from `assets/styles/realistic.jpg`) or an object with `label`, `goal`, `look`, `anchor`,
-  `keyframe`, `video`, `default_materials` and optionally `reference` (a look picture, absolute or relative to `assets/`)
-  like the preset, for another look. All prompt texts are English. The reference picture goes with the anchor as Image 2
-  (look only, nothing copied from its content); every other keyframe follows the anchor.
-- `options.max_segment_seconds`: 4-30 (default 30; Seedance edits clips of 4-30 s; resolution is fixed at 1080p). `fps`: output frame rate
-  (default 24, the Seedance rate, never above the source).
+- `style`: a preset name from `assets/prompts.json` (`realistic`: realistic materials, style unchanged; pronounced
+  textures, brightness and grading looked up from `assets/styles/realistic.jpg`) or an object with `label`, `goal`,
+  `look`, `scene`, `subject`, `video`, `default_materials` and optionally `reference` (a look picture, absolute or
+  relative to `assets/`) like the preset, for another look. All prompt texts are English. The reference picture goes
+  with every scene map as its last image (look only, nothing copied from its content).
+- `options.max_segment_seconds`: 4-15 (default 15; H3 edits clips of 4-15 whole seconds). `render_resolution`: `2K`
+  (default) or `768P`, what H3 renders at; deliveries are 1080p either way. `fps`: output frame rate (default 24,
+  H3's rate, never above the source).
 
 ## Catalog (`analyze`)
 
@@ -47,61 +47,68 @@ material-detail reference).
 (`cut` or `transition`, or none) and still overlays (`O1 top-right box [x0, y0, x1, y1] 0.0-17.8 s`, fractions of
 the frame). Still overlays are candidates only: logos and warning lines (remove) and HUD counters (keep) both show
 up, scene objects that stand still too. `catalog/<id>.jpg` shows a frame every 1-2 s with cuts marked and overlay
-boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s.
+boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s. `catalog/motion/<id>-camera.json` holds the
+camera's screen speed per frame (frame widths/heights per second), used to place seams and to blur them.
+
+## Survey (`survey`)
+
+`catalog/survey/<id>.json`: `scenes` (`name`, `start`, `end`, `views`: 3-8 times whose frames together show the
+whole location) and `subjects` (`what`, `kind`, `appears` from_start/later, `start`, `end`, `at`: a moment it is
+clearly in view, `box`: [x0, y0, x1, y1] fractions of that frame, found again by Gemini on the still).
+`catalog/<id>-survey.jpg` shows every view and every crop. Correct them in the edits when a view is blurred or
+covered or a crop misses its subject.
 
 ## Edits (`plan --edits`)
 
 ```json
 {"defaults": {"extra": "雪地保持洁白。"},
  "sources": {
-  "S01": {"keep": [0, 65.7],
+  "S01": {"keep": [0, 59.08],
           "materials": ["清澈的河水和浮冰", "积雪地面", "木板平台和原木围栏", "整条的金枪鱼", "穿冬季服装的人物",
-                        {"what": "绿色的纸币堆", "start": 16, "end": 65.7},
-                        {"what": "蓝色皮卡车和柏油路面", "start": 56, "end": 65.7}],
-          "remove": [{"what": "右上角的游戏logo「WHITEOUT SURVIVAL」", "start": 0, "end": 36},
-                     {"what": "左下角的游戏logo「WHITEOUT SURVIVAL」", "start": 35, "end": 65.7}],
-          "anchor": 36.5},
+                        {"what": "绿色的纸币堆", "start": 12.5, "end": 59.08}],
+          "remove": [{"what": "右上角的游戏logo「WHITEOUT SURVIVAL」", "start": 0, "end": 36}],
+          "subjects": [{"what": "蓝衣猎人主角", "kind": "character", "start": 0, "end": 59.2, "at": 7.75,
+                        "box": [0.42, 0.38, 0.58, 0.52]}]},
   "S02": {"keep": [0, 61.0], "style_from": "S01"}}}
 ```
 
-- `keep`: `[start, end]` seconds of the source to deliver. The end is the last moment before the end card (its
-  transition included). Default: up to the end-card candidate, else the whole source.
-- `materials`: the real-world materials of what this video shows, in Chinese, each prominent object named as itself
-  (`整条的金枪鱼`, `绿色的纸币堆`, `原木`, `积雪地面`...): one text, or a list whose items are texts or
-  `{"what": text, "start": s, "end": s}` for objects that appear only part of the time. Each prompt names only the
-  items on screen during its keyframe or segment; the preset's generic list is the default. A timed item that first
-  starts inside a later segment gets a reveal frame (GPT Image, 0.7 s after its start, or at its `"at"` seconds):
-  give `at` when that moment shows it badly. Never list a material Never list a material
-  the video does not show or one another object could turn into: a list naming `三文鱼` turned stacks of whole tuna
-  and of green cash into salmon steaks, and an untimed `蓝色皮卡车` (trucks arrive near the end) put a truck into
-  the opening seconds.
+- `keep`: `[start, end]` seconds of the source to deliver (at least 4 s). The end is the last moment before the end
+  card (its transition included). Default: up to the end-card candidate, else the whole source.
+- `materials`: the real-world materials of what this video shows, in Chinese, each prominent object named as itself:
+  one text, or a list whose items are texts or `{"what": text, "start": s, "end": s}` for objects on screen only part
+  of the time. Each prompt names only the items on screen during its segment. Never list a material the video does
+  not show or one another object could turn into (`三文鱼` turned stacks of whole tuna and of cash into salmon
+  steaks).
 - `remove`: on-screen elements to delete, in Chinese, each naming what it shows (`游戏logo「…」`,
-  `画面底部的白色小字警示语`); merged with `defaults.remove`. An item is text, or `{"what": text, "start": s,
-  "end": s}` when the element is on screen only for part of the source: a prompt only names the items on screen
-  during its keyframe or segment. List only what the sheets show: naming text that is not there makes Seedance
-  draw garbled text in its place. Never list HUD counters, prices, labels or buttons.
-- `anchor`: the source time whose frame sets the look (default: a lively moment of the longest shot). Pick a frame
-  that shows the main scene sharply, without transitions or pop-ups.
-- `style_from`: another source whose styled anchor this source's anchor follows (sister cuts of one ad).
+  `画面底部的白色小字警示语`); merged with `defaults.remove`; text or a timed item. List only what the sheets show.
+  Never list HUD counters, prices, labels or buttons.
+- `scenes`: replaces the survey's scenes: `[{"name": text, "start": s, "end": s, "views": [seconds, ...]}]` (1-12
+  views). `subjects`: replaces the survey's subjects (at most 8): `[{"what", "kind", "start", "end", "at", "box"}]`
+  with `kind` one of character, animal, vehicle, object, prop, building. Only views and subjects inside `keep` are
+  used.
+- `style_from`: another source whose scene map gives this source's scene maps their look (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
-- `split_at`: extra split times (seconds) when a segment boundary must avoid or hit a particular moment.
-- `max_segment_seconds`: per-source override; `skip: true` leaves a source out.
+- `split_at`: extra split times (seconds) when a segment boundary must hit a particular moment.
+- `max_segment_seconds`: per-source override (4-15); `skip: true` leaves a source out.
 
 ## Plan (`config/plan.json`, `reports/plan.md`)
 
-Each source lists its segments `K01...` with `frames` (source frames it delivers), `render_frames` (what is sent
-to Seedance: the delivered frames plus 0.5 s before a seam inside a shot, the overlap in which `assemble` switches), `seam` before it
-(`start`, `cut`: a camera cut hides the join, `continuous`: inside a shot) and `inner_cuts` (camera cuts inside the
-segment). Edit the edits file, not the plan.
+Each source lists its segments `K01...` with `frames` (source frames it delivers), `render_frames` (what is sent to
+H3: whole seconds, the delivered frames plus 0.3 s on either side of a seam inside a shot, padded at the end),
+`render_seconds`, `seam` before it (`start`; `cut`: a camera cut hides the join; `continuous`: inside a shot, with
+`seam_score`, how fast the camera moves there against the rest of the video, and `seam_camera`), `inner_cuts`, and
+its references: `scenes` and `subjects` (indices; new subjects first). Edit the edits file, not the plan.
 
 ## Outputs
 
 - Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, H.264, AAC, the source audio of the
   kept range).
-- `temp/keyframes/<id>-<key>.png` (styled) and `-src.png` (original frame); `temp/sheets/<id>-keyframes.png`.
-- `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, slightly shorter than the source clip: `assemble`
-  stretches them back exactly).
-- `temp/state/assembled/<id>.json`: seam times (`seams`; inside a shot the switch moment with `difference`, `motion`,
-  `local` and `verdict` clean/visible), colour corrections (`colour`: raw difference and residual
-  per seam inside a shot, 0-255 scale), segment times in the delivered video.
+- `temp/refs/<id>-scene1.png`, `<id>-P01.png`; their inputs in `temp/refs/inputs/`; `temp/sheets/<id>-refs.png`.
+- `temp/ai/<id>-<Kxx>.mp4`: H3 results as delivered (24 fps, 2K, uneven pace); `temp/work/` the retimed clips and the
+  seam switches. `temp/state/render/<id>-<Kxx>.json` `follow`: how well the result follows the source clip (matched /
+  typical difference of edges and of coarse layouts; both above 0.93 / 0.80 means it left the source).
+- `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` whip/soft, `blur`,
+  `camera_px`, `difference`, `motion`, `local`, `verdict` clean/visible), `colour` (raw difference and residual per
+  seam inside a shot, 0-255), `timing` (per segment: frames `held`/`skipped` by the retiming, `matched` vs `typical`
+  edge difference), segment times in the delivered video.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

@@ -1,5 +1,32 @@
 # Validation record
 
+## 2026-11-09: MiniMax H3 with shared scene maps and subject sheets
+
+GOF3D10232 射冰取鱼 (1080x1920, 60 fps), kept 0-30 s, one long shot. Lumos login of the developer.
+
+| Step | Result |
+| --- | --- |
+| H3 probe, prompt only (6 s, 768P) | composition and motion kept, but the picture stayed cartoon (wood a little darker): the look must come from pictures |
+| `survey` (Gemini, 720p proxy, 51 MB) | 1 scene with 6 views, 8 subjects. Boxes read off the video missed two characters by a body width; boxes found again on the stills were tight |
+| `refs` scene map (4K, max, 4 views + style picture) | 3200x2560 PNG (20 MB) in about 4 min. Layout of the views kept (river, ice blocks, dock, camp floor, pads, bench, hut, log fence), realistic, no characters, UI or text |
+| `refs` 7 three-view sheets (1K, high) | about 1 min each, shapes and colours kept. The first try of one sheet failed: Lumos timed out fetching the 20 MB PNG, so pictures over 8 MB go as JPEG and look references go reduced to 2048 px |
+| `render` 3 segments (12 + 12 + 9 s, 2K, 5 pictures each) | all three side by side, done after 13-18 min. 1440x2560, 24 fps, 2-5 % longer than asked, realism far above the prompt-only probe |
+| `assemble` | 33 s. Colour residuals at the two seams 0.14 and 0.12; both seams `whip` at 41-46 px of camera motion per frame. No ghosting or jump on the frame-by-frame look; at a 64 px peak the blur read as a deliberate swish, now 48 px at most |
+| `review` round 1 | Gemini: 2 medium issues, both confirmed on stills (a tuna drawn early on an empty pad in K01, a carried tuna melting into a dark blob in K03). Seam sheets clean |
+
+Findings that changed the skill:
+
+- H3 is no frame-locked editor. With reference pictures it keeps the story and composition but sets its own pace:
+  in K01 the camera ran up to 1.7 s ahead and fell back by the end. Even without pictures, a 6 s clip came back
+  6.58 s long, on time for 2.5 s, then half a second slow. `assemble` therefore matches every output frame to
+  the result frame of the same moment (dynamic time warping on edge maps, holds and skips up to 0.75 s). On the
+  stills the retimed clips line up with the source to about a frame. Match quality against the typical frame
+  difference is 0.35 for a weak restyle and 0.7-0.92 for a strong one; only values near 1 mean it failed.
+- Seams placed where the camera moves fast and hidden under a 9-frame directional blur plus cross-fade showed no
+  step between the ±0.5 and ±1 s frames, although the two results differed at the switch by 25-46 levels.
+- Segments no longer depend on each other: a redo resubmitted only the redone segments; the third segment was
+  reused.
+
 ## 2026-11-03: first end-to-end runs on `.素材`
 
 Lumos login of the developer, Winky key `dev`. The key may not use any GPT Image model

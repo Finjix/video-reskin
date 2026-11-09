@@ -10,11 +10,11 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-RESOLUTION = "1080p"       # Seedance renders and deliveries: one size for every job (the user's choice, 2026-11-05)
-# Segments as long as Seedance takes (30 s): every seam inside a shot can show, and more seams showed more jumps
-# (GOF3D10232 in 5 segments of 15 s, 2026-11-06), so a shot is cut into as few pieces as fit (user rule).
-DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "max_segment_seconds": 30.0, "fps": 24,
-            "remove_end_card": True, "review_rounds": 3}
+RESOLUTION = "1080p"       # deliveries: one size for every job (the user's choice, 2026-11-05)
+RENDER_RESOLUTIONS = ("2K", "768P")     # what MiniMax H3 renders at (2K by default, scaled to 1080p)
+# Segments as long as MiniMax H3 takes (15 s); seams inside a shot go where the camera moves fast (plan).
+DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "render_resolution": "2K", "max_segment_seconds": 15.0,
+            "fps": 24, "remove_end_card": True}
 
 
 def presets() -> dict:
@@ -47,13 +47,15 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     style = order.get("style") or options["style"]
     if isinstance(style, str) and style not in presets():
         raise ValueError(f"unknown style preset {style}; known: {sorted(presets())} (or give style as an object with "
-                         "label, goal, anchor, keyframe and video prompts)")
+                         "label, goal, scene, subject and video prompts)")
     if options["resolution"] != RESOLUTION:
         raise ValueError(f"options.resolution is fixed at {RESOLUTION} (leave it out)")
+    if options["render_resolution"] not in RENDER_RESOLUTIONS:
+        raise ValueError(f"options.render_resolution must be one of {', '.join(RENDER_RESOLUTIONS)} (default 2K)")
     if not 12 <= float(options["fps"]) <= 30:
-        raise ValueError("options.fps must be between 12 and 30 (default 24, the rate Seedance renders at)")
-    if not 4 <= float(options["max_segment_seconds"]) <= 30:
-        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance edits 4-30 s clips)")
+        raise ValueError("options.fps must be between 12 and 30 (default 24, the rate H3 renders at)")
+    if not 4 <= float(options["max_segment_seconds"]) <= 15:
+        raise ValueError("options.max_segment_seconds must be between 4 and 15 (MiniMax H3 edits 4-15 s clips)")
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent

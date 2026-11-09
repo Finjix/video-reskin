@@ -1,4 +1,4 @@
-"""video-reskin command line: auth/login -> init -> analyze -> plan -> keyframes -> render -> assemble -> review."""
+"""video-reskin command line: auth/login -> init -> analyze -> survey -> plan -> refs -> render -> assemble -> review."""
 from __future__ import annotations
 
 import argparse
@@ -87,8 +87,34 @@ def cmd_analyze(args) -> int:
         lines.append(f"{r['id']}: {r['info']['width']}x{r['info']['height']} {r['duration']:.1f} s, {len(r['shots'])} shots, "
                      f"{card}, {len(r['overlays'])} still overlays")
     show(lines + [f"catalog: {job / 'catalog/catalog.md'}; sheets: {job / 'catalog'} (<id>.jpg, <id>-end.jpg)",
-                  "next: look at every sheet, write the edits file, then plan --edits <edits.json>"])
+                  "next: survey"])
     return 0
+
+
+def cmd_survey(args) -> int:
+    runtime.ensure("media")
+    from reskin import survey as SURVEY
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    catalog_path = job / "catalog/catalog.json"
+    if not catalog_path.is_file():
+        raise FileNotFoundError("no catalog yet: run analyze first")
+    results = SURVEY.run_all(job, state, read(catalog_path), selection(args.only), redo=args.redo)
+    lines, failed = [], False
+    for r in results:
+        if r.get("error"):
+            failed = True
+            lines.append(f"{r['id']}: survey failed: {r['error']}")
+            continue
+        scenes = "; ".join(f"{s['name']} {s['start']:g}-{s['end']:g} s ({len(s['views'])} views)" for s in r["scenes"])
+        subjects = "; ".join(f"P{k:02d} {x['what']} ({x['appears']}, {x['start']:g}-{x['end']:g} s, at {x['at']:g})"
+                             for k, x in enumerate(r["subjects"], 1))
+        lines.append(f"{r['id']}{' (reused)' if r.get('reused') else ''}: scenes: {scenes or 'none'}; "
+                     f"subjects: {subjects or 'none'}")
+    show(lines + [f"survey: {job / 'catalog/survey'} (<id>.json); sheets: {job / 'catalog'} (<id>-survey.jpg)",
+                  "next: look at every survey sheet with the catalog sheets, write the edits file (correct scenes or "
+                  "subjects there when Gemini picked a bad view, crop or moment), then plan --edits <edits.json>"])
+    return RULE_FAILURE if failed else 0
 
 
 def cmd_plan(args) -> int:
@@ -113,32 +139,31 @@ def cmd_plan(args) -> int:
         cuts = sum(1 for s in row["segments"] if s["seam"] == "cut")
         inner = sum(1 for s in row["segments"] if s["seam"] == "continuous")
         lines.append(f"{source_id}: keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, {len(row['segments'])} segments "
-                     f"({cuts} seams at cuts, {inner} inside shots), anchor {row['anchor']:.2f} s, "
-                     f"remove: {describe(row['remove']) or 'nothing'}")
+                     f"({cuts} seams at cuts, {inner} inside shots), {len(row['scenes'])} scene map(s), "
+                     f"{len(row['subjects'])} subject sheet(s), remove: {describe(row['remove']) or 'nothing'}"
+                     + ("" if row["surveyed"] or row.get("scenes") else " (not surveyed)"))
     if missing:
         lines.append(f"note: no edits for {', '.join(missing)} (defaults used: keep up to the end-card candidate)")
-    show(lines + [f"plan: {job / 'reports/plan.md'}", "next: keyframes"])
+    show(lines + [f"plan: {job / 'reports/plan.md'}", "next: refs"])
     return 0
 
 
-def cmd_keyframes(args) -> int:
+def cmd_refs(args) -> int:
     job = args.job_dir.resolve()
     state = JOB.load(job)
     plan = load_plan(job)
     runtime.ensure("media")
-    from reskin import keyframes as KEYFRAMES
+    from reskin import refs as REFS
     redo = selection(args.redo) or set()
-    results = KEYFRAMES.run_all(job, state, plan, JOB.style(state), selection(args.only) or (redo or None), redo,
-                                workers=args.workers)
+    results = REFS.run_all(job, state, plan, JOB.style(state), selection(args.only) or (redo or None), redo,
+                           workers=args.workers)
     failed = [r for r in results if r.get("error")]
     made = [r for r in results if not r.get("error") and not r.get("reused")]
-    backends = sorted({r.get("backend", "?") for r in made})
-    lines = [f"keyframes: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"
-             + (f" (via {', '.join(backends)})" if made else "")]
+    lines = [f"references: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-keyframes.png: original | styled)")
-    lines.append("next: " + ("fix the failures and run keyframes again" if failed else
-                             "look at every keyframe sheet (make a bad one again with keyframes --redo <id>:<key> "
+    lines.append(f"sheets: {job / 'sheets'} (<id>-refs.png: views | scene map, crop | three views)")
+    lines.append("next: " + ("fix the failures and run refs again" if failed else
+                             "look at every refs sheet (make a bad one again with refs --redo <id>:scene1 or <id>:P02 "
                              "after adjusting the edits), then render"))
     show(lines)
     return RULE_FAILURE if failed else 0
@@ -178,8 +203,12 @@ def cmd_assemble(args) -> int:
             lines.append(f"{source_id}: not assembled: {error}")
             continue
         colour = "; ".join(f"{c['before']} diff {c['raw_difference']} -> {c['residual']}" for c in result["colour"])
-        checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['verdict']} ({s['difference']} vs motion "
-                            f"{s['motion']}, region {s['local']} vs {s.get('local_motion')})" for s in result["seams"] if "verdict" in s)
+        checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['mode']} {s['verdict']} ({s['difference']} vs "
+                            f"motion {s['motion']}, region {s['local']})" for s in result["seams"] if "verdict" in s)
+        warped = ", ".join(f"{t['segment']} {t['held']} held/{t['skipped']} skipped" for t in result["timing"]
+                           if t["held"] or t["skipped"])
+        if warped:
+            colour = (colour + "; " if colour else "") + "retimed: " + warped
         if checked:
             colour = (colour + "; " if colour else "") + "seams: " + checked
         lines.append(f"{source_id}: {Path(result['output']).name} {result['size'][0]}x{result['size'][1]} "
@@ -212,15 +241,14 @@ def cmd_review(args) -> int:
             lines.append(f"  #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
                          f"-> {', '.join(issue['segments'])}: {issue['description']}")
         if result.get("stills"):
-            lines.append(f"  stills (full size, lossless): {Path(result['stills'][0]).parent} ({len(result['stills'])} pairs)")
+            lines.append(f"  stills (every {REVIEW.STILL_STEP:g} s, lossless): {Path(result['stills'][0]).parent} "
+                         f"({len(result['stills'])} pairs)")
         for seam in result.get("seams") or []:
-            if seam["stills"]:
-                lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s stills: {Path(seam['stills'][0]).parent} "
-                             f"({len(seam['stills'])} pairs)")
+            lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s ({seam['seam']}): {seam['sheet']}")
     show(lines + [f"reports: {job / 'reports/review'}",
-                  "next: look at every still (whole video and every seam) yourself; confirm each issue with frames "
-                  "--source <id> --at <seconds>; send confirmed flaws back with redo, then (keyframes,) render, "
-                  "assemble and review again"])
+                  "next: look at every still and every seam sheet yourself; confirm each issue with frames "
+                  "--source <id> --at <seconds>; send confirmed flaws back with redo (at most twice per segment), "
+                  "then (refs,) render, assemble and review again"])
     return RULE_FAILURE if failed else 0
 
 
@@ -246,9 +274,9 @@ def cmd_redo(args) -> int:
         row = plan["sources"].get(source_id)
         if not row or segment_id not in {s["id"] for s in row["segments"]}:
             raise ValueError(f"unknown segment {key}; segments look like S01:K02 (see reports/plan.md)")
-        entry = RENDER.bump(job, key, args.reason, args.prompt)
+        entry = RENDER.bump(job, key, args.reason, args.prompt, replace=args.replace)
         lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})")
-    steps = f"keyframes --redo {' '.join(keys)}, render" if args.keyframe else "render"
+    steps = "refs --redo <the broken scene map or sheet>, render" if args.refs else "render"
     show(lines + [f"next: {steps}, assemble, review"])
     return 0
 
@@ -262,12 +290,14 @@ def cmd_status(args) -> int:
     step = None
     if not (job / "catalog/catalog.json").is_file():
         step = "analyze"
+    elif not (job / "catalog/survey").is_dir():
+        step = "survey"
     elif not plan["sources"]:
         step = "plan --edits <edits.json>"
     for source_id, row in plan["sources"].items():
         keys = [s["id"] for s in row["segments"]]
-        own = ["anchor", *keys, *(r["id"] for s in row["segments"] for r in s.get("reveals") or [])]
-        frames_ready = sum(1 for k in own if (job / "keyframes" / f"{source_id}-{k}.png").is_file())
+        own = [f"scene{k}" for k in range(1, len(row["scenes"]) + 1)] + [f"P{k:02d}" for k in range(1, len(row["subjects"]) + 1)]
+        frames_ready = sum(1 for k in own if (job / "refs" / f"{source_id}-{k}.png").is_file())
         rendered = 0
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
@@ -276,11 +306,11 @@ def cmd_status(args) -> int:
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
-        lines.append(f"{source_id}: keyframes {frames_ready}/{len(own)}, segments {rendered}/{len(keys)}, "
+        lines.append(f"{source_id}: references {frames_ready}/{len(own)}, segments {rendered}/{len(keys)}, "
                      f"assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
             if frames_ready < len(own):
-                step = "keyframes"
+                step = "refs"
             elif rendered < len(keys):
                 step = "render"
             elif not assembled:
@@ -327,13 +357,16 @@ def main() -> None:
     init.add_argument("--job-dir", type=Path)
     analyze = command("analyze", cmd_analyze, help="media facts, cuts, end card, overlays and sheets")
     analyze.add_argument("--only", nargs="*", help="source IDs")
+    survey = command("survey", cmd_survey, help="Gemini names the scene views and the subjects of every source")
+    survey.add_argument("--only", nargs="*", help="source IDs")
+    survey.add_argument("--redo", action="store_true", help="ask Gemini again even if a survey exists")
     plan = command("plan", cmd_plan, help="apply the edits file and cut every kept range into segments")
-    plan.add_argument("--edits", type=Path, help="edits JSON (kept range, materials, removals, anchor per source)")
-    keyframes = command("keyframes", cmd_keyframes, help="style anchor and segment keyframes with GPT Image")
-    keyframes.add_argument("--only", nargs="*", help="source IDs or keys like S01:anchor S01:K02")
-    keyframes.add_argument("--redo", nargs="*", help="keys or source IDs to make again even if unchanged")
-    keyframes.add_argument("--workers", type=int, default=3)
-    render = command("render", cmd_render, help="Seedance 2.5 video edit of every segment on Lumos")
+    plan.add_argument("--edits", type=Path, help="edits JSON (kept range, materials, removals, scenes and subjects per source)")
+    refs = command("refs", cmd_refs, help="scene maps (4K, max) and three-view subject sheets (1K, high) with GPT Image")
+    refs.add_argument("--only", nargs="*", help="source IDs or keys like S01:scene1 S01:P02")
+    refs.add_argument("--redo", nargs="*", help="keys or source IDs to make again even if unchanged")
+    refs.add_argument("--workers", type=int, default=3)
+    render = command("render", cmd_render, help="MiniMax H3 video edit of every segment on Lumos")
     render.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
@@ -345,11 +378,12 @@ def main() -> None:
     frames.add_argument("--source", required=True)
     frames.add_argument("--at", type=float, nargs="+", required=True, help="seconds in the delivered video")
     frames.add_argument("--span", type=float, default=.3)
-    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render")
+    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (twice at most)")
     redo.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")
-    redo.add_argument("--keyframe", action="store_true", help="the keyframe itself is wrong: make it again too")
+    redo.add_argument("--replace", action="store_true", help="drop the earlier corrective sentences of these segments")
+    redo.add_argument("--refs", action="store_true", help="a scene map or subject sheet is wrong: make it again too")
     command("status", cmd_status, help="progress per source and the next step")
     inspection = command("runtime", cmd_runtime, job=False, help="inspect or prefetch the private runtime")
     inspection.add_argument("--feature", choices=("base", "media", "login"), default="base")

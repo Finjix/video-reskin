@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle videos (by default into realistic materials with the style unchanged, "写实版材质，风格不变") into 1080p deliverables without game logos, warning lines or end cards: GPT Image keyframes, Seedance 2.5 video editing on Lumos, reassembly on the source clock with the original audio, and a Gemini review loop with frame-checked redos.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and hidden under motion-blurred switches, reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -15,23 +15,26 @@ description: Batch-restyle videos (by default into realistic materials with the 
   fix it and run the same command again. `credential error:` names the key or login to provide. `runtime error:` /
   `service error:` name a network, disk or Lumos problem: fix the cause and run the same command again. Every command
   can be re-run and redoes only what changed; `render` also resumes generations still running on Lumos.
-- `render` takes minutes per segment (Seedance renders 1080p on Lumos, 4 at a time) and prints a heartbeat every
-  2 minutes. Run it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`.
-- The scripts do all media work, segmentation, colour matching and calls to the models. Your part is editorial:
-  where each video stops, what is on screen, what to remove, judging keyframes, and confirming review findings on
-  stills. Never write scripts that call Lumos, Winky or FFmpeg yourself.
-- Files you write (work order, edits) are JSON; prompt texts inside them are Chinese. Reply in the user's language.
+- `render` takes minutes per segment (H3 renders on Lumos, 4 at a time) and prints a heartbeat every 2 minutes. Run
+  it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`.
+- The scripts do all media work, segmentation, retiming, colour matching, seam masking and calls to the models. Your
+  part is editorial: where each video stops, what is on screen, what to remove, checking the survey and the
+  reference pictures, and confirming review findings on stills. Never write scripts that call Lumos, Winky or FFmpeg
+  yourself.
+- Files you write (work order, edits) are JSON; texts inside them are Chinese. Reply in the user's language.
 
 ## Credentials (first)
 
 Run `auth`. It shows the stored Winky key and whether the Lumos login works.
 - No Winky key: ask the user for theirs (Lumos → Winky → API Keys → 创建密钥), then `auth --key <key>`. The key is
   stored encrypted for this Windows user; never write it into job files, reports or replies.
-- Not logged in to Lumos (or `credential error: ... run login`, also mid-batch): tell the user that a Feishu QR code is
-  about to open on their screen and that they should scan it with the Feishu app, then run `login`. It waits up to
-  5 minutes and replaces an expired code by itself; it prints the image path (`qr: ...`) in case no window opened, so
-  you can show that image. `login --check` only checks.
-- The Winky key is only for the Gemini review; keyframes (GPT Image) and videos (Seedance) run on the Lumos login.
+- Not logged in to Lumos (or `credential error: ... run login`, also mid-batch): start `login --no-open --timeout
+  1800` in the background, and as soon as it prints `qr: <path>` send that image to the user (as a file, or show
+  the path) and ask them to scan it with the Feishu app. Feishu replaces the code every minute or two: every new
+  `qr:` line is a new image, send it at once. Do not sit idle while waiting: carry on with work that needs no
+  Lumos (init, analyze, survey, edits). `login` ends with `lumos: logged in as ...`. `login --check` only checks.
+- The Winky key is only for Gemini (survey, review); pictures (GPT Image) and videos (MiniMax H3) run on the Lumos
+  login.
 
 ## Talking to the user
 
@@ -44,16 +47,16 @@ batch without asking; an open question never stops production: take the default 
 | --- | --- |
 | End card start unclear | the last frame before the transition into it (wipe, flash, blur, logo zoom); judge from `<id>-end.jpg` |
 | A logo that moves between corners | one `remove` item naming the logo and its text, e.g. `游戏logo「WHITEOUT SURVIVAL」` |
-| A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes Seedance draw garbled text there |
+| A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
 | Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`整条的金枪鱼`, `绿色的纸币堆`) and leave out materials that are not on screen |
-| Objects that appear later in the ad (trucks, a new machine) | timed `materials` items: an untimed one gets drawn into the opening seconds too |
-| Two sources are the same ad in other sizes | style the second after the first (`style_from`), so both look alike |
-| A keyframe changes the layout, adds objects, keeps a logo or looks noisy | adjust `materials`/`extra`, then `keyframes --redo <key>` (at most twice, then keep the best and note it) |
+| A survey view is blurred or covered, or a subject crop misses the subject | correct `scenes` / `subjects` for that source in the edits (copy them from `catalog/survey/<id>.json`, change the time or box) |
+| A subject that does not matter (a background crowd, a one-frame effect) | drop it from `subjects`: every sheet costs a picture and takes a reference slot |
+| Two sources are the same ad in other sizes | `style_from` the first: the second's scene map takes its look from the first's |
+| A scene map invents places, keeps cartoon parts, characters, UI or text; a sheet changes the subject | adjust `materials`/`extra` or the views/box, then `refs --redo <key>` (at most twice, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
-| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` |
-| Detail fades late in a long segment | keep the segments long (never lower `max_segment_seconds`: 5 segments of 15 s showed more and clearer jumps than 2 of 30 s); report it |
+| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` about the look (at most two redos per segment); a sentence about where objects are can make H3 move its camera: on the next redo drop it with `--replace` |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
-| Issues remain after `review_rounds` (3) rounds | deliver; list each remaining issue with its time |
+| A segment still flawed after two redos | deliver; list each remaining issue with its time |
 
 Stop to ask only when nothing can continue: footage missing or unreadable, no key, or the user does not scan the QR
 code. Say what you tried and the minimum you need.
@@ -63,31 +66,35 @@ code. Say what you tried and the minimum you need.
 Commands and file formats: [workflow](references/workflow.md). Review loop: [review](references/review.md).
 
 1. `init --work-order -` (JSON on stdin) creates `<output_root>/视频换风格_YYYYMMDD_HHMMSS/temp`, the job dir.
-2. `analyze` finds cuts, the end-card candidate and still overlays. Read `catalog/catalog.md` and look at every
-   `catalog/<id>.jpg` and `catalog/<id>-end.jpg`.
-3. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world
-   `materials` of what is on screen, what to `remove` (only logos and warning lines you actually saw on that source's
-   sheets, timed when they come and go; HUD stays), and an `anchor` time when the automatic one would be a poor frame. `plan --edits <file>` cuts every kept range into
-   segments of at most 12 s (at camera cuts where possible) and writes `reports/plan.md`.
-4. `keyframes` restyles one anchor frame per source and, after it, the first frame of every segment (a segment that continues a
-   shot starts from the previous result's frame; its keyframe only sets the material detail). Objects that come
-   into view for the first time in a later segment (timed `materials`) get a reveal frame (`S01:K02-N1`). Look at every
-   `sheets/<id>-keyframes.png`: same layout and objects as the original, realistic materials, no logo or warning text,
-   no strong noise or fragmented look. Redo bad ones before rendering: every segment copies its keyframe.
-5. `render` edits every segment with Seedance 2.5 at 1080p on Lumos. The segments of one source run one after
-   another: each later one gets the previous result's frame at its start, its own keyframe for material detail,
-   its reveal frames and up to 3 earlier results' frames of the places it shows again (at most 6 pictures).
-6. `assemble` retimes each segment to its source duration, matches colours across seams inside a shot, switches at
-   the best-matching overlap frame with a 3-frame blend and measures each such seam (`visible` ones become high
-   review issues), joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
-7. `review` has Gemini watch each whole video beside its original at full size (穿帮, bugs, 拼接色差, leftover
-   logos/text) and every seam up close, and writes full-size lossless stills for you: the whole video every 2 s and
-   every seam frame by frame. Look at all of them yourself, confirm every reported issue on stills
-   (`frames --source <id> --at <t>`), `redo` the confirmed segments, then (`keyframes` if
-   a keyframe was redone,) `render`, `assemble`, `review` again, up to `review_rounds` rounds.
-8. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, review
-   rounds and verdict; issues dismissed (and why) or still open (with times); fallbacks taken (image backend, redos,
-   keyframe redos).
+2. `analyze` finds cuts, the camera's speed, the end-card candidate and still overlays. Read `catalog/catalog.md` and
+   look at every `catalog/<id>.jpg` and `catalog/<id>-end.jpg`.
+3. `survey` has Gemini watch each whole source once: the moments that together show the whole location (views) and
+   the characters, objects and props that come into view (subjects), each re-boxed on its still. Look at every
+   `catalog/<id>-survey.jpg`.
+4. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world `materials`
+   of what is on screen, what to `remove` (only logos and warning lines you actually saw, timed when they come and
+   go; HUD stays), and corrected `scenes`/`subjects` when the survey picked badly. `plan --edits <file>` cuts every
+   kept range into segments of at most 15 s: at camera cuts where possible, otherwise where the camera moves
+   fastest; writes `reports/plan.md` with each segment's references.
+5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality max: the views joined into one overview of the
+   whole location, realistic, no characters, UI or text) and one three-view sheet per subject (1K, quality high).
+   Look at every `sheets/<id>-refs.png`: the map keeps the layout of the views, realistic materials, no cartoon
+   parts, no invented places; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
+   rendering: every segment copies them.
+6. `render` edits every segment with MiniMax H3 on Lumos at 2K: the source clip plus the scene map and the sheets of
+   the subjects on screen (at most 5 pictures). Segments do not depend on each other and render side by side. H3
+   keeps the story and layout but sets its own pace and now and then its own camera: a result that no longer shows
+   the source's camera and layout is rejected and rendered once more by itself (not counted as a redo).
+7. `assemble` retimes every result frame by frame onto the source clock (H3's pace is uneven), matches colours
+   across seams inside a shot, hides each such seam under a motion-blurred cross-fade along the camera's movement,
+   joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
+8. `review` has Gemini watch each whole video beside its original, and writes stills for you: the whole video every
+   3 s and one five-frame sheet per seam (-1, -0.5, 0, +0.5, +1 s). Look at all of them yourself, confirm every
+   issue on stills (`frames --source <id> --at <t>`), `redo` the confirmed segments (each at most twice), then
+   (`refs` if a picture was redone,) `render`, `assemble`, `review` again.
+9. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, the
+   segments and seams, review rounds and verdict; issues dismissed (and why) or still open (with times); fallbacks
+   taken (survey corrections, picture redos, segment redos).
 
 ## Rules
 
@@ -97,6 +104,6 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    only the materials change, plus the removals. Never ask for added objects, text or effects.
 3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
 4. **Confirm before redoing.** Gemini can be wrong: look at the stills of every issue before `redo`; redo only
-   confirmed segments, never the whole video for a local flaw.
+   confirmed segments, never the whole video for a local flaw; never more than twice per segment.
 5. **Delivery folder.** It holds only the finished `.mp4` files and `temp/`. Everything else (edits drafts, stills,
    logs) lives in `temp/`; revisions reuse the same folder.

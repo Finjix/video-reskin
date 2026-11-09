@@ -14,7 +14,9 @@ from reskin import credentials, net
 
 BASE = "https://lumos.diandian.info"
 SERVER = BASE + "/legil/server"
-VIDEO_MODEL = "doubao-seedance-2-5-260628"
+VIDEO_MODEL = "MiniMax-H3"          # from 2026-11-09 (Seedance 2.5 before); clips of 4-15 whole seconds
+VIDEO_RESOLUTION = "2K"             # H3 offers 768P and 2K; deliveries are 1080p
+VIDEO_IMAGES = 9                    # reference images H3 takes at most (the page suggests 5 or fewer)
 DONE = {"Succeeded", "Failed", "PartiallySucceeded", "Cancelled"}
 _TOKEN = {"value": None, "expires": 0.0}
 _LOCK = threading.Lock()
@@ -98,11 +100,12 @@ def upload(path: Path, generation_type: str) -> dict:
             "reference_type": "BASE"}
 
 
-def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = "1080p",
+def submit_video_edit(video: dict, images: list[dict], prompt: str, *, duration: int, resolution: str = VIDEO_RESOLUTION,
                       model: str = VIDEO_MODEL) -> dict:
-    body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
-            "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": "adaptive",
-            "output_format": "mp4", "sample_count": 1, "model": model}
+    """MiniMax H3 video-to-video (the fields the Legil page sends): one reference video of 2-15 s, up to 9
+    reference images, a whole-second duration of 4-15 s, 768P or 2K."""
+    body = {"reference_videos": [video], "reference_images": images, "prompt": prompt, "resolution": resolution,
+            "aspect_ratio": "adaptive", "duration": int(duration), "sample_count": 1, "model": model}
     return call("POST", "/generations/video-to-video", body, timeout=120)
 
 

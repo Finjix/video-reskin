@@ -33,16 +33,16 @@ def remove_clause(items: list[str]) -> str:
 
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
-            refs: str = "") -> str:
-    """kind: anchor (first restyle), keyframe (restyle after the anchor) or video (Seedance edit); `span` is the
-    source time the text is for (a frame: start == end); `refs` says what the reference pictures after Image 1 are
-    (video only; placed at {refs}, or after the template when it has none)."""
+            refs: str = "", **fields) -> str:
+    """kind: scene (the scene map), subject (a three-view sheet) or video (the H3 edit); `span` is the source time
+    the text is for; `refs` says what the reference pictures are (video only; placed at {refs}, or after the
+    template when it has none); `fields` fill the kind's own placeholders ({views}, {look_image}, {what}...)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = ", ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    base = style.get(kind) or read(PROMPTS)["presets"]["realistic"][kind]    # custom styles may lack "refresh"
+    base = style.get(kind) or read(PROMPTS)["presets"]["realistic"][kind]    # custom styles may lack a kind
     template = base if "{refs}" in base or not refs else base + " {refs}"
     text = template.format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
-                           look=style.get("look", ""), extra=wishes, refs=refs)
+                           look=style.get("look", ""), extra=wishes, refs=refs, **fields)
     return " ".join(text.split())
 
 
@@ -61,7 +61,7 @@ def describe(items) -> str:
 
 
 def reference(style: dict) -> Path | None:
-    """The style's look reference picture (sent with the anchor as Image 2), if it has one; relative to assets/."""
+    """The style's look reference picture (sent with every scene map as its last image), if it has one; relative to assets/."""
     value = style.get("reference")
     if not value:
         return None

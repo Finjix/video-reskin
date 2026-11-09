@@ -1,7 +1,7 @@
 """End-to-end run on the local `.素材` footage through the real launcher (needs `auth --key` and `login` first).
 
-Uses the default edits (kept range up to the end-card candidate, logo and warning line removed) and writes the
-results to dev/smoke/latest.json; the job itself lives in a temporary folder outside the repository.
+Uses the default edits (kept range up to the end-card candidate, the survey's scenes and subjects, the logo removed)
+and writes the results to dev/smoke/latest.json; the job itself lives in a temporary folder outside the repository.
 """
 import argparse
 import json
@@ -41,12 +41,13 @@ def main():
     order = {"sources": [str(p) for p in sources], "output_root": str(folder), "request": "smoke test"}
     job = Path(launcher(["init", "--work-order", "-"], json.dumps(order, ensure_ascii=False)).splitlines()[0].split(": ", 1)[1])
     launcher(["analyze", "--job-dir", str(job)])
+    launcher(["survey", "--job-dir", str(job)])
     edits = {"defaults": {"remove": ["游戏logo「WHITEOUT SURVIVAL」"]}, "sources": {}}
     edits_path = job / "config" / "edits-smoke.json"
     edits_path.parent.mkdir(parents=True, exist_ok=True)
     edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
     launcher(["plan", "--job-dir", str(job), "--edits", str(edits_path)])
-    launcher(["keyframes", "--job-dir", str(job)])
+    launcher(["refs", "--job-dir", str(job)])
     launcher(["render", "--job-dir", str(job)])
     launcher(["assemble", "--job-dir", str(job)])
     review = launcher(["review", "--job-dir", str(job)])

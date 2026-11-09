@@ -81,7 +81,7 @@ def run(timeout: float = 300, open_image: bool = True) -> dict:
             page = context.new_page()
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
             deadline = time.monotonic() + timeout
-            shown, number = None, 0
+            shown, number, candidate, steady = None, 0, None, 0
             while time.monotonic() < deadline:
                 token = _cookie(context)
                 if token:
@@ -100,7 +100,11 @@ def run(timeout: float = 300, open_image: bool = True) -> dict:
                         data = frame.evaluate(QR_SCRIPT)
                     except Exception:       # the frame reloads while the code refreshes
                         data = None
-                    if data and data != shown:
+                    # The page draws a first code and replaces it within a second (2026-11-09: the user got a dead
+                    # code): pass a code on only once it has stayed the same for two polls.
+                    steady = steady + 1 if data and data == candidate else 0
+                    candidate = data
+                    if data and data != shown and steady >= 2:
                         number += 1
                         path = _save_qr(data, number)
                         shown = data

@@ -13,14 +13,19 @@ class PromptTests(unittest.TestCase):
     def test_compose_fills_every_placeholder(self):
         style = read(PROMPTS)["presets"]["realistic"]
         row = {"materials": "真实的冰块", "remove": ["游戏logo", "底部警示语"], "extra": "雪地洁白"}
-        for kind in ("anchor", "keyframe", "video"):
-            text = prompts.compose(style, kind, row, extra="鱼不要变形")
-            self.assertNotIn("{", text)
-            self.assertIn("真实的冰块", text)
-            self.assertIn("游戏logo, 底部警示语", text)
-            self.assertIn("雪地洁白", text)
-            self.assertIn("鱼不要变形", text)
-        self.assertTrue(prompts.compose(style, "video", row).startswith("Edit the video"))
+        texts = {"scene": prompts.compose(style, "scene", row, views=3, look_image=4),
+                 "subject": prompts.compose(style, "subject", row, what="猎人", description="蓝色冬装"),
+                 "video": prompts.compose(style, "video", row, extra="鱼不要变形", refs="Image 1 is the map.")}
+        for kind, text in texts.items():
+            self.assertNotIn("{", text, kind)
+        self.assertIn("Images 1 to 3", texts["scene"])
+        self.assertIn("Image 4", texts["scene"])
+        self.assertIn("真实的冰块", texts["scene"])
+        self.assertIn("猎人", texts["subject"])
+        self.assertIn("游戏logo, 底部警示语", texts["video"])
+        self.assertIn("鱼不要变形", texts["video"])
+        self.assertIn("Image 1 is the map.", texts["video"])
+        self.assertTrue(texts["video"].startswith("Restyle the input video frame for frame"))
 
     def test_timed_removals_only_where_on_screen(self):
         items = ["游戏logo", {"what": "底部警示语", "start": 0, "end": 10}, {"what": "右上角水印", "start": 30}]
@@ -38,8 +43,8 @@ class PromptTests(unittest.TestCase):
 
     def test_no_removal_clause_when_empty(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        text = prompts.compose(style, "anchor", {"materials": "x", "remove": []})
-        self.assertNotIn("删除", text)
+        text = prompts.compose(style, "video", {"materials": "x", "remove": []})
+        self.assertNotIn("Remove the", text)
 
 
 class SizeTests(unittest.TestCase):
@@ -52,59 +57,88 @@ class SizeTests(unittest.TestCase):
     def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")
         self.assertEqual(images.aspect_for(1080, 1920), "9:16")
+        self.assertEqual(images.aspect_for(1080, 3000), "9:16")          # the nearest preset (4K needs one)
+        self.assertEqual(images.aspect_for(1000, 1000 * 2.1, exact=True), "adaptive")
 
 
-class SwitchTests(unittest.TestCase):
+class SeamTests(unittest.TestCase):
     def moving(self, count=12, seed=1):
         import numpy as np
         rng = np.random.default_rng(seed)
         base = np.kron(rng.uniform(40, 200, (10, 6, 3)), np.ones((6, 6, 1)))    # smooth: small motion per step
         return np.stack([np.roll(base, i, axis=1) for i in range(count)]).astype(np.float32)
 
-    def test_matching_overlap_is_clean_and_switches_at_best_frame(self):
+    def test_matching_results_are_clean(self):
         before = self.moving()
-        after = before.copy()
-        after[:4] += 40           # the later result differs at first, then matches
-        found = assemble.find_switch(before, after)
-        self.assertEqual(found["verdict"], "clean")
-        self.assertGreaterEqual(found["start"], 4)
+        self.assertEqual(assemble.measure(before, before + 1.0)["verdict"], "clean")
 
-    def test_different_drawing_is_visible(self):
-        before, after = self.moving(seed=1), self.moving(seed=2)
-        self.assertEqual(assemble.find_switch(before, after)["verdict"], "visible")
+    def test_different_drawings_are_visible(self):
+        self.assertEqual(assemble.measure(self.moving(seed=1), self.moving(seed=2))["verdict"], "visible")
 
-    def test_later_clip_running_a_frame_behind_is_found(self):
-        frames = self.moving(count=16)
-        before = frames[2:12]                     # the earlier clip's overlap
-        after = frames[1:13]                      # the later clip shows each moment one frame late
-        lag, scores = assemble.lag_of(before, after, 10)
-        self.assertEqual(lag, 1)
-        self.assertLess(scores[1], scores[0])
+    def test_fast_camera_gets_a_directional_blur_slow_a_soft_one(self):
+        fast = assemble.transition_plan([0.0, 0.5], (1080, 1920), 24.0, 1.0)   # half a frame height per second
+        self.assertEqual(fast["mode"], "whip")
+        self.assertAlmostEqual(abs(fast["direction"][1]), 1.0, places=3)
+        self.assertLessEqual(fast["blur"], assemble.WHIP_LIMITS[1])
+        self.assertEqual(assemble.transition_plan([0.001, 0.0], (1080, 1920), 24.0, 1.0)["mode"], "soft")
 
-    def test_switch_during_fast_motion_is_a_cut_not_a_blend(self):
-        before = self.moving(count=12)
-        after = before + 2.0                      # nearly the same drawing; the picture moves more than that
-        found = assemble.find_switch(before, after)
-        self.assertEqual(found["blend"], 0)
-        self.assertEqual(found["verdict"], "clean")
+    def test_transition_runs_from_the_first_clip_to_the_second(self):
+        import numpy as np
+        a, b = np.zeros((40, 30, 3), np.float32), np.full((40, 30, 3), 200.0, np.float32)
+        how = {"mode": "whip", "direction": [1.0, 0.0], "blur": 12.0}
+        first, middle, last = (assemble.transition_frame(a, b, u, how).mean() for u in (.05, .5, .95))
+        self.assertLess(first, 5)
+        self.assertAlmostEqual(middle, 100, delta=5)
+        self.assertGreater(last, 195)
 
-    def test_aligned_clips_keep_no_lag(self):
-        frames = self.moving(count=14)
-        self.assertEqual(assemble.lag_of(frames[:10], frames[:12], 10)[0], 0)
+    def test_blurs_keep_the_brightness(self):
+        import numpy as np
+        image = np.random.default_rng(3).uniform(0, 255, (50, 40, 3)).astype(np.float32)
+        self.assertAlmostEqual(assemble.directional_blur(image, (0.6, 0.8), 15).mean(), image.mean(), delta=3)
+        self.assertAlmostEqual(assemble.box_blur(image, 3).mean(), image.mean(), delta=3)
+        self.assertEqual(assemble.box_blur(image, 3).shape, image.shape)
+
+
+class WarpTests(unittest.TestCase):
+    def cost(self, truth, cols):
+        import numpy as np
+        rows = len(truth)
+        cost = np.ones((rows, cols)) * 5
+        for i, j in enumerate(truth):
+            cost[i, j] = 0.1
+        return cost
+
+    def test_a_stall_in_the_result_is_skipped(self):
+        # the result shows output frames 0-39 one to one, then holds for 8 frames, then goes on
+        truth = list(range(40)) + [j + 8 for j in range(40, 96)]
+        mapping, matched = assemble.warp(self.cost(truth, 104), 30)
+        self.assertEqual(mapping, truth)
+        self.assertLess(matched, 1)
+
+    def test_a_result_that_starts_late_and_ends_early(self):
+        truth = [min(j + 3, 79) for j in range(90)]
+        mapping, _ = assemble.warp(self.cost(truth, 80), 30)
+        self.assertEqual(mapping[:70], truth[:70])
+        self.assertEqual(mapping[-1], 79)
+
+    def test_smooth_removes_single_frame_jitter(self):
+        self.assertEqual(assemble.smooth([0, 1, 2, 9, 4, 5, 6, 7]), [0, 1, 2, 4, 5, 6, 6, 7])
 
 
 class TimelineTests(unittest.TestCase):
     def test_global_clock_has_no_drift(self):
-        row = {"fps": 60.0, "keep": [0, 59.08], "segments": [
-            {"id": "K01", "seam": "start", "frames": [0, 545], "render_frames": [0, 545]},
-            {"id": "K02", "seam": "continuous", "frames": [545, 1124], "render_frames": [515, 1124]},
-            {"id": "K03", "seam": "cut", "frames": [1124, 3545], "render_frames": [1124, 3545]}]}
-        lines = assemble.timeline(row, 30.0)
+        row = {"fps": 60.0, "keep": [0, 30.0], "segments": [
+            {"id": "K01", "seam": "start", "frames": [0, 695], "render_frames": [0, 720]},
+            {"id": "K02", "seam": "continuous", "frames": [695, 1330], "render_frames": [677, 1397]},
+            {"id": "K03", "seam": "continuous", "frames": [1330, 1800], "render_frames": [1312, 1852]}]}
+        lines = assemble.timeline(row, 24.0)
         self.assertEqual(lines[0]["out"][0], 0)
-        self.assertEqual(lines[-1]["out"][1], round(3545 / 2))
+        self.assertEqual(lines[-1]["body"][1], 720)
         for a, b in zip(lines, lines[1:]):
             self.assertEqual(a["body"][1], b["body"][0])
-        self.assertIn(lines[1]["body"][0] - lines[1]["out"][0], (14, 15))
+            start, end = assemble.overlap(a, b)
+            self.assertGreaterEqual(end - start, 12)
+        self.assertEqual(assemble.runs_of(lines), [[0, 1, 2]])
 
 
 class NetTests(unittest.TestCase):
@@ -155,23 +189,48 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review.segment_for(9.9, 10.1, assembled), ["K01", "K02"])
         self.assertEqual(review.segment_for(25, 26, assembled), ["K02"])
 
+    def test_the_agent_sees_five_frames_per_seam_and_a_still_every_three_seconds(self):
+        self.assertEqual(review.SEAM_MOMENTS, (-1.0, -.5, 0.0, .5, 1.0))
+        self.assertEqual(review.every(10.0, review.STILL_STEP, 24.0), [0.0, 3.0, 6.0, 9.0])
+
+
+class RedoTests(unittest.TestCase):
+    def test_a_segment_goes_back_twice_at_most(self):
+        from reskin import render
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            render.bump(job, "S01:K02", "colour jump")
+            render.bump(job, "S01:K02", "automatic retry", automatic=True)
+            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "雪地为白色")["redos"], 2)
+            with self.assertRaises(ValueError):
+                render.bump(job, "S01:K02", "third time")
+            row = read(job / "config/redo.json")["S01:K02"]
+            self.assertEqual(row["attempt"], 4)
+            self.assertEqual(row["prompt"], "雪地为白色")
+
+    def test_results_that_left_the_source_are_set_aside_per_round(self):
+        from reskin import render
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            output = job / "ai" / "S01-K01.mp4"
+            output.parent.mkdir()
+            for number, generation in enumerate(("aaaaaaaa1", "bbbbbbbb2")):
+                output.write_bytes(b"x")
+                kept = render.keep_rejected(job, "S01:K01", output, {"generation_id": generation, "round": 1,
+                                                                    "follow": {"structure": .9 - number / 10, "edges": .97}})
+                self.assertFalse(output.exists())
+                self.assertEqual(len(kept), number + 1)
+            output.write_bytes(b"x")
+            self.assertEqual(len(render.keep_rejected(job, "S01:K01", output, {"generation_id": "cccccccc", "round": 2,
+                                                                                "follow": {}})), 1)
+
+    def test_replace_drops_earlier_corrective_sentences(self):
+        from reskin import render
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            render.bump(job, "S01:K01", "fish too early", "收集框保持空的")
+            self.assertNotIn("prompt", render.bump(job, "S01:K01", "camera moved", replace=True))
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class EarlierFrameTests(unittest.TestCase):
-    def test_picks_the_place_seen_again(self):
-        import numpy as np
-        from reskin import references
-        fps = 24.0
-        river, camp = np.full((8, 4, 3), 50.0), np.full((8, 4, 3), 200.0)
-        # 0-10 s river, 10-20 s camp; the later segment 20-40 s: camp, then river again at 34-40 s
-        times = np.arange(0, 40, .5)
-        pixels = np.stack([river if (t < 10 or t >= 34) else camp for t in times]).astype(np.float32)
-        frames = np.array([round(t * fps) for t in times])
-        row = {"segments": [{"id": "K01", "frames": [0, 480], "render_frames": [0, 480]},
-                            {"id": "K02", "frames": [480, 960], "render_frames": [468, 960]}]}
-        picked = references.earlier_moments(pixels, frames, row, row["segments"][1], fps)
-        self.assertTrue(picked)
-        self.assertLess(picked[0]["frame"] / fps, 10)          # the river, not the camp the start frame covers

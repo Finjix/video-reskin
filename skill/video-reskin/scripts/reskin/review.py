@@ -1,5 +1,6 @@
-"""Quality review: Gemini watches the original and the restyled video side by side and lists what went wrong;
-`frames` cuts stills around a reported time so the agent can confirm an issue before sending a segment back."""
+"""Quality review: Gemini watches the whole original and restyled video side by side once and lists what went wrong
+(no separate seam close-ups); the agent looks at stills itself: the whole video every STILL_STEP s and five frames
+across every seam (SEAM_MOMENTS); `frames` cuts stills around a reported time to confirm an issue before a redo."""
 from __future__ import annotations
 
 import os
@@ -54,8 +55,8 @@ INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline v
 PROXY_CRF = 4                  # review clips are near-lossless: Gemini judges the delivered detail
 BUDGET = .93                   # share of INLINE_LIMIT the video bitrate is capped to (container and VBV headroom)
 REVIEW_FPS = 24                # frame rate of the clips Gemini gets (the delivery's); it samples them at its own rate
-STILL_STEP = 2.0               # seconds between the agent's full-size stills of the whole video
-SEAM_WINDOW = 2.0              # seconds on either side of a seam that Gemini watches and the agent's stills cover
+STILL_STEP = 3.0               # seconds between the agent's full-size stills of the whole video (user rule, 2026-11-09)
+SEAM_MOMENTS = (-1.0, -.5, 0.0, .5, 1.0)     # the agent's five frames across every seam (user rule, 2026-11-09)
 
 
 def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF) -> Path:
@@ -162,84 +163,29 @@ def overview_stills(job: Path, state: dict, source_id: str, assembled: dict, rou
     return paths
 
 
-SEAM_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "consistent": {"type": "BOOLEAN"},
-        "severity": {"type": "STRING", "enum": ["high", "medium", "low", "none"]},
-        "changed": {"type": "ARRAY", "items": {"type": "STRING"}},
-        "description": {"type": "STRING"}},
-    "required": ["consistent", "severity", "changed", "description"]}
-
-
-def seam_prompt(seam: dict, layout: str, switch: float, length: float) -> str:
-    other = "right" if layout == "left" else "bottom"
-    base = (f"This {length:.1f}-second clip shows the ORIGINAL game video on the {layout} and an AI-restyled version "
-            f"on the {other}, frame-synchronised, at the video's own frame rate. At {switch:.2f} s two separately "
-            "generated parts of the restyled video meet. ")
-    if seam["seam"] == "continuous":
-        task = ("In the original this is one continuous shot: nothing changes at that moment. Look only at the restyled "
-                "side, frame by frame around it, and decide whether a viewer could notice the join: a jump; a dissolve "
-                "or a gradual change over a second or so; a step in colour, brightness, contrast, sharpness or "
-                "saturation; any change of terrain, ground, water, rocks, trees, objects, textures, lighting or "
-                "realism; an object that pops, morphs or vanishes; a double image. consistent = false for any such "
-                "change.")
-    else:
-        task = ("The original has a camera cut there, so the content may change. Decide only whether the restyled look "
-                "(colour grading, brightness, materials, realism level, the same objects and characters rendered the "
-                "same way) stays consistent across the cut as it does in the original. consistent = false if the look "
-                "visibly changes.")
-    return (base + task + " List what changed in `changed` and write `description` in Chinese; severity none when "
-            "consistent, high when a casual viewer notices it at once, medium when noticeable on a closer look, low "
-            "when minor.")
-
-
-def seam_moments(switch: float, fps: float, duration: float, blend: int = 3) -> list[tuple[float, str]]:
-    """The agent's stills of a seam: -2, -1 and -0.5 s, every frame from two before the blend to two after it, then
-    +0.5, +1 and +2 s (delivered clock, label)."""
-    frame = 1 / fps
-    first = switch - (blend / 2) * frame
-    wanted = {}
-    for step in (-SEAM_WINDOW, -1.0, -.5, .5, 1.0, SEAM_WINDOW):
-        wanted[round(switch + step, 4)] = f"{step:+.1f} s"
-    for k in range(-2, blend + 2):
-        t = round(first + k * frame, 4)
-        wanted[t] = ("before the blend" if k < 0 else "after the blend" if k >= blend else f"blend frame {k + 1}")
-    last = duration - frame
-    return [(t, label) for t, label in sorted(wanted.items()) if 0 <= t <= last]
-
-
-def seam_checks(job: Path, state: dict, source_id: str, assembled: dict, layout: str) -> list[dict]:
-    """Every seam: Gemini watches SEAM_WINDOW s on either side at full size and frame rate; the agent gets full-size
-    stills (seam_moments) in review/seams/<id>-<Kxx>/."""
-    import shutil
+def seam_sheet(job: Path, state: dict, source_id: str, assembled: dict, seam: dict) -> Path:
+    """Five moments across a seam (SEAM_MOMENTS around the middle of the switch): original on top, restyled below,
+    one lossless PNG per seam."""
     source = next(r for r in state["sources"] if r["id"] == source_id)
-    size = tuple(assembled["size"])
-    fps, duration, keep_start = assembled["fps"], assembled["duration"], assembled["keep"][0]
-    found = []
-    for seam in assembled["seams"]:
-        switch = seam["time"]
-        a, b = max(0.0, switch - SEAM_WINDOW), min(duration, switch + SEAM_WINDOW)
-        here = job / "review/seams" / f"{source_id}-{seam['segment']}"
-        shutil.rmtree(here, ignore_errors=True)
-        stills = [str(still_pair((source["path"], keep_start + t, f"ORIGINAL seam {seam['segment']} {label} ({t:.3f} s)"),
-                                 (assembled["output"], t, f"RESTYLED seam {seam['segment']} {label} ({t:.3f} s)"),
-                                 size, here / f"{number:02d}-{t:08.3f}.png"))
-                  for number, (t, label) in enumerate(seam_moments(switch, fps, duration), 1)]
-        clip = grid_clip([{"path": source["path"], "start": keep_start + a, "end": keep_start + b, "label": "ORIGINAL"},
-                          {"path": assembled["output"], "start": a, "end": b, "label": "RESTYLED"}], size, here / "seam.mp4")
-        entry = {**seam, "window": [round(a, 3), round(b, 3)], "stills": stills, "answer": None}
-        try:
-            entry["answer"] = winky.gemini([video_part(clip, fps), {"text": seam_prompt(seam, layout, switch - a, b - a)}],
-                                           schema=SEAM_SCHEMA)
-            answer = entry["answer"]
-            log(f"{source_id}: seam {seam['segment']} at {switch:.2f} s: " + ("consistent" if answer.get("consistent")
-                else f"{answer.get('severity')} ({', '.join(answer.get('changed') or [])})"))
-        except (RuntimeError, ValueError) as error:
-            entry["error"] = str(error)
-            log(f"{source_id}: Gemini seam check {seam['segment']} failed ({error}); the stills are in {here}")
-        found.append(entry)
-    return found
+    width, height = assembled["size"]
+    tile_w = 432 if height >= width else 768
+    tile_h = round(tile_w * height / width)
+    band = 26
+    label = font(18)
+    canvas = Image.new("RGB", (len(SEAM_MOMENTS) * tile_w, 2 * (tile_h + band)), "white")
+    draw = ImageDraw.Draw(canvas)
+    last = assembled["duration"] - 1 / assembled["fps"]
+    for column, step in enumerate(SEAM_MOMENTS):
+        t = min(max(0.0, seam["time"] + step), last)
+        for row_number, (path, offset, name) in enumerate(((source["path"], assembled["keep"][0], "original"),
+                                                           (assembled["output"], 0.0, "restyled"))):
+            y = row_number * (tile_h + band)
+            canvas.paste(frame_at(path, t + offset, tile_w, tile_h), (column * tile_w, y + band))
+            draw.text((column * tile_w + 4, y + 4), f"{name} {step:+.1f} s ({t:.2f})", fill="black", font=label)
+    out = job / "review/seams" / f"{source_id}-{seam['segment']}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out, compress_level=1)
+    return out
 
 
 def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
@@ -256,7 +202,9 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
         *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if (look := job_style(state).get("look")) else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
-        f"The restyled video was rendered in segments and joined at: {seams}. Check these moments closely for jumps.",
+        f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "
+        "motion-blurred cross-fade while the camera moves fast; report it only when a viewer would notice a jump in "
+        "colour, brightness, materials, objects or realism, or a double image.",
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "
         "Do not report flaws that the original shows identically (game physics, clipping already in the original), "
         "and do not report the intended material change itself.",
@@ -276,8 +224,8 @@ def segment_for(time_a: float, time_b: float, assembled: dict) -> list[str]:
 
 
 def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: float | None = None) -> dict:
-    """Gemini watches the whole delivery beside the original (full size, crf 18, inline up to 256 MB) and every seam
-    up close; the agent gets full-size lossless stills of the whole video and of every seam to judge for itself."""
+    """Gemini watches the whole delivery beside the original once (full size, near-lossless, inline up to 256 MB);
+    the agent gets lossless stills of the whole video every STILL_STEP s and one five-frame sheet per seam."""
     assembled = read(job / "state/assembled" / f"{source_id}.json")
     clip, layout = proxy(job, state, source_id, assembled)
     size = clip.stat().st_size
@@ -295,9 +243,10 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     for seam in assembled.get("seams") or []:
         if seam.get("verdict") == "visible":
             issues.append({"n": len(issues) + 1, "start": round(seam["time"] - .25, 2), "end": round(seam["time"] + .25, 2),
-                           "category": "seam_color", "severity": "high", "where": "whole frame", "source": "measured",
-                           "description": f"段内接缝 {seam['segment']} 处前后两段画面不一致（差异 {seam['difference']}，"
-                                          f"正常帧间变化 {seam['motion']}，最大区域差异 {seam['local']}），切换时可见跳变或叠影",
+                           "category": "seam_color", "severity": "medium", "where": "whole frame", "source": "measured",
+                           "description": f"段内接缝 {seam['segment']} 处两段画面差异较大（差异 {seam['difference']}，"
+                                          f"正常帧间变化 {seam['motion']}，最大区域差异 {seam['local']}），已用"
+                                          f"{'方向模糊' if seam.get('mode') == 'whip' else '柔化'}过渡遮挡，看接缝图确认是否可见",
                            "segments": [seam["segment"]]})
     for seam in assembled.get("colour") or []:
         if seam["residual"] > 6:
@@ -306,14 +255,16 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
                            "severity": "medium", "where": "whole frame", "source": "measured",
                            "description": f"接缝 {seam['before']} 处颜色校正后仍差 {seam['residual']}（0-255）",
                            "segments": [seam["before"]]})
-    seams = seam_checks(job, state, source_id, assembled, layout)
-    for seam in seams:
-        answer_seam = seam.get("answer") or {}
-        if answer_seam and not answer_seam.get("consistent") and answer_seam.get("severity") not in (None, "none"):
-            issues.append({"n": len(issues) + 1, "start": seam["window"][0], "end": seam["window"][1],
-                           "category": "seam_color", "severity": answer_seam["severity"], "where": "seam close-up",
-                           "source": "gemini-seam", "description": answer_seam.get("description", ""),
-                           "segments": [seam["segment"]]})
+    for seg in plan_row["segments"]:
+        record_path = job / "state/render" / f"{source_id}-{seg['id']}.json"
+        record = read(record_path) if record_path.is_file() else {}
+        if record.get("kept_rejected"):
+            where = next((s for s in assembled["segments"] if s["id"] == seg["id"]), {"start": 0, "end": 0})
+            issues.append({"n": len(issues) + 1, "start": where["start"], "end": where["end"], "category": "continuity",
+                           "severity": "high", "where": "whole frame", "source": "measured", "segments": [seg["id"]],
+                           "description": "H3 两次结果都偏离了原片的机位和构图（自行推近、切镜或改取景），保留了较接近的一次，"
+                                          "看静帧确认"})
+    seams = [{**seam, "sheet": str(seam_sheet(job, state, source_id, assembled, seam))} for seam in assembled["seams"]]
     rounds_path = job / "state/review" / f"{source_id}.json"
     history = read(rounds_path) if rounds_path.is_file() else {"rounds": []}
     number = len(history["rounds"]) + 1
@@ -321,8 +272,7 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     verdict = "fail" if (answer.get("verdict") == "fail" or any(i["severity"] == "high" for i in issues)) else "pass"
     result = {"source": source_id, "round": number, "output": assembled["output"], "verdict": verdict,
               "summary": answer.get("summary", ""), "issues": issues, "compare": str(clip),
-              "stills": stills, "seams": [{k: v for k, v in seam.items() if k != "stills"} | {"stills": seam["stills"]}
-                                          for seam in seams]}
+              "stills": stills, "seams": seams}
     history["rounds"].append({k: result[k] for k in ("round", "verdict", "summary")} | {"issues": len(issues)})
     write(rounds_path, history)
     write(job / "reports/review" / f"{source_id}-r{number}.json", result)
@@ -335,16 +285,12 @@ def markdown(result: dict) -> str:
     for issue in result["issues"]:
         lines.append(f"- #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
                      f"({', '.join(issue['segments'])}; {issue.get('where', '')}; {issue['source']}): {issue['description']}")
-    lines += ["", "## Agent stills (full size, lossless; look at every one)", ""]
+    lines += ["", "## Agent stills (lossless; look at every one)", ""]
     if result.get("stills"):
         lines.append(f"- whole video every {STILL_STEP:g} s: {Path(result['stills'][0]).parent} ({len(result['stills'])} pairs)")
     for seam in result.get("seams") or []:
-        answer = seam.get("answer") or {}
-        verdict = ("consistent" if answer.get("consistent") else f"{answer.get('severity')}: {answer.get('description', '')}"
-                   ) if answer else f"no Gemini answer ({seam.get('error', '')})"
-        lines.append(f"- seam {seam['segment']} at {seam['time']:.2f} s ({seam['seam']}"
-                     + (f", measured {seam['verdict']}" if seam.get("verdict") else "") + f"; Gemini {verdict}): "
-                     f"{Path(seam['stills'][0]).parent if seam['stills'] else '-'} ({len(seam['stills'])} pairs)")
+        how = seam["seam"] + (f", {seam['mode']} switch, measured {seam['verdict']}" if seam.get("mode") else "")
+        lines.append(f"- seam {seam['segment']} at {seam['time']:.2f} s ({how}): {seam['sheet']}")
     return "\n".join(lines) + "\n"
 
 

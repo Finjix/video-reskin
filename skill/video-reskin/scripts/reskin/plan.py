@@ -1,40 +1,84 @@
-"""The agent's edits (kept range, materials, what to remove, anchor frame) and the segment plan built from them.
+"""The agent's edits (kept range, materials, what to remove, scenes and subjects) and the segment plan built from them.
 
-Seedance edits clips of 4-30 s, so each kept range is cut into segments: at camera cuts where possible (a hard cut
-hides the seam), otherwise inside a shot into as few even pieces as fit, each split at the stillest moment near its
-even position, with a short overlap: the later piece is rendered from the earlier result's frame there (`render`) and
-`assemble` switches inside the overlap at the frame where both match best.
+MiniMax H3 edits clips of 4-15 whole seconds, so each kept range is cut into segments of at most 15 s: at camera cuts
+where possible (a hard cut hides the seam), otherwise inside a shot at the moment the camera moves fastest (or the
+picture jumps anyway: a flash, a burst, a whip pan), where `assemble` hides the join under a motion-blurred
+cross-fade. Segments do not depend on each other: every one gets the same scene map and subject sheets (refs), so
+they render side by side and a redo re-renders only itself.
+
+Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side), and every render is
+padded to whole seconds (H3 takes a whole-second duration); `assemble` trims the padding.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from reskin.common import read, write, write_text
 from reskin.prompts import describe
 
-MIN_SECONDS = 3.0         # Seedance needs at least 2 s; shorter pieces are merged into a neighbour
-OVERLAP_SECONDS = 0.5     # both sides of a seam inside a shot render this much more, cross-faded in assemble
-EDIT_KEYS = {"keep", "materials", "remove", "anchor", "extra", "skip", "style_from", "split_at", "max_segment_seconds"}
-REVEAL_DELAY = .7         # seconds after a timed material's start that its reveal frame is taken (it is fully in view)
-REVEAL_GROUP = 2.0        # timed materials starting this close together share one reveal frame
-MAX_REVEALS = 2           # reveal frames one segment gets at most
+MAX_SECONDS = 15.0        # MiniMax H3: reference videos 2-15 s, output duration 4-15 whole seconds
+MIN_RENDER = 4            # whole seconds H3 renders at least
+MIN_SECONDS = 2.0         # delivered pieces shorter than this are merged into a neighbour
+OVERLAP_SECONDS = .6      # rendered by both segments around a seam inside a shot (half before, half after)
+SEARCH_SECONDS = 7.0      # a seam inside a shot is searched in the last this-many seconds a segment can reach
+SMOOTH_SECONDS = .15      # camera speed is averaged over this much on either side of a candidate moment
+EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
+             "scenes", "subjects"}
+SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
+MAX_SUBJECTS = 8          # subject sheets one source gets at most
 
 
 def items_problem(items, name: str) -> str | None:
     """`remove` (and `materials` when not one text) is a list of descriptions, each a string or
-    {"what": ..., "start": s, "end": s} for something on screen only part of the time (materials may add "at": the
-    moment their reveal frame shows them best)."""
+    {"what": ..., "start": s, "end": s} for something on screen only part of the time."""
     if not isinstance(items, list):
         return f"{name} must be a list"
     for item in items:
         if isinstance(item, str) and item.strip():
             continue
         if (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
-                and set(item) <= {"what", "start", "end", "at"}
-                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end", "at"))
+                and set(item) <= {"what", "start", "end"}
+                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
                 and item.get("start", 0) <= item.get("end", float("inf"))):
             continue
         return f"{name} item {item!r} must be text or {{\"what\": text, \"start\": seconds, \"end\": seconds}}"
+    return None
+
+
+def scenes_problem(scenes, duration: float) -> str | None:
+    """`scenes`: [{"name": text, "start": s, "end": s, "views": [seconds, ...]}], views inside the source."""
+    if not isinstance(scenes, list) or not scenes:
+        return "scenes must be a non-empty list"
+    for scene in scenes:
+        if not (isinstance(scene, dict) and isinstance(scene.get("name"), str) and scene["name"].strip()
+                and set(scene) <= {"name", "start", "end", "views", "description", "shows"}
+                and isinstance(scene.get("views"), list) and 1 <= len(scene["views"]) <= 12
+                and all(isinstance(t, (int, float)) and 0 <= t < duration for t in scene["views"])
+                and all(isinstance(scene.get(k, 0), (int, float)) for k in ("start", "end"))):
+            return (f"scene {scene!r} must be {{\"name\": text, \"start\": s, \"end\": s, \"views\": [1-12 times "
+                    "inside the source]}")
+    return None
+
+
+def subjects_problem(subjects, duration: float) -> str | None:
+    """`subjects`: [{"what": text, "kind": ..., "start": s, "end": s, "at": s, "box": [x0, y0, x1, y1]}], box in
+    fractions of the frame at `at`."""
+    if not isinstance(subjects, list):
+        return "subjects must be a list"
+    if len(subjects) > MAX_SUBJECTS:
+        return f"subjects: at most {MAX_SUBJECTS} per source (keep the ones that matter most)"
+    for item in subjects:
+        box = item.get("box") if isinstance(item, dict) else None
+        if not (isinstance(item, dict) and isinstance(item.get("what"), str) and item["what"].strip()
+                and set(item) <= {"what", "kind", "start", "end", "at", "box", "video_box", "appears", "description"}
+                and item.get("kind", "object") in SUBJECT_KINDS
+                and isinstance(item.get("at"), (int, float)) and 0 <= item["at"] < duration
+                and all(isinstance(item.get(k, 0), (int, float)) for k in ("start", "end"))
+                and isinstance(box, list) and len(box) == 4 and all(isinstance(v, (int, float)) for v in box)
+                and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1):
+            return (f"subject {item!r} must be {{\"what\": text, \"kind\": one of {', '.join(SUBJECT_KINDS)}, "
+                    "\"start\": s, \"end\": s, \"at\": s, \"box\": [x0, y0, x1, y1] fractions of the frame}")
     return None
 
 
@@ -47,6 +91,9 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     problems = []
     for key in set(defaults) - EDIT_KEYS:
         problems.append(f"defaults: unknown key {key}")
+    for key in ("scenes", "subjects", "keep", "split_at"):
+        if key in defaults:
+            problems.append(f"defaults: {key} belongs to a source")
     if "remove" in defaults and items_problem(defaults["remove"], "remove"):
         problems.append(f"defaults: {items_problem(defaults['remove'], 'remove')}")
     out = {"defaults": defaults, "sources": {}}
@@ -55,27 +102,33 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: not a source of this job")
             continue
         for key in set(row) - EDIT_KEYS:
-            problems.append(f"{source_id}: unknown key {key}")
+            problems.append(f"{source_id}: unknown key {key}" + (" (anchor frames are gone: the scene map sets the "
+                                                                  "look)" if key == "anchor" else ""))
         duration = known[source_id]["duration"]
         keep = row.get("keep")
         if keep is not None:
             if (not isinstance(keep, list) or len(keep) != 2 or not all(isinstance(x, (int, float)) for x in keep)
                     or not 0 <= keep[0] < keep[1] <= duration + .05):
                 problems.append(f"{source_id}: keep must be [start, end] seconds inside 0-{duration:.2f}")
-            elif keep[1] - keep[0] < MIN_SECONDS:
-                problems.append(f"{source_id}: keep must be at least {MIN_SECONDS:g} s")
+            elif keep[1] - keep[0] < MIN_RENDER:
+                problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (H3 renders 4 s at least)")
         if "extra" in row and not isinstance(row["extra"], str):
             problems.append(f"{source_id}: extra must be text")
         if "materials" in row and not isinstance(row["materials"], str) and items_problem(row["materials"], "materials"):
             problems.append(f"{source_id}: {items_problem(row['materials'], 'materials')}")
         if "remove" in row and items_problem(row["remove"], "remove"):
             problems.append(f"{source_id}: {items_problem(row['remove'], 'remove')}")
-        if "anchor" in row and not (isinstance(row["anchor"], (int, float)) and 0 <= row["anchor"] < duration):
-            problems.append(f"{source_id}: anchor must be a time in seconds inside the source")
+        if "scenes" in row and scenes_problem(row["scenes"], duration):
+            problems.append(f"{source_id}: {scenes_problem(row['scenes'], duration)}")
+        if "subjects" in row and subjects_problem(row["subjects"], duration):
+            problems.append(f"{source_id}: {subjects_problem(row['subjects'], duration)}")
         if row.get("style_from") and (row["style_from"] not in known or row["style_from"] == source_id):
             problems.append(f"{source_id}: style_from must name another source")
         if "split_at" in row and not (isinstance(row["split_at"], list) and all(isinstance(x, (int, float)) for x in row["split_at"])):
             problems.append(f"{source_id}: split_at must be a list of times in seconds")
+        if "max_segment_seconds" in row and not (isinstance(row["max_segment_seconds"], (int, float))
+                                                 and MIN_RENDER <= row["max_segment_seconds"] <= MAX_SECONDS):
+            problems.append(f"{source_id}: max_segment_seconds must be {MIN_RENDER}-{MAX_SECONDS:g}")
         out["sources"][source_id] = row
     chains = {sid: row.get("style_from") for sid, row in out["sources"].items() if row.get("style_from")}
     for sid in chains:
@@ -91,153 +144,148 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
     return out
 
 
-def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict) -> dict:
-    """Edits for one source with defaults filled in."""
+def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict, survey: dict | None = None) -> dict:
+    """Edits for one source with defaults and the survey (scenes, subjects) filled in."""
     defaults = edits.get("defaults") or {}
-    row = {**{k: v for k, v in defaults.items() if k not in ("keep", "anchor", "split_at")},
-           **(edits.get("sources") or {}).get(source_id, {})}
+    own = (edits.get("sources") or {}).get(source_id, {})
+    row = {**{k: v for k, v in defaults.items() if k not in ("keep", "split_at")}, **own}
     card = catalog_row.get("end_card")
     keep = row.get("keep") or [0.0, card["start"] if card else catalog_row["duration"]]
     remove = []
-    for item in [*(defaults.get("remove") or []), *((edits.get("sources") or {}).get(source_id, {}).get("remove") or [])]:
+    for item in [*(defaults.get("remove") or []), *(own.get("remove") or [])]:
         if item not in remove:
             remove.append(item)
+    survey = survey or {}
+    scenes = row.get("scenes") or survey.get("scenes") or [
+        {"name": "scene", "start": 0.0, "end": catalog_row["duration"], "views": [round((keep[0] + keep[1]) / 2, 2)]}]
+    subjects = row.get("subjects") if "subjects" in row else (survey.get("subjects") or [])
+    # only what the kept range shows: views and sheets of the rest cost money and add places nobody sees
+    inside = lambda item: on_screen(item, keep[0], keep[1])
+    trimmed = []
+    for scene in filter(inside, scenes):
+        views = [t for t in scene["views"] if keep[0] <= t <= keep[1]] or scene["views"]
+        trimmed.append({**scene, "views": views})
+    scenes = trimmed or scenes[:1]
+    subjects = [s for s in subjects if inside(s)]
     return {"keep": [float(keep[0]), float(keep[1])], "materials": row.get("materials") or style["default_materials"],
-            "remove": remove, "anchor": row.get("anchor"), "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
+            "remove": remove, "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [],
-            "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None}
+            "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None,
+            "scenes": scenes, "subjects": subjects[:MAX_SUBJECTS]}
 
 
-def _stillest(motion: list[float], lo: int, hi: int, fps: float) -> int:
-    """The frame in [lo, hi) whose surrounding half second changes least."""
-    if hi - lo < 2 or not motion:
-        return (lo + hi) // 2
-    half = max(1, int(fps / 4))
-    best, frame = None, (lo + hi) // 2
-    for i in range(lo, hi):
-        window = motion[max(0, i - half): i + half + 1]
-        score = (round(sum(window) / len(window), 6), abs(i - (lo + hi) // 2))   # ties: nearest the middle
-        if best is None or score < best:
-            best, frame = score, i
-    return frame
+def seam_scores(motion: list[float], camera: list[list[float]], fps: float, frames: int) -> list[float]:
+    """How well each frame hides a seam: the camera's speed on screen, or a jump of the whole picture (flash,
+    burst), each against what is usual in this source; averaged over SMOOTH_SECONDS on either side."""
+    speed = [math.hypot(*v) for v in camera] if camera else []
+    speed += [0.0] * (frames - len(speed))
+    change = list(motion) + [0.0] * (frames - len(motion))
+
+    def scale(values):
+        ordered = sorted(v for v in values if v > 0)
+        return ordered[int(.9 * (len(ordered) - 1))] if ordered else 1.0
+    s_speed, s_change = max(scale(speed), 1e-3), max(scale(change), 1e-3)
+    raw = [max(speed[i] / s_speed, change[i] / s_change) for i in range(frames)]
+    half = max(1, round(SMOOTH_SECONDS * fps))
+    prefix = [0.0]
+    for value in raw:
+        prefix.append(prefix[-1] + value)
+    return [(prefix[min(frames, i + half + 1)] - prefix[max(0, i - half)]) / (min(frames, i + half + 1) - max(0, i - half))
+            for i in range(frames)]
 
 
 def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: list[float],
-            split_at: list[float]) -> list[dict]:
+            camera: list[list[float]], split_at: list[float]) -> list[dict]:
     fps = catalog_row["info"]["fps"]
-    first, last = round(keep[0] * fps), min(catalog_row["info"]["frames"], round(keep[1] * fps))
-    cuts = sorted({s["frames"][0] for s in catalog_row["shots"]} | {round(t * fps) for t in split_at})
-    cuts = [c for c in cuts if first < c < last]
+    total = catalog_row["info"]["frames"]
+    first, last = round(keep[0] * fps), min(total, round(keep[1] * fps))
     shot_starts = {s["frames"][0] for s in catalog_row["shots"]}
-    minimum, maximum = round(MIN_SECONDS * fps), int(max_seconds * fps)
-    overlap = round(OVERLAP_SECONDS * fps)
-    window = int(2 * fps)
-    # Walk forward: end each segment at the latest camera cut that fits, else at the stillest moment near the
-    # limit inside the shot (that segment then also renders the overlap before its start).
+    cuts = sorted(c for c in shot_starts | {round(t * fps) for t in split_at} if first < c < last)
+    minimum = round(MIN_SECONDS * fps)
+    half = round(OVERLAP_SECONDS * fps / 2)
+    maximum = int(max_seconds * fps)
+    search = round(SEARCH_SECONDS * fps)
+    scores = seam_scores(motion, camera, fps, total)
+    # Walk forward: end each segment at the latest camera cut that fits, else at the moment the camera moves
+    # fastest in the last SEARCH_SECONDS the segment can reach (leaving room for the overlap on both sides).
     spans, position, seam = [], first, "start"
     while True:
-        limit = maximum - (overlap if seam == "continuous" else 0)
-        remaining = last - position
-        if remaining <= limit:
+        lead = half if seam == "continuous" else 0
+        if last - position + lead <= maximum:
             spans.append((position, last, seam))
             break
-        options = [c for c in cuts if position + minimum <= c <= position + limit and last - c >= minimum]
+        options = [c for c in cuts if position + minimum <= c <= position + maximum - lead and last - c >= minimum]
         if options:
-            # a split_at time inside a shot is a seam inside that shot: chained and overlapped like any other
             end = options[-1]
             following = "cut" if end in shot_starts else "continuous"
+            if following == "continuous" and end > position + maximum - lead - half:
+                end = None      # a split_at moment too late for its overlap: search instead
         else:
-            # As few pieces as fit up to the next cut out of reach (every seam inside a shot can show), split
-            # evenly, each split at the stillest moment near its even position.
-            stretch = min([c for c in cuts if c > position + limit] + [last]) - position
-            lead = overlap if seam == "continuous" else 0
-            pieces = 2
-            while stretch + lead + (pieces - 1) * overlap > pieces * maximum:
-                pieces += 1
-            target = position + stretch // pieces
-            # what is left after this piece must still fit into pieces - 1 pieces
-            rest = (pieces - 1) * (maximum - overlap)
-            lo = max(position + minimum, position + stretch - rest, target - window)
-            hi = min(position + limit, position + stretch - minimum, target + window)
-            end, following = (_stillest(motion, lo, hi, fps) if lo < hi else min(hi, max(lo, target))), "continuous"
+            end = None
+        if end is None:
+            hi = min(position + maximum - lead - half, last - minimum)
+            lo = max(position + minimum, hi - search)
+            end = max(range(lo, hi + 1), key=lambda i: (round(scores[i], 3), i)) if lo <= hi else hi
+            following = "continuous"
         spans.append((position, end, seam))
         position, seam = end, following
-    segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b]}
+    segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b and c in shot_starts]}
                 for a, b, kind in spans]
-    for number, row in enumerate(segments, 1):
-        row["id"] = f"K{number:02d}"
-        lead = overlap if row["seam"] == "continuous" else 0
-        row["render_frames"] = [max(first, row["frames"][0] - lead), row["frames"][1]]
+    for number, row in enumerate(segments):
+        row["id"] = f"K{number + 1:02d}"
+        after = segments[number + 1]["seam"] if number + 1 < len(segments) else None
+        a = row["frames"][0] - (half if row["seam"] == "continuous" else 0)
+        b = row["frames"][1] + (half if after == "continuous" else 0)
+        # H3 renders whole seconds (4-15): pad the clip, later first, earlier where the source ends
+        seconds = min(int(max_seconds), max(MIN_RENDER, math.ceil((b - a) / fps - 1e-6)))
+        want = round(seconds * fps)
+        b = min(total, a + want)
+        a = max(0, b - want)
+        row["render_frames"] = [a, b]
+        row["render_seconds"] = seconds
         row["start"], row["end"] = round(row["frames"][0] / fps, 3), round(row["frames"][1] / fps, 3)
-        row["seconds"] = round((row["render_frames"][1] - row["render_frames"][0]) / fps, 3)
+        row["seconds"] = round((b - a) / fps, 3)
+        if row["seam"] == "continuous":
+            row["seam_score"] = round(scores[row["frames"][0]], 2)
+            v = camera[row["frames"][0]] if row["frames"][0] < len(camera) else [0.0, 0.0]
+            row["seam_camera"] = [round(float(x), 4) for x in v]
     return segments
 
 
-def mark_reveals(row: dict) -> None:
-    """Per segment after a source's first: the timed materials that come into view for the first time during it
-    (`reveals`). Nothing earlier shows them, so GPT Image restyles one source frame of them after the anchor, and
-    the segment gets that frame as a reference besides the earlier results (render)."""
-    items = [i for i in (row["materials"] if isinstance(row["materials"], list) else [])
-             if isinstance(i, dict) and "start" in i]
+def on_screen(item: dict, start: float, end: float) -> bool:
+    return item.get("start", 0) <= end and start <= item.get("end", float("inf"))
+
+
+def assign_refs(row: dict) -> None:
+    """Per segment: the scenes it shows (their scene maps go along) and the subjects on screen during it (their
+    sheets go along, the ones first seen in the segment first)."""
     fps = row["fps"]
-    for number, seg in enumerate(row["segments"]):
-        seg["reveals"] = []
-        if not number:
-            continue
-        start, end = seg["frames"][0] / fps, seg["frames"][1] / fps
-        new = sorted((min(max(float(i.get("at", i["start"] + REVEAL_DELAY)), start), end - .1), i["what"])
-                     for i in items if start <= i["start"] < end)
-        groups: list[list] = []
-        for moment, what in new:
-            if groups and moment - groups[-1][0][0] <= REVEAL_GROUP:
-                groups[-1].append((moment, what))
-            else:
-                groups.append([(moment, what)])
-        while len(groups) > MAX_REVEALS:      # merge the two closest groups
-            gaps = [groups[k + 1][0][0] - groups[k][-1][0] for k in range(len(groups) - 1)]
-            k = gaps.index(min(gaps))
-            groups[k:k + 2] = [groups[k] + groups[k + 1]]
-        for k, group in enumerate(groups, 1):
-            moment = max(m for m, _ in group)       # every item of the group in view
-            seg["reveals"].append({"id": f"{seg['id']}-N{k}", "frame": round(moment * fps), "time": round(moment, 3),
-                                   "what": list(dict.fromkeys(w for _, w in group))})
-
-
-def auto_anchor(catalog_row: dict, keep: list[float], motion: list[float]) -> float:
-    """Per the reference case: a frame from a lively stretch (much movement means much of the scene is shown),
-    inside the longest kept shot, which sets the look of most of the video."""
-    fps = catalog_row["info"]["fps"]
-    spans = [(max(s["start"], keep[0]), min(s["end"], keep[1])) for s in catalog_row["shots"]]
-    start, end = max((span for span in spans if span[1] > span[0]), key=lambda span: span[1] - span[0], default=keep)
-    lo, hi = round((start + 1) * fps), round((end - 1) * fps)
-    if not motion or hi - lo < fps:
-        return round((keep[0] + keep[1]) / 2, 2)
-    window = int(fps)
-    best, frame = -1.0, lo
-    for i in range(lo, hi, max(1, int(fps / 4))):
-        stretch = motion[max(0, i - window): i + window]
-        score = sum(stretch) / max(1, len(stretch))
-        # the frame itself should be steady, so it is not a blurred transition
-        if score > best and motion[i] < 3 * (score + 1):
-            best, frame = score, i
-    return round(frame / fps, 2)
+    for seg in row["segments"]:
+        start, end = seg["render_frames"][0] / fps, seg["render_frames"][1] / fps
+        seg["scenes"] = [k for k, scene in enumerate(row["scenes"], 1) if on_screen(scene, start, end)] or [1]
+        here = [(0 if start <= s.get("start", 0) < end else 1, s.get("start", 0), k)
+                for k, s in enumerate(row["subjects"], 1) if on_screen(s, start, end)]
+        seg["subjects"] = [k for _, _, k in sorted(here)]
 
 
 def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:
     plan = {"sources": {}}
     for row in catalog["sources"]:
-        settings = source_edits(edits, row["id"], row, style)
+        survey_path = job / "catalog/survey" / f"{row['id']}.json"
+        survey = read(survey_path) if survey_path.is_file() else None
+        settings = source_edits(edits, row["id"], row, style, survey)
         if settings["skip"]:
             continue
         motion_path = job / "catalog/motion" / f"{row['id']}.json"
+        camera_path = job / "catalog/motion" / f"{row['id']}-camera.json"
         motion = read(motion_path) if motion_path.is_file() else []
-        limit = min(30.0, settings["max_segment_seconds"] or max_seconds)
-        segments = segment(row, settings["keep"], limit, motion, settings["split_at"])
-        anchor = settings["anchor"] if settings["anchor"] is not None else auto_anchor(row, settings["keep"], motion)
-        plan["sources"][row["id"]] = {**settings, "anchor": anchor, "fps": row["info"]["fps"],
+        camera = read(camera_path) if camera_path.is_file() else []
+        limit = min(MAX_SECONDS, settings["max_segment_seconds"] or max_seconds)
+        segments = segment(row, settings["keep"], limit, motion, camera, settings["split_at"])
+        plan["sources"][row["id"]] = {**settings, "fps": row["info"]["fps"], "surveyed": survey is not None,
                                       "width": row["info"]["width"], "height": row["info"]["height"],
                                       "segments": segments}
-        mark_reveals(plan["sources"][row["id"]])
+        assign_refs(plan["sources"][row["id"]])
     write(job / "config/plan.json", plan)
     write_text(job / "reports/plan.md", markdown(plan, catalog))
     return plan
@@ -248,17 +296,24 @@ def markdown(plan: dict, catalog: dict) -> str:
     lines = ["# Plan", ""]
     for source_id, row in plan["sources"].items():
         lines.append(f"## {source_id} {names.get(source_id, '')}")
-        lines.append(f"keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, anchor frame {row['anchor']:.2f} s"
-                     + (f" (style from {row['style_from']})" if row["style_from"] else ""))
+        lines.append(f"keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s"
+                     + (f" (look from {row['style_from']})" if row["style_from"] else "")
+                     + ("" if row["surveyed"] or row.get("scenes") else " (no survey: run survey)"))
         lines.append(f"materials: {describe(row['materials'])}")
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
         if row["extra"]:
             lines.append(f"extra: {row['extra']}")
+        for k, scene in enumerate(row["scenes"], 1):
+            lines.append(f"scene {k} {scene['name']}: {scene.get('start', 0):g}-{scene.get('end', 0):g} s, views at "
+                         + ", ".join(f"{t:g}" for t in scene["views"]) + " s")
+        for k, subject in enumerate(row["subjects"], 1):
+            lines.append(f"subject P{k:02d} {subject['what']} ({subject.get('kind', 'object')}): "
+                         f"{subject.get('start', 0):g}-{subject.get('end', 0):g} s, sheet from {subject['at']:g} s")
         for seg in row["segments"]:
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
-            reveals = "".join(f"; reveal {r['id']} at {r['time']:.2f} s: {', '.join(r['what'])}"
-                              for r in seg.get("reveals") or [])
-            lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['seconds']:.2f} s), "
-                         f"seam before: {seg['seam']}{inner}{reveals}")
+            seam = seg["seam"] + (f" (seam score {seg['seam_score']:.2f})" if "seam_score" in seg else "")
+            refs = ", ".join([f"scene {k}" for k in seg["scenes"]] + [f"P{k:02d}" for k in seg["subjects"]])
+            lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['render_seconds']} s), "
+                         f"seam before: {seam}{inner}; refs: {refs}")
         lines.append("")
     return "\n".join(lines)
