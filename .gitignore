@@ -5,5 +5,5 @@ __pycache__/
 /dist/
 /dev/smoke/latest.json
 # Runtime downloads stay local and must not be committed.
-/plugin/runtime-cache/
+/runtime-cache/
 *.partial

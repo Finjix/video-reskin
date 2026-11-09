@@ -17,7 +17,7 @@ FOOTAGE = ROOT / ".素材"
 
 def launcher(args, text=None, timeout=7200):
     cmd = Path(os.environ["SystemRoot"]) / "System32/cmd.exe"
-    line = f'{cmd} /d /s /c "{subprocess.list2cmdline([str(ROOT / "plugin/scripts/video_reskin.cmd"), *args])}"'
+    line = f'{cmd} /d /s /c "{subprocess.list2cmdline([str(ROOT / "scripts/video_reskin.cmd"), *args])}"'
     started = time.monotonic()
     result = subprocess.run(line, input=text, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     print(f"$ {' '.join(args[:1])} ({time.monotonic() - started:.0f} s, exit {result.returncode})", flush=True)

@@ -30,7 +30,7 @@ def desktop() -> Path:
 
 
 def home() -> Path:
-    """Per-user settings (credentials, login browser profile); survives plugin updates."""
+    """Per-user settings (credentials, login browser profile); survives skill updates."""
     configured = os.environ.get("VIDEO_RESKIN_HOME")
     if configured:
         return Path(configured).resolve()

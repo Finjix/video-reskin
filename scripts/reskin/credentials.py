@@ -1,4 +1,4 @@
-"""The Winky API key and the Lumos login, stored per Windows user (DPAPI-encrypted) outside the plugin folder."""
+"""The Winky API key and the Lumos login, stored per Windows user (DPAPI-encrypted) outside the skill folder."""
 from __future__ import annotations
 
 import base64

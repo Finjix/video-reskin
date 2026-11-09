@@ -1,7 +1,7 @@
-# Windows PowerShell 5.1+; defaults to the plugin-local runtime cache.
+# Windows PowerShell 5.1+; defaults to the skill-local runtime cache.
 $ErrorActionPreference = 'Stop'
-$pluginRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$cacheRoot = if ($env:VIDEO_RESKIN_CACHE_DIR) { [IO.Path]::GetFullPath($env:VIDEO_RESKIN_CACHE_DIR) } else { Join-Path $pluginRoot 'runtime-cache' }
+$skillRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$cacheRoot = if ($env:VIDEO_RESKIN_CACHE_DIR) { [IO.Path]::GetFullPath($env:VIDEO_RESKIN_CACHE_DIR) } else { Join-Path $skillRoot 'runtime-cache' }
 $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:PYTHONUTF8 = '1'
 $env:VIDEO_RESKIN_CACHE_DIR = $cacheRoot

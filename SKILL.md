@@ -7,11 +7,11 @@ description: Batch-restyle videos (by default into realistic materials with the 
 
 ## Runtime
 
-- Windows 10/11 x64 with a local executor. The plugin root is two directories above this file.
-- Every command: `& "<plugin_root>/scripts/video_reskin.cmd" <command> [--job-dir <job_dir>] ...`. Python, FFmpeg and
-  libraries download into the plugin's `runtime-cache` on first use; never install or build an environment yourself.
+- Windows 10/11 x64 with a local shell. `<skill_root>` is the folder that holds this file.
+- Every command: `& "<skill_root>/scripts/video_reskin.cmd" <command> [--job-dir <job_dir>] ...`. Python, FFmpeg and
+  libraries download into `<skill_root>/runtime-cache` on first use; never install or build an environment yourself.
   Results go to stdout, progress to stderr.
-- Read the output, not the exit code (Codex shells report every failure as 1). `error:` lists what the input broke:
+- Read the output, not the exit code (some shells report every failure as 1). `error:` lists what the input broke:
   fix it and run the same command again. `credential error:` names the key or login to provide. `runtime error:` /
   `service error:` name a network, disk or Lumos problem: fix the cause and run the same command again. Every command
   can be re-run and redoes only what changed; `render` also resumes generations still running on Lumos.

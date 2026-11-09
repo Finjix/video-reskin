@@ -1,4 +1,4 @@
-"""Inspect the plugin and selected runtime capability, without downloading anything."""
+"""Inspect the skill folder and selected runtime capability, without downloading anything."""
 from __future__ import annotations
 
 import argparse
@@ -14,18 +14,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def verify(feature="base") -> dict:
     failures = []
-    for filename in ("plugin.json", "skills/video-reskin/SKILL.md", "skills/video-reskin/agents/openai.yaml",
-                     "skills/video-reskin/references/workflow.md", "skills/video-reskin/references/review.md",
-                     "assets/runtime.json", "assets/icon.svg", "assets/prompts.json", "scripts/video_reskin.ps1",
+    for filename in ("SKILL.md", "references/workflow.md", "references/review.md",
+                     "assets/runtime.json", "assets/prompts.json", "scripts/video_reskin.ps1",
                      "scripts/video_reskin.cmd", "requirements/media.txt", "requirements/login.txt"):
         if not (ROOT / filename).is_file():
-            failures.append(f"missing package file: {filename}")
+            failures.append(f"missing skill file: {filename}")
     if sys.version_info[:3] != (3, 13, 15) or sys.maxsize <= 2**32:
         failures.append("64-bit Python 3.13.15 required; use video_reskin.ps1")
     try:
-        metadata = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
-        if not metadata["extensions"]["com.openai"]["requires_local_executor"]:
-            failures.append("requires_local_executor must be true")
         info = runtime.status(feature)
         failures.extend(f"not cached: {name}" for name in info["missing"])
     except (OSError, ValueError, KeyError, runtime.RuntimeFailure) as exc:

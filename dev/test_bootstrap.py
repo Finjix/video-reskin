@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from check_skill import PARTS
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -17,8 +19,14 @@ def snapshot(root):
 def main():
     folder = Path(tempfile.mkdtemp(prefix="vr-bootstrap-")) / "中文 路径"
     folder.mkdir()
-    plugin = folder / "plugin"
-    shutil.copytree(ROOT / "plugin", plugin, ignore=shutil.ignore_patterns("runtime-cache"))
+    plugin = folder / "video-reskin"
+    for part in PARTS:
+        source = ROOT / part
+        if source.is_dir():
+            shutil.copytree(source, plugin / part, ignore=shutil.ignore_patterns("__pycache__"))
+        else:
+            plugin.mkdir(exist_ok=True)
+            shutil.copy2(source, plugin / part)
     before = snapshot(plugin)
     environment = {**os.environ, "VIDEO_RESKIN_CACHE_DIR": str(folder / "cache"), "VIDEO_RESKIN_HOME": str(folder / "home"),
                    "VIDEO_RESKIN_OFFLINE": "0", "PATH": str(Path(os.environ["SystemRoot"]) / "System32")}
@@ -51,8 +59,8 @@ def main():
     python = folder / "cache/environment/Scripts/python.exe"
     result = subprocess.run([str(python), "-B", "-c", "import importlib.util; assert importlib.util.find_spec('numpy') is None"], env=environment)
     assert result.returncode == 0
-    assert before == snapshot(plugin), "Plugin folder changed during execution"
-    print(json.dumps({"cold_start": "pass", "unicode_json_stdin": "pass", "offline_reuse": "pass", "plugin_immutable": True,
+    assert before == snapshot(plugin), "Skill folder changed during execution"
+    print(json.dumps({"cold_start": "pass", "unicode_json_stdin": "pass", "offline_reuse": "pass", "skill_immutable": True,
                       "test_directory": str(folder)}, ensure_ascii=True))
 
 

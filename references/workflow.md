@@ -1,6 +1,6 @@
 # Commands and file formats
 
-All job commands: `& "<plugin_root>/scripts/video_reskin.cmd" <command> --job-dir <job_dir>`. Times assume a warm
+All job commands: `& "<skill_root>/scripts/video_reskin.cmd" <command> --job-dir <job_dir>`. Times assume a warm
 runtime cache; the first use adds the downloads (`runtime --feature media|login [--install]` inspects or prefetches).
 
 | Command | Does | Typical time |
