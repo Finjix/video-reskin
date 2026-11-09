@@ -128,7 +128,7 @@ class RefsTests(unittest.TestCase):
         self.assertEqual(row["segments"][0]["subjects"], [1])
         self.assertEqual(row["segments"][1]["subjects"], [2, 1])
         self.assertEqual(row["segments"][1]["scenes"], [1, 2])
-        self.assertEqual(row["segments"][2]["subjects"], [3, 1, 2])
+        self.assertEqual(row["segments"][2]["subjects"], [3, 1])          # at most plan.MAX_SHEETS
         self.assertEqual(row["segments"][2]["scenes"], [2])
 
 

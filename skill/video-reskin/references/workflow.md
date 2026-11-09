@@ -97,7 +97,8 @@ Each source lists its segments `K01...` with `frames` (source frames it delivers
 H3: whole seconds, the delivered frames plus 0.3 s on either side of a seam inside a shot, padded at the end),
 `render_seconds`, `seam` before it (`start`; `cut`: a camera cut hides the join; `continuous`: inside a shot, with
 `seam_score`, how fast the camera moves there against the rest of the video, and `seam_camera`), `inner_cuts`, and
-its references: `scenes` and `subjects` (indices; new subjects first). Edit the edits file, not the plan.
+its references: `scenes` and `subjects` (indices, at most two, subjects first seen in the segment first; only
+these sheets are made). Edit the edits file, not the plan.
 
 ## Outputs
 

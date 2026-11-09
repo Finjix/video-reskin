@@ -26,7 +26,11 @@ SMOOTH_SECONDS = .15      # camera speed is averaged over this much on either si
 EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
              "scenes", "subjects"}
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
-MAX_SUBJECTS = 8          # subject sheets one source gets at most
+MAX_SUBJECTS = 8          # subjects one source lists at most
+# Three-view sheets make H3 feature their subjects: with 4 sheets K01 of GOF3D10232 cut to a close-up of its own in
+# three of four attempts, with the scene map alone it kept the source's camera (2026-11-09). A segment takes at most
+# MAX_SHEETS, subjects first seen in it first; only sheets some segment takes are made (refs).
+MAX_SHEETS = 2
 
 
 def items_problem(items, name: str) -> str | None:
@@ -257,15 +261,15 @@ def on_screen(item: dict, start: float, end: float) -> bool:
 
 
 def assign_refs(row: dict) -> None:
-    """Per segment: the scenes it shows (their scene maps go along) and the subjects on screen during it (their
-    sheets go along, the ones first seen in the segment first)."""
+    """Per segment: the scenes it shows (their scene maps go along) and up to MAX_SHEETS subjects on screen during
+    it (their sheets go along), the ones first seen in the segment first."""
     fps = row["fps"]
     for seg in row["segments"]:
         start, end = seg["render_frames"][0] / fps, seg["render_frames"][1] / fps
         seg["scenes"] = [k for k, scene in enumerate(row["scenes"], 1) if on_screen(scene, start, end)] or [1]
         here = [(0 if start <= s.get("start", 0) < end else 1, s.get("start", 0), k)
                 for k, s in enumerate(row["subjects"], 1) if on_screen(s, start, end)]
-        seg["subjects"] = [k for _, _, k in sorted(here)]
+        seg["subjects"] = [k for _, _, k in sorted(here)][:MAX_SHEETS]
 
 
 def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:

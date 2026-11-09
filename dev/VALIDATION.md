@@ -13,6 +13,8 @@ GOF3D10232 射冰取鱼 (1080x1920, 60 fps), kept 0-30 s, one long shot. Lumos l
 | `render` 3 segments (12 + 12 + 9 s, 2K, 5 pictures each) | all three side by side, done after 13-18 min. 1440x2560, 24 fps, 2-5 % longer than asked, realism far above the prompt-only probe |
 | `assemble` | 33 s. Colour residuals at the two seams 0.14 and 0.12; both seams `whip` at 41-46 px of camera motion per frame. No ghosting or jump on the frame-by-frame look; at a 64 px peak the blur read as a deliberate swish, now 48 px at most |
 | `review` round 1 | Gemini: 2 medium issues, both confirmed on stills (a tuna drawn early on an empty pad in K01, a carried tuna melting into a dark blob in K03). Seam sheets clean |
+| redo 1 (K01, K03; K02 reused) | K03 better, still a dark smear of the carried tuna for a moment and blurry flying cash (medium, H3's weak spot with fast small objects). K01 with the sentence `收集框保持空的，不要提前放入鱼` cut to a close-up of the worker cutting fish from 4 s on (Gemini: high) |
+| redo 2 (K01, stronger prompt, sentence dropped) | both attempts left the source the same way (edges 0.972 / 0.983, layout 0.875 / 0.829), caught by the new render check and retried automatically |
 
 Findings that changed the skill:
 
@@ -26,6 +28,18 @@ Findings that changed the skill:
   step between the ±0.5 and ±1 s frames, although the two results differed at the switch by 25-46 levels.
 - Segments no longer depend on each other: a redo resubmitted only the redone segments; the third segment was
   reused.
+- H3 now and then makes a camera of its own: K01 (the dock, then the camp with a worker cutting fish) left the
+  source in three of four attempts, K02 and K03 never. Neither the prompt's first sentence (frame for frame, same
+  camera, no close-ups) nor dropping the corrective sentence helped. `render` now compares every result with its
+  clip (edges and coarse layout after time warping) and rejects one that left the source: followed 0.71-0.92 /
+  0.50-0.61, left 0.97-0.98 / 0.83-0.89. A second rejection in a redo round keeps the closer result and the review
+  lists it as high.
+- With the scene map alone (no sheets) K01 kept the source's camera at the first try (0.916 / 0.773), with the
+  same realism, and the early tuna on the empty pad was gone. A segment therefore takes at most two sheets, and the
+  automatic retry after a rejection takes none. One sample: watch the rejection rate in the next batches.
+- Round 3 (K01 scene map only): no high issue; open (medium, both segments at their two redos): a tuna on the
+  cutting table about a second early in K01 (7.25-8.5 s), the carried cash stack melting in K03 (29.25-29.75 s).
+  Seams clean (colour residual 0.12 / 0.10). Rendering: 12 s at 2K took 13-18 min, the scene-map-only run 14 min.
 
 ## 2026-11-03: first end-to-end runs on `.素材`
 

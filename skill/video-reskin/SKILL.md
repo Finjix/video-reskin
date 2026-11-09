@@ -75,16 +75,18 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    of what is on screen, what to `remove` (only logos and warning lines you actually saw, timed when they come and
    go; HUD stays), and corrected `scenes`/`subjects` when the survey picked badly. `plan --edits <file>` cuts every
    kept range into segments of at most 15 s: at camera cuts where possible, otherwise where the camera moves
-   fastest; writes `reports/plan.md` with each segment's references.
+   fastest; writes `reports/plan.md` with each segment's references (the scene map and up to two sheets; only
+   sheets some segment takes are made).
 5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality max: the views joined into one overview of the
    whole location, realistic, no characters, UI or text) and one three-view sheet per subject (1K, quality high).
    Look at every `sheets/<id>-refs.png`: the map keeps the layout of the views, realistic materials, no cartoon
    parts, no invented places; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
    rendering: every segment copies them.
-6. `render` edits every segment with MiniMax H3 on Lumos at 2K: the source clip plus the scene map and the sheets of
-   the subjects on screen (at most 5 pictures). Segments do not depend on each other and render side by side. H3
-   keeps the story and layout but sets its own pace and now and then its own camera: a result that no longer shows
-   the source's camera and layout is rejected and rendered once more by itself (not counted as a redo).
+6. `render` edits every segment with MiniMax H3 on Lumos at 2K: the source clip plus the scene map and at most two
+   sheets of subjects on screen (those first seen in the segment first). Segments do not depend on each other and
+   render side by side. H3 keeps the story and layout but sets its own pace and now and then its own camera (more
+   often with more sheets): a result that no longer shows the source's camera and layout is rejected and rendered
+   once more by itself with the scene map only (not counted as a redo).
 7. `assemble` retimes every result frame by frame onto the source clock (H3's pace is uneven), matches colours
    across seams inside a shot, hides each such seam under a motion-blurred cross-fade along the camera's movement,
    joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.

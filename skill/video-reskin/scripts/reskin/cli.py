@@ -140,7 +140,7 @@ def cmd_plan(args) -> int:
         inner = sum(1 for s in row["segments"] if s["seam"] == "continuous")
         lines.append(f"{source_id}: keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, {len(row['segments'])} segments "
                      f"({cuts} seams at cuts, {inner} inside shots), {len(row['scenes'])} scene map(s), "
-                     f"{len(row['subjects'])} subject sheet(s), remove: {describe(row['remove']) or 'nothing'}"
+                     f"{len({k for s in row['segments'] for k in s['subjects']})} subject sheet(s), remove: {describe(row['remove']) or 'nothing'}"
                      + ("" if row["surveyed"] or row.get("scenes") else " (not surveyed)"))
     if missing:
         lines.append(f"note: no edits for {', '.join(missing)} (defaults used: keep up to the end-card candidate)")
@@ -296,7 +296,7 @@ def cmd_status(args) -> int:
         step = "plan --edits <edits.json>"
     for source_id, row in plan["sources"].items():
         keys = [s["id"] for s in row["segments"]]
-        own = [f"scene{k}" for k in range(1, len(row["scenes"]) + 1)] + [f"P{k:02d}" for k in range(1, len(row["subjects"]) + 1)]
+        own = [f"scene{k}" for k in range(1, len(row["scenes"]) + 1)] + [f"P{k:02d}" for k in sorted({k for s in row["segments"] for k in s["subjects"]})]
         frames_ready = sum(1 for k in own if (job / "refs" / f"{source_id}-{k}.png").is_file())
         rendered = 0
         for k in keys:

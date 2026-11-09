@@ -88,7 +88,10 @@ def tasks(job: Path, state: dict, plan: dict, only: set[str] | None, redo: set[s
     for source_id in order:
         row = plan["sources"][source_id]
         wanted = lambda key: not only or source_id in only or key in only
+        used = {k for seg in row["segments"] for k in seg.get("subjects") or []}
         for k, subject in enumerate(row["subjects"], 1):
+            if k not in used:       # no segment takes its sheet
+                continue
             key = subject_key(source_id, k)
             rows.append({"key": key, "kind": "subject", "source": source_id, "path": sources[source_id]["path"],
                          "row": row, "index": k, "item": subject, "selected": wanted(key)})

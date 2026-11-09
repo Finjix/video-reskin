@@ -25,6 +25,9 @@ GENERATION_TIMEOUT = 60 * 60
 SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 UPLOAD_BYTES = 48_000_000      # H3 takes reference videos up to 50 MB
 MAX_PICTURES = 5               # reference pictures one segment gets (H3 takes 9; the page suggests 5 or fewer)
+# A segment takes at most plan.MAX_SHEETS three-view sheets; the retry after a result that left the source's
+# camera takes none (with the scene map alone K01 of GOF3D10232 kept the source's camera, 2026-11-09).
+from reskin.plan import MAX_SHEETS
 MAX_REDOS = 2                  # a segment goes back at most twice (the user's rule, 2026-11-09)
 
 
@@ -79,9 +82,10 @@ def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: in
     return output
 
 
-def pictures(job: Path, plan_row: dict, source_id: str, seg: dict) -> list[dict]:
+def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True) -> list[dict]:
     """The segment's reference pictures in order: the scene map(s) of the location it shows, then the three-view
-    sheets of the subjects on screen (first seen in this segment first), at most MAX_PICTURES."""
+    sheets of the subjects on screen (first seen in this segment first, at most MAX_SHEETS; none when `sheets` is
+    False), at most MAX_PICTURES in all."""
     from reskin import refs as REFS
     key = f"{source_id}:{seg['id']}"
     chosen = []
@@ -90,7 +94,7 @@ def pictures(job: Path, plan_row: dict, source_id: str, seg: dict) -> list[dict]
         if not path.is_file():
             raise ValueError(f"{key}: scene map {path.name} is missing; run refs first")
         chosen.append({"path": REFS.upload_copy(path), "role": "scene", "name": plan_row["scenes"][k - 1]["name"]})
-    for k in seg.get("subjects") or []:
+    for k in (seg.get("subjects") or [])[: MAX_SHEETS if sheets else 0]:
         if len(chosen) >= MAX_PICTURES:
             break
         path = REFS.path_of(job, REFS.subject_key(source_id, k))
@@ -126,7 +130,10 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     source = next(r for r in state["sources"] if r["id"] == source_id)
     key = f"{source_id}:{seg['id']}"
     redo = redo_log(job).get(key, {})
-    chosen = pictures(job, plan_row, source_id, seg)
+    # after a result of this round that left the source, the retry goes without sheets
+    path = rejected_path(job, key)
+    left = path.is_file() and any(r["round"] == redo.get("redos", 0) for r in read(path))
+    chosen = pictures(job, plan_row, source_id, seg, sheets=not left)
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
     prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span, refs=references_clause(chosen))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],
