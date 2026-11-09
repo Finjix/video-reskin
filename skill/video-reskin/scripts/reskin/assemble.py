@@ -119,7 +119,11 @@ def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]
     (0) or skips ahead (up to `jump` frames: H3 stalls for half a second at times) at a small cost per frame of
     difference from one; the result may start a few frames late and end early (its last frame is then held)."""
     rows, cols = cost.shape
-    step = WARP_STEP * float(np.median(cost))
+    # The cost of a hold or skip scales with how much a right match beats a typical one: under a strong restyle
+    # the edges differ everywhere (best 0.8 vs typical 0.93), and a penalty scaled to the typical difference made the
+    # warp trail 1.25 s and hold 32 frames rather than follow H3's catch-up at the end (GOF3D10232 K01, 2026-11-09).
+    spread = float(np.median(cost)) - float(np.median(cost.min(axis=1)))
+    step = WARP_STEP * max(spread, 1e-3)
     inf = np.inf
     ratio = cols / rows
     columns = np.arange(cols)
@@ -148,14 +152,20 @@ def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]
     return mapping, float(np.mean([cost[i, m] for i, m in enumerate(mapping)]))
 
 
-def smooth(mapping: list[int]) -> list[int]:
-    """A running median over up to 5 frames (narrower at the ends, so the ends stay put), kept monotonic: no
-    single-frame back-and-forth from noisy matches."""
-    out, last, n = [], 0, len(mapping)
+def smooth(mapping: list[int], spread: int = 6) -> list[int]:
+    """A running median over up to 5 frames (no single-frame back-and-forth from noisy matches), then a running mean
+    over up to 2 * `spread` + 1 frames, so the holds and skips a result's own pace needs spread out evenly instead of
+    freezing or jumping in one place; both narrower at the ends, so the ends stay put, and kept monotonic."""
+    n = len(mapping)
+    median = []
     for i in range(n):
         k = min(2, i, n - 1 - i)
         window = sorted(mapping[i - k: i + k + 1])
-        last = max(last, window[len(window) // 2])
+        median.append(window[len(window) // 2])
+    out, last = [], 0
+    for i in range(n):
+        k = min(spread, i, n - 1 - i)
+        last = max(last, int(round(sum(median[i - k: i + k + 1]) / (2 * k + 1))))
         out.append(last)
     return out
 
@@ -420,9 +430,13 @@ def write_transition(frames: list[np.ndarray], size: tuple[int, int], out_fps: f
     return output
 
 
+SEAM_MODES = ("masked", "cut")     # masked: blurred cross-fade (default); cut: a plain switch at the seam frame
+
+
 def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], index: int,
-              corrections: list[tuple], size: tuple[int, int], out_fps: float) -> dict:
-    """The masked switch between clips index-1 and index, centred on the planned seam inside their overlap."""
+              corrections: list[tuple], size: tuple[int, int], out_fps: float, seams: str = "masked") -> dict:
+    """The switch between clips index-1 and index, centred on the planned seam inside their overlap: masked (a
+    blurred cross-fade), or with `seams` "cut" a plain switch at the seam frame (to compare)."""
     before, after = lines[index - 1], lines[index]
     a, b = overlap(before, after)
     length = max(2, round(TRANSITION_SECONDS * out_fps))
@@ -433,6 +447,8 @@ def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], i
     small_after = corrected(frames_rgb(clips[index], a - after["out"][0], b - a), corrections[index])
     found = measure(small_before[start - a: start - a + length], small_after[start - a: start - a + length])
     how = transition_plan(after["camera"], size, out_fps, min(size) / 1080)
+    if seams == "cut":
+        return {"start": after["body"][0], "length": 0, "clip": None, **how, "mode": "cut", "blur": 0.0, **found}
     first = read_full(clips[index - 1], start - before["out"][0], length, size)
     second = read_full(clips[index], start - after["out"][0], length, size)
     count = min(len(first), len(second), length)
@@ -445,7 +461,7 @@ def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], i
 
 # --- 4. join ---------------------------------------------------------------------------------------------------
 
-def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict) -> dict:
+def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict, seams: str = "masked") -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
@@ -460,7 +476,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
             raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
         frames = line["out"][1] - line["out"][0]
         work = job / "work" / f"{source_id}-{line['id']}.mp4"
-        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size), "retime": 2}
+        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size), "retime": 3}
         stamp_path = work.with_suffix(".json")
         if work.is_file() and stamp_path.is_file() and read(stamp_path).get("stamp") == stamp:
             measured = read(stamp_path)["timing"]
@@ -470,7 +486,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         timing.append({"segment": line["id"], **measured})
         clips.append(work)
     corrections, colour = match_colours(clips, lines)
-    switches = {index: make_seam(job, source_id, clips, lines, index, corrections, size, out_fps)
+    switches = {index: make_seam(job, source_id, clips, lines, index, corrections, size, out_fps, seams)
                 for index, line in enumerate(lines) if index and line["seam"] == "continuous"}
     # Pieces on the global clock: each clip from its body start (or the end of the switch before it) to its body
     # end (or the start of the switch after it), the switch clips in between.
@@ -481,7 +497,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         if tail > head:
             pieces.append({"path": clips[index], "a": head - line["out"][0], "b": tail - line["out"][0],
                            "correction": corrections[index]})
-        if index + 1 in switches:
+        if index + 1 in switches and switches[index + 1]["length"]:
             s = switches[index + 1]
             pieces.append({"path": s["clip"], "a": 0, "b": s["length"], "correction": None})
     inputs, graph = [], []

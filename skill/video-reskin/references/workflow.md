@@ -13,7 +13,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, max) and three-view sheets (1K, high) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
 | `render [--only K] [--workers 4]` | MiniMax H3 video edit of every segment at 2K → `ai/`; segments independent, side by side; results that leave the source's camera are rejected and rendered once more | 13-18 min per 12 s segment at 2K, 4 at a time |
-| `assemble [--only S01]` | retime frame by frame, colour-match, masked switches at seams inside shots, join with the source audio → delivery folder | ~1 min per video |
+| `assemble [--only S01] [--seams masked\|cut]` | retime frame by frame, colour-match, masked switches at seams inside shots (`cut`: plain switches, to compare), join with the source audio → delivery folder | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
 | `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most); `--replace` drops the earlier corrective sentences | - |

@@ -122,7 +122,21 @@ class WarpTests(unittest.TestCase):
         self.assertEqual(mapping[-1], 79)
 
     def test_smooth_removes_single_frame_jitter(self):
-        self.assertEqual(assemble.smooth([0, 1, 2, 9, 4, 5, 6, 7]), [0, 1, 2, 4, 5, 6, 6, 7])
+        smoothed = assemble.smooth([0, 1, 2, 9, 4, 5, 6, 7])
+        self.assertEqual(smoothed[0], 0)
+        self.assertEqual(smoothed[-1], 7)
+        self.assertTrue(all(b >= a for a, b in zip(smoothed, smoothed[1:])))
+        self.assertLess(max(smoothed[:5]), 9)
+
+    def test_smooth_spreads_a_freeze_into_even_holds(self):
+        # the result holds for 6 frames, then runs on: the holds come out spread, no run of more than 2 frames
+        mapping = list(range(20)) + [19] * 6 + list(range(20, 40))
+        smoothed = assemble.smooth(mapping)
+        runs, run = [], 1
+        for a, b in zip(smoothed, smoothed[1:]):
+            run = run + 1 if a == b else 1
+            runs.append(run)
+        self.assertLessEqual(max(runs), 2)
 
 
 class TimelineTests(unittest.TestCase):

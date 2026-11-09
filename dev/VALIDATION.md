@@ -40,6 +40,13 @@ Findings that changed the skill:
 - Round 3 (K01 scene map only): no high issue; open (medium, both segments at their two redos): a tuna on the
   cutting table about a second early in K01 (7.25-8.5 s), the carried cash stack melting in K03 (29.25-29.75 s).
   Seams clean (colour residual 0.12 / 0.10). Rendering: 12 s at 2K took 13-18 min, the scene-map-only run 14 min.
+- Seams with plain cuts (`assemble --seams cut`, to compare): at 11.58 s the switch K01 → K02 jumped in
+  brightness and grading, in how the crowd and fence are drawn, and a bench of fish steaks vanished; at 22.17 s an
+  extra ice block popped in. The masked switch hides both. The cut also showed that K01 trailed the source by
+  1.25 s before the seam with 32 frames held: the warp's hold/skip cost was scaled to the typical difference, too
+  dear under a strong restyle where right and wrong matches differ little, so it did not follow H3's catch-up at the
+  end. The cost now scales with how much the best match beats the typical one, and the holds and skips a result's
+  pace needs are spread evenly (running mean) instead of freezing in one place.
 
 ## 2026-11-03: first end-to-end runs on `.素材`
 

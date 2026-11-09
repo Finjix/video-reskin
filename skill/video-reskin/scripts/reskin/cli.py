@@ -197,7 +197,7 @@ def cmd_assemble(args) -> int:
         if only and source_id not in only:
             continue
         try:
-            result = ASSEMBLE.assemble_source(job, state, source_id, row, JOB.style(state))
+            result = ASSEMBLE.assemble_source(job, state, source_id, row, JOB.style(state), seams=args.seams)
         except ValueError as error:
             failed = True
             lines.append(f"{source_id}: not assembled: {error}")
@@ -371,6 +371,8 @@ def main() -> None:
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
     assemble.add_argument("--only", nargs="*", help="source IDs")
+    assemble.add_argument("--seams", choices=("masked", "cut"), default="masked",
+                          help="seams inside a shot: masked (blurred cross-fade, default) or cut (plain switch, to compare)")
     review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
     review.add_argument("--only", nargs="*", help="source IDs")
     review.add_argument("--fps", type=float, default=None, help="frames per second Gemini samples (default: 4 up to 75 s, else 2)")
