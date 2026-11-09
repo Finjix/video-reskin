@@ -128,6 +128,7 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     first, last = round(keep[0] * fps), min(catalog_row["info"]["frames"], round(keep[1] * fps))
     cuts = sorted({s["frames"][0] for s in catalog_row["shots"]} | {round(t * fps) for t in split_at})
     cuts = [c for c in cuts if first < c < last]
+    shot_starts = {s["frames"][0] for s in catalog_row["shots"]}
     minimum, maximum = round(MIN_SECONDS * fps), int(max_seconds * fps)
     overlap = round(OVERLAP_SECONDS * fps)
     window = int(2 * fps)
@@ -142,7 +143,9 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
             break
         options = [c for c in cuts if position + minimum <= c <= position + limit and last - c >= minimum]
         if options:
-            end, following = options[-1], "cut"
+            # a split_at time inside a shot is a seam inside that shot: chained and overlapped like any other
+            end = options[-1]
+            following = "cut" if end in shot_starts else "continuous"
         else:
             # As few pieces as fit up to the next cut out of reach (every seam inside a shot can show), split
             # evenly, each split at the stillest moment near its even position.
