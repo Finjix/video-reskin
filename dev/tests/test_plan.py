@@ -123,20 +123,29 @@ class EditsTests(unittest.TestCase):
 
 
 class RefsTests(unittest.TestCase):
-    def test_subjects_new_in_a_segment_come_first(self):
+    def test_sheets_go_to_the_subjects_that_fill_the_segment_most(self):
         fps = 30.0
         row = {"fps": fps, "scenes": [{"name": "a", "start": 0, "end": 30, "views": [1]},
-                                      {"name": "b", "start": 30, "end": 60, "views": [40]}],
-               "subjects": [{"what": "hunter", "start": 0, "end": 60}, {"what": "cash", "start": 20, "end": 60},
-                            {"what": "truck", "start": 45, "end": 60}],
-               "segments": [{"id": "K01", "render_frames": [0, 450]}, {"id": "K02", "render_frames": [441, 900]},
-                            {"id": "K03", "render_frames": [1200, 1800]}]}
+                                      {"name": "b", "start": 30, "end": 90, "views": [40]}],
+               "subjects": [{"what": "hunter", "start": 0, "end": 90, "box": [0, 0, .1, .1]},
+                            {"what": "cash", "start": 5, "end": 90, "box": [0, 0, .3, .3]},
+                            {"what": "tuna", "start": 0, "end": 90, "box": [0, 0, .1, .2]},
+                            {"what": "belt", "start": 29.5, "end": 90, "box": [0, 0, .8, .8]}],
+               "segments": [{"id": "K01", "seam": "start", "render_frames": [0, 900]},
+                            {"id": "K02", "seam": "continuous", "render_frames": [891, 1800]},
+                            {"id": "K03", "seam": "cut", "render_frames": [1800, 2400]}]}
         plan.assign_refs(row)
-        self.assertEqual(row["segments"][0]["subjects"], [1])
-        self.assertEqual(row["segments"][1]["subjects"], [2, 1])
+        self.assertEqual(row["segments"][0]["subjects"], [2, 3])          # cash and tuna fill K01 most, at most 2
+        self.assertEqual(row["segments"][0]["scenes"], [1, 2])
+        self.assertEqual(row["segments"][1]["subjects"], [4, 1])          # cash and tuna come with the chained frame
         self.assertEqual(row["segments"][1]["scenes"], [1, 2])
-        self.assertEqual(row["segments"][2]["subjects"], [3, 1])          # at most plan.MAX_SHEETS
+        self.assertEqual(row["segments"][2]["subjects"], [4, 2])          # after a cut nothing is carried
         self.assertEqual(row["segments"][2]["scenes"], [2])
+
+    def test_presence_counts_only_the_segment(self):
+        subject = {"start": 10, "end": 40, "box": [.1, .1, .3, .6]}
+        self.assertAlmostEqual(plan.presence(subject, 0, 20), 10 * .2 * .5)
+        self.assertEqual(plan.presence(subject, 50, 60), 0)
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ def chain_frame(job: Path, plan_row: dict, source_id: str, seg: dict) -> Path:
 def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True, chain: bool = True) -> list[dict]:
     """The segment's reference pictures in order: the previous result's frame where this segment begins (when it
     continues a shot), the scene map(s) of the location it shows, then the three-view sheets of the subjects on
-    screen (first seen in this segment first, at most MAX_SHEETS; none when `sheets` is False), at most MAX_PICTURES
+    screen (as plan.assign_refs ranks them, at most MAX_SHEETS; none when `sheets` is False), at most MAX_PICTURES
     in all. `chain` False leaves the previous frame out (its slot stays reserved, so the rest is the same list)."""
     from reskin import refs as REFS
     key = f"{source_id}:{seg['id']}"

@@ -60,7 +60,9 @@ transition or text card covering it) and as few characters as possible stand in 
 2. subjects: every character, animal, vehicle, object or prop that is not visible at the start and comes into view
 during the video (walks in, spawns, is built, pops up, is delivered), and the main characters present from the start
 that move around (the player's character, workers). At most {MAX_SUBJECTS}, the most prominent first. Many identical
-copies (a crowd of the same workers, stacks of the same fish) are one subject. Leave out UI, HUD, numbers, icons,
+copies (a crowd of the same workers, stacks of the same fish) are one subject; different forms of one thing (a
+whole fish and the steaks cut from it, goods and the cash paid for them) are separate subjects, and so are items that
+are produced, carried, piled up or handed over. Leave out UI, HUD, numbers, icons,
 buttons, logos, text and closing-card content, and fixed scenery (that belongs to the scene). For each: a short
 `what` naming it as itself (`lumberjack in a blue winter coat`, `whole tuna`), its `kind`, whether it `appears`
 from_start or later, the span it is on screen (`start`, `end`), a moment `at` where it is fully in view, large,

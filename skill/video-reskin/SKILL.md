@@ -52,6 +52,7 @@ batch without asking; an open question never stops production: take the default 
 | A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
 | Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`whole tuna`, `stacks of green banknotes`) and leave out materials that are not on screen |
 | A survey view is blurred or covered, or a subject crop misses the subject | correct `scenes` / `subjects` for that source in the edits (copy them from `catalog/survey/<id>.json`, change the time or box) |
+| An object that comes into view stays cartoon in a result (cash stacks, food, goods) | it had no sheet in that segment (`reports/plan.md` lists each segment's sheets): add it to `subjects` if the survey missed it, or drop a subject that matters less there, then `plan` again |
 | A subject that does not matter (a background crowd, a one-frame effect) | drop it from `subjects`: every sheet costs a picture and takes a reference slot |
 | Two sources are the same ad in other sizes | `style_from` the first: the second's scene map takes its look from the first's |
 | A scene map shows things that only come later (piles, built or lit objects): segments draw them from the start | move that scene's `views` to early moments, before the place fills up, then `refs --redo <key>` |
@@ -86,7 +87,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    parts, no invented places, nothing that only comes later; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
    rendering: every segment copies them.
 6. `render` edits every segment with Seedance 2.5 (`video_edit`) on Lumos at 1080p: the source clip plus the scene
-   map and at most two sheets of subjects on screen (those first seen in the segment first). A segment that
+   map and at most two sheets of subjects on screen (those that fill the segment most, not counting ones the
+   previous result already drew from a sheet). A subject without a sheet keeps the game's look. A segment that
    continues a shot also gets, as Image 1, the previous segment's result at the moment it begins (cut from that
    result's tail), so it is submitted only after you approved the segment before it: each `render` run renders
    the first segment of every shot (shots and sources side by side) and then, per shot, the next segment after an

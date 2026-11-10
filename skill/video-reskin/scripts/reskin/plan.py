@@ -28,8 +28,8 @@ EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "spli
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
 MAX_SUBJECTS = 8          # subjects one source lists at most
 # The more three-view sheets a segment takes, the more the video model features its subjects (close-ups of its own,
-# dev/VALIDATION.md). A segment takes at most MAX_SHEETS, subjects first seen in it first; only sheets some segment
-# takes are made (refs).
+# dev/VALIDATION.md). A segment takes at most MAX_SHEETS (assign_refs picks them); only sheets some segment takes are
+# made (refs).
 MAX_SHEETS = 2
 
 
@@ -259,16 +259,32 @@ def overlaps(item: dict, start: float, end: float) -> bool:
     return item.get("start", 0) <= end and start <= item.get("end", float("inf"))
 
 
+def presence(subject: dict, start: float, end: float) -> float:
+    """How much of a segment a subject fills: its seconds on screen during start-end times the share of the frame
+    its box covers (at its `at` moment)."""
+    seconds = min(end, subject.get("end", end)) - max(start, subject.get("start", 0))
+    box = subject.get("box") or [0, 0, 1, 1]
+    return max(seconds, 0) * (box[2] - box[0]) * (box[3] - box[1])
+
+
 def assign_refs(row: dict) -> None:
     """Per segment: the scenes it shows (their scene maps go along) and up to MAX_SHEETS subjects on screen during
-    it (their sheets go along), the ones first seen in the segment first."""
+    it (their sheets go along). A subject without a sheet keeps the game's look, and a continuing segment copies that
+    look from the previous result's frame, so the sheets go to the subjects that fill the segment most (`presence`);
+    in a segment that continues a shot, subjects the previous result already drew from a sheet (on screen where this
+    segment begins, so its first frame carries their look) come last."""
     fps = row["fps"]
+    carried: set[int] = set()       # subjects the previous result of this shot drew from a sheet or a carried look
     for seg in row["segments"]:
         start, end = seg["render_frames"][0] / fps, seg["render_frames"][1] / fps
         seg["scenes"] = [k for k, scene in enumerate(row["scenes"], 1) if overlaps(scene, start, end)] or [1]
-        here = [(0 if start <= s.get("start", 0) < end else 1, s.get("start", 0), k)
-                for k, s in enumerate(row["subjects"], 1) if overlaps(s, start, end)]
-        seg["subjects"] = [k for _, _, k in sorted(here)][:MAX_SHEETS]
+        if seg.get("seam") != "continuous":
+            carried = set()
+        here = {k: s for k, s in enumerate(row["subjects"], 1) if overlaps(s, start, end)}
+        carried = {k for k in carried if k in here and here[k].get("start", 0) <= start}
+        ranked = sorted(here, key=lambda k: (k in carried, -presence(here[k], start, end), k))
+        seg["subjects"] = ranked[:MAX_SHEETS]
+        carried |= set(seg["subjects"])
 
 
 def build(job: Path, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:

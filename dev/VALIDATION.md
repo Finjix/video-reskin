@@ -73,6 +73,15 @@ for its whole 28 s, and K02/K03, clean in the previous round, were re-rendered o
 changed (both regressed; three Seedance generations lost). A per-segment `check` on the K03 result found, beside the
 agent's stills, the missing pine forest along the conveyor; stills and the Gemini clip line up with the source.
 
+**Which sheets** (`plan.assign_refs`; GOFCN64128 抢鱼之熊, 2026-11-10, Seedance 2.5). Picked by first appearance,
+K01 took player and tuna (both from 0 s), K02 and K03 the conveyor (on screen 0.2 s of K02) and the player again,
+whose look K02's chained frame already carried; the cash stacks (sheet never made), the salmon steaks (not listed
+by the survey: `materials` text only), the guards and the yellow crowd stayed in the game's look for the whole
+video, the sheeted tuna came out realistic. Hence sheets ranked by seconds on screen times box area, the subjects
+the previous result drew from a sheet last, and the survey listing different forms of one thing (whole fish and
+steaks, goods and cash) and produced or carried items as subjects of their own. With seven subjects and two sheets
+per segment some still go without one: a third sheet with Seedance is not yet tested.
+
 **Known limitation.** Fast-changing HUD counters are redrawn by the video model and may show other digits for a few
 frames.
 
