@@ -48,7 +48,13 @@ def main():
     edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
     launcher(["plan", "--job-dir", str(job), "--edits", str(edits_path)])
     launcher(["refs", "--job-dir", str(job)])
-    launcher(["render", "--job-dir", str(job)])
+    # render, check and approve until every shot is through (the smoke test approves unseen; real runs look first)
+    while True:
+        rendered = launcher(["render", "--job-dir", str(job)])
+        launcher(["check", "--job-dir", str(job)])
+        launcher(["approve", "--job-dir", str(job), "--segment", *[f"S{k:02d}" for k in range(1, len(sources) + 1)]])
+        if " 0 waiting" in rendered.splitlines()[0]:
+            break
     launcher(["assemble", "--job-dir", str(job)])
     review = launcher(["review", "--job-dir", str(job)])
     delivered = sorted(str(p) for p in job.parent.glob("*.mp4"))

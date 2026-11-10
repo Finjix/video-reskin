@@ -1,5 +1,18 @@
 # Review loop
 
+## Segment check (before a shot continues)
+
+A segment that continues a shot is drawn from the previous segment's last frames, so `render` submits it only after
+that segment is approved. After every `render` run, `check` the new results: Gemini watches each one beside its
+source clip (same categories as below), and `review/check/<id>-<Kxx>-a<n>/` holds lossless stills of it every 3 s
+plus the frame the next segment starts from (marked). Look at all of them, the handoff frame above all: leftover
+warning text or logos, a crowd or object that vanished, a wrong material or colour there is copied into the next
+segment. Confirm Gemini's issues on these stills like any other, then `approve --segment <key>` the clean results and
+`redo` the confirmed broken ones (it counts against the same two redos), and `render` again. An approved segment
+keeps its result when a segment before it is redone later; if the seam then shows, `redo` it on its own.
+
+## Whole video
+
 `review` sends Gemini (`gemini-3.8-flash`, media resolution HIGH) the whole video once: the original and the restyled
 video side by side at the delivery's own size (left/right for vertical videos, top/bottom for horizontal ones),
 frame-synchronised, 24 fps, near-lossless (crf 4) with the bitrate capped to fill, not pass, the 256,000,000-byte

@@ -308,5 +308,103 @@ class ChainTests(unittest.TestCase):
         self.assertIn("previous segment S01:K03 failed", [r for r in results if r["key"] == "S01:K04"][0]["error"])
 
 
+class GateTests(unittest.TestCase):
+    """A continuing segment is submitted only after the segment before it is approved, and an approved segment
+    keeps its result when the one before it is redone."""
+    ROW = {"fps": 24, "width": 1080, "height": 1920,
+           "segments": [{"id": k, "seam": seam, "render_frames": [0, 96]}
+                        for k, seam in (("K01", "start"), ("K02", "continuous"), ("K03", "continuous"))]}
+
+    def setUp(self):
+        from reskin import render, lumos
+        self.render, self.lumos = render, lumos
+        self.folder = tempfile.TemporaryDirectory()
+        self.job = Path(self.folder.name)
+        self.previous_frame = {"K02": "frame-a", "K03": "frame-a"}
+        self.submitted = []
+        self.saved = (render.inputs_for, lumos.upload, render.cut_clip)
+
+        def inputs_for(job, state, row, sid, seg, style, chain=True):
+            refs = [{"path": "scene.png", "role": "scene"}]
+            hashes = ["scene-sha"]
+            if render.previous_of(row, seg) and chain:
+                refs.insert(0, {"path": "chain.png", "role": "previous"})
+                hashes.insert(0, self.previous_frame[seg["id"]])
+            return {"source": "src", "frames": [0, 10], "fps": 24, "duration": 4, "pictures": hashes,
+                    "references": refs, "prompt": "p", "model": "m", "resolution": "1080p", "attempt": 1}
+
+        def upload(*args, **kwargs):
+            self.submitted.append(args)
+            raise RuntimeError("submitted")
+        render.inputs_for, lumos.upload = inputs_for, upload
+        render.cut_clip = lambda *args, **kwargs: None
+
+    def tearDown(self):
+        self.render.inputs_for, self.lumos.upload, self.render.cut_clip = self.saved
+        self.folder.cleanup()
+
+    def finish(self, seg_id, generation):
+        """A finished result of `seg_id`, current for the inputs it has now."""
+        seg = next(s for s in self.ROW["segments"] if s["id"] == seg_id)
+        inputs = self.render.inputs_for(self.job, {}, self.ROW, "S01", seg, {})
+        (self.job / "ai").mkdir(exist_ok=True)
+        (self.job / "ai" / f"S01-{seg_id}.mp4").write_bytes(b"x")
+        write_record = {"digest": self.render.core(inputs), "pinned": self.render.core(inputs, pinned=True),
+                        "generation_id": generation, "status": "done"}
+        from reskin.common import write
+        write(self.render.state_path(self.job, f"S01:{seg_id}"), write_record)
+
+    def segment(self, seg_id):
+        return next(s for s in self.ROW["segments"] if s["id"] == seg_id)
+
+    def test_nothing_is_submitted_before_the_previous_segment_is_approved(self):
+        self.finish("K01", "gen-k01")
+        with self.assertRaises(self.render.Waiting):
+            self.render.render_segment(self.job, {}, self.ROW, "S01", self.segment("K02"), {})
+        self.assertEqual(self.submitted, [])
+        self.render.approve(self.job, "S01:K01")
+        state = {"sources": [{"id": "S01", "path": "source.mp4"}]}
+        with self.assertRaises(RuntimeError):
+            self.render.render_segment(self.job, state, self.ROW, "S01", self.segment("K02"), {})
+        self.assertEqual(len(self.submitted), 1)
+
+    def test_an_approved_segment_survives_a_redo_of_the_one_before(self):
+        self.finish("K01", "gen-k01")
+        self.render.approve(self.job, "S01:K01")
+        self.finish("K02", "gen-k02")
+        self.render.approve(self.job, "S01:K02")
+        self.render.bump(self.job, "S01:K01", "warning text left")
+        self.assertFalse(self.render.approved(self.job, "S01:K01"))
+        self.previous_frame["K02"] = "frame-b"          # K01 was drawn again
+        result = self.render.render_segment(self.job, {}, self.ROW, "S01", self.segment("K02"), {})
+        self.assertTrue(result["reused"])
+        self.assertEqual(self.submitted, [])
+
+    def test_an_unapproved_segment_after_a_changed_one_waits(self):
+        self.finish("K01", "gen-k01")
+        self.render.approve(self.job, "S01:K01")
+        self.finish("K02", "gen-k02")                    # rendered, never approved
+        self.render.bump(self.job, "S01:K01", "warning text left")
+        self.finish("K01", "gen-k01-b")
+        self.previous_frame["K02"] = "frame-b"
+        with self.assertRaises(self.render.Waiting):
+            self.render.render_segment(self.job, {}, self.ROW, "S01", self.segment("K02"), {})
+        self.assertEqual(self.submitted, [])
+
+    def test_a_waiting_segment_holds_the_rest_of_its_shot(self):
+        original = self.render.render_segment
+
+        def fake(job, state, row, sid, seg, style):
+            if seg["id"] == "K02":
+                raise self.render.Waiting("waiting for S01:K01")
+            return {"key": f"{sid}:{seg['id']}"}
+        self.render.render_segment = fake
+        try:
+            results = self.render.run_all(self.job, {}, {"sources": {"S01": self.ROW}}, {}, workers=2)
+        finally:
+            self.render.render_segment = original
+        self.assertEqual([bool(r.get("waiting")) for r in results], [False, True, True])
+
+
 if __name__ == "__main__":
     unittest.main()

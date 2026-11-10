@@ -6,8 +6,10 @@ generations still running on Lumos, and renders only what changed or was sent ba
 Each segment gets its source clip, the scene map(s) of the location it shows and the three-view sheets of the
 subjects on screen (refs); the realistic look comes from these pictures. A segment that continues a shot (a
 `continuous` seam) also gets, as Image 1, the previous segment's result at the moment it begins (cut from the tail
-of that result), so both sides of the seam share one drawing: the segments of one shot render one after the other,
-and a redone segment re-renders the segments after it in that shot. Separate shots (camera cuts) and separate sources
+of that result), so both sides of the seam share one drawing. A continuing segment is submitted only once the
+segment before it is approved (`check` it, then `approve` or `redo` it): one flawed result never feeds the next
+generation. An approved segment keeps its result when the segment before it is redone later (the seam goes to
+`assemble` and the review); `redo` it explicitly to draw it again. Separate shots (camera cuts) and separate sources
 render side by side (`--workers` at a time).
 """
 from __future__ import annotations
@@ -42,6 +44,33 @@ def state_path(job: Path, key: str) -> Path:
 def redo_log(job: Path) -> dict:
     path = job / "config/redo.json"
     return read(path) if path.is_file() else {}
+
+
+def approvals(job: Path) -> dict:
+    """{segment key: the generation id the agent approved}."""
+    path = job / "config/approved.json"
+    return read(path) if path.is_file() else {}
+
+
+def approved(job: Path, key: str) -> bool:
+    """The segment's current result is the one the agent approved."""
+    record_path = state_path(job, key)
+    record = read(record_path) if record_path.is_file() else {}
+    return record.get("status") == "done" and bool(record.get("generation_id")) and \
+        approvals(job).get(key) == record["generation_id"]
+
+
+def approve(job: Path, key: str) -> str:
+    """Approve the segment's current result (after `check`); returns its generation id."""
+    record_path = state_path(job, key)
+    record = read(record_path) if record_path.is_file() else {}
+    if record.get("status") != "done":
+        raise ValueError(f"{key} has no finished result to approve; run render first")
+    with _REDO_LOCK:
+        data = approvals(job)
+        data[key] = record["generation_id"]
+        write(job / "config/approved.json", data)
+    return record["generation_id"]
 
 
 def rejected_path(job: Path, key: str) -> Path:
@@ -112,16 +141,17 @@ def chain_frame(job: Path, plan_row: dict, source_id: str, seg: dict) -> Path:
     return output
 
 
-def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True) -> list[dict]:
+def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True, chain: bool = True) -> list[dict]:
     """The segment's reference pictures in order: the previous result's frame where this segment begins (when it
     continues a shot), the scene map(s) of the location it shows, then the three-view sheets of the subjects on
     screen (first seen in this segment first, at most MAX_SHEETS; none when `sheets` is False), at most MAX_PICTURES
-    in all."""
+    in all. `chain` False leaves the previous frame out (its slot stays reserved, so the rest is the same list)."""
     from reskin import refs as REFS
     key = f"{source_id}:{seg['id']}"
     chosen = []
     if previous_of(plan_row, seg):
-        chosen.append({"path": REFS.upload_copy(chain_frame(job, plan_row, source_id, seg)), "role": "previous"})
+        chosen.append({"path": REFS.upload_copy(chain_frame(job, plan_row, source_id, seg)) if chain else None,
+                       "role": "previous"})
     for k in seg.get("scenes") or [1]:
         path = REFS.path_of(job, REFS.scene_key(source_id, k))
         if not path.is_file():
@@ -134,10 +164,12 @@ def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool 
         if not path.is_file():
             raise ValueError(f"{key}: subject sheet {path.name} is missing; run refs first")
         chosen.append({"path": path, "role": "subject", "what": plan_row["subjects"][k - 1]["what"]})
-    return chosen[:MAX_PICTURES]
+    chosen = chosen[:MAX_PICTURES]
+    return chosen if chain else [p for p in chosen if p["role"] != "previous"]
 
 
-def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> dict:
+def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict,
+               chain: bool = True) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     key = f"{source_id}:{seg['id']}"
     redo = redo_log(job).get(key, {})
@@ -145,7 +177,7 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     # model towards close-ups of its subjects)
     path = rejected_path(job, key)
     left = path.is_file() and any(r["round"] == redo.get("redos", 0) for r in read(path))
-    chosen = pictures(job, plan_row, source_id, seg, sheets=not left)
+    chosen = pictures(job, plan_row, source_id, seg, sheets=not left, chain=chain)
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
     prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span, refs=references_clause(style, chosen))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],
@@ -155,22 +187,45 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
             "attempt": redo.get("attempt", 1)}
 
 
-def core(inputs: dict) -> str:
+def core(inputs: dict, pinned: bool = False) -> str:
     """What makes a finished segment current: its pictures, frames, model and attempt. A prompt change alone applies
-    to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly)."""
-    return digest({k: v for k, v in inputs.items() if k not in ("prompt", "references")})
+    to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly). `pinned` leaves
+    out the previous segment's frame: what keeps an approved segment current when the segment before it changes."""
+    kept = {k: v for k, v in inputs.items() if k not in ("prompt", "references")}
+    if pinned:
+        kept["pictures"] = [h for h, p in zip(inputs["pictures"], inputs["references"]) if p["role"] != "previous"]
+    return digest(kept)
+
+
+class Waiting(Exception):
+    """A continuing segment whose previous segment is not approved yet: nothing is submitted."""
 
 
 def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> dict:
+    """Render one segment, or reuse its result. Raises Waiting, before anything is submitted, when it continues a
+    shot and the segment before it is not approved."""
     key = f"{source_id}:{seg['id']}"
     record_path = state_path(job, key)
     record = read(record_path) if record_path.is_file() else {}
-    inputs = inputs_for(job, state, plan_row, source_id, seg, style)
-    want = core(inputs)
     output = job / "ai" / f"{source_id}-{seg['id']}.mp4"
-    if record.get("digest") == want and record.get("status") == "done" and output.is_file():
+    finished = record.get("status") == "done" and output.is_file()
+    if finished and approved(job, key) and record.get("pinned") and \
+            record["pinned"] == core(inputs_for(job, state, plan_row, source_id, seg, style, chain=False), pinned=True):
+        return {**record, "key": key, "reused": True, "prompt_changed": False}
+    previous = previous_of(plan_row, seg)
+    gated = bool(previous) and not approved(job, f"{source_id}:{previous['id']}")
+    try:
+        inputs = inputs_for(job, state, plan_row, source_id, seg, style)
+    except ValueError:
+        if gated:          # the previous segment has no result yet
+            raise Waiting(f"waiting for {source_id}:{previous['id']}: check and approve it first")
+        raise
+    want = core(inputs)
+    if record.get("digest") == want and finished:
         return {**record, "key": key, "reused": True, "prompt_changed": record.get("prompt") != inputs["prompt"]}
     resume = record.get("digest") == want and record.get("generation_id") and record.get("status") in ("submitted", "running")
+    if gated and not resume:
+        raise Waiting(f"waiting for {source_id}:{previous['id']}: check and approve it (or redo it) first")
     source = Path(next(r for r in state["sources"] if r["id"] == source_id)["path"])
     clip = job / "segments" / f"{source_id}-{seg['id']}.mp4"
     if not resume:
@@ -187,7 +242,8 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
                     raise
                 log(f"{key}: submission refused ({error}); retrying in 60 s")
                 time.sleep(60)
-        record = {"digest": want, "generation_id": submitted["generation_id"], "status": "submitted",
+        record = {"digest": want, "pinned": core(inputs, pinned=True), "generation_id": submitted["generation_id"],
+                  "status": "submitted",
                   "references": inputs["references"], "attempt": inputs["attempt"], "prompt": inputs["prompt"],
                   "submitted_at": time.strftime("%H:%M:%S")}
         write(record_path, record)
@@ -265,6 +321,8 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
         for attempt in range(2):
             try:
                 return render_segment(job, state, row, sid, seg, style)
+            except Waiting as reason:
+                return {"key": f"{sid}:{seg['id']}", "waiting": str(reason)}
             except (lumos.GenerationFailed, ResultRejected) as error:
                 if attempt == 0:
                     log(f"{sid}:{seg['id']}: {error}; trying once more")
@@ -273,8 +331,9 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                 return {"key": f"{sid}:{seg['id']}", "error": str(error)}
             except Exception as error:     # the summary lists every failed segment; the rest continue
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
-    # Segments of one shot render one after the other (each takes the previous result's frame where it begins);
-    # shots and sources run side by side. A segment whose previous one failed is not rendered.
+    # Segments of one shot render one after the other (each takes the previous result's frame where it begins), each
+    # only once the one before it is approved; shots and sources run side by side. A segment whose previous one failed
+    # or is still waiting is not rendered.
     chains: list[list] = []
     for item in todo:
         sid, row, seg = item
@@ -290,6 +349,10 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
             if results and results[-1].get("error"):
                 results.append({"key": f"{item[0]}:{item[2]['id']}",
                                 "error": f"not rendered: the previous segment {results[-1]['key']} failed"})
+                continue
+            if results and results[-1].get("waiting"):
+                results.append({"key": f"{item[0]}:{item[2]['id']}",
+                                "waiting": f"waiting for {results[-1]['key']} (not rendered yet)"})
                 continue
             results.append(one(item))
         return results
@@ -320,6 +383,11 @@ def bump(job: Path, key: str, reason: str, prompt: str | None = None, automatic:
         row["reasons"].append(reason)
         if replace:
             row.pop("prompt", None)
+        if not automatic:      # the next result needs its own check
+            approved_path = job / "config/approved.json"
+            kept = read(approved_path) if approved_path.is_file() else {}
+            if kept.pop(key, None) is not None:
+                write(approved_path, kept)
         if prompt and prompt.strip():
             sentences = [s for s in (row.get("prompt") or "").split("\n") if s]
             if prompt.strip() not in sentences:

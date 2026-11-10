@@ -1,6 +1,8 @@
-"""Quality review: Gemini watches the whole original and restyled video side by side once and lists what went wrong;
-the agent looks at stills itself: the whole video every STILL_STEP s and five frames across every seam
-(SEAM_MOMENTS); `frames` cuts stills around a reported time to confirm an issue before a redo."""
+"""Quality review. `check`: each rendered segment on its own, before the next segment of its shot is rendered from
+it (Gemini on the segment beside its source clip, the agent on its stills). `review`: Gemini watches the whole
+original and restyled video side by side once and lists what went wrong; the agent looks at stills itself: the whole
+video every STILL_STEP s and five frames across every seam (SEAM_MOMENTS). `frames` cuts stills around a reported
+time to confirm an issue before a redo."""
 from __future__ import annotations
 
 import os
@@ -63,7 +65,8 @@ SEAM_MOMENTS = (-1.0, -.5, 0.0, .5, 1.0)     # the agent's five frames across ev
 
 def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF) -> Path:
     """Two panels on one clip, each at the delivery's own `size` (Gemini judges the delivered detail) and labelled,
-    side by side for portrait, stacked for landscape. A panel is {"path", "start", "end", "label"}; both share one
+    side by side for portrait, stacked for landscape. A panel is {"path", "start", "end", "label"} and optionally
+    "stretch" (its time is multiplied by it, to put a slightly shorter result on the source's clock); both share one
     clock from their starts. Encoded at `crf` (near-lossless) with the bitrate capped so the clip uses as much of
     INLINE_LIMIT as it needs and no more; a clip that still overshoots is encoded again with a lower cap."""
     width, height = round(size[0] / 2) * 2, round(size[1] / 2) * 2
@@ -71,11 +74,12 @@ def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int 
     inputs, chains, lengths = [], [], []
     for panel in panels:
         start, end = max(0.0, float(panel["start"])), float(panel["end"])
-        lengths.append(max(1 / REVIEW_FPS, end - start))
-        inputs += ["-ss", f"{start:.6f}", "-t", f"{lengths[-1]:.6f}", "-i", str(panel["path"])]
+        stretch = float(panel.get("stretch", 1.0))
+        inputs += ["-ss", f"{start:.6f}", "-t", f"{max(1 / REVIEW_FPS, end - start):.6f}", "-i", str(panel["path"])]
+        lengths.append(max(1 / REVIEW_FPS, end - start) * stretch)
     longest = max(lengths)
     for index, (panel, length) in enumerate(zip(panels, lengths)):
-        chains.append(f"[{index}:v]setpts=PTS-STARTPTS,fps={REVIEW_FPS},scale={width}:{height}:flags=lanczos,setsar=1,"
+        chains.append(f"[{index}:v]setpts=(PTS-STARTPTS)*{float(panel.get('stretch', 1.0)):.6f},fps={REVIEW_FPS},scale={width}:{height}:flags=lanczos,setsar=1,"
                       f"tpad=stop_mode=clone:stop_duration={longest - length + .2:.3f},trim=duration={longest:.6f}"
                       f"{_drawtext(panel['label'])}[p{index}]")
     graph = ";".join(chains) + f";[p0][p1]{'hstack' if portrait else 'vstack'}=inputs=2,format=yuv420p[v]"
@@ -181,7 +185,7 @@ def seam_sheet(job: Path, state: dict, source_id: str, assembled: dict, seam: di
 def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
     other = "right" if layout == "left" else "bottom"
     seams = ", ".join(f"{s['time']:.2f} s ({'hard cut' if s['seam'] == 'cut' else 'inside a shot'})"
-                      for s in assembled["seams"]) or "none"
+                      for s in assembled["seams"])
     removal = describe(plan_row["remove"]) or "nothing named"
     style = job_style(state)
     look = " ".join(part for part in (style.get("look"), style.get("ground")) if part)
@@ -193,9 +197,9 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
         *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if look else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
-        f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "
-        "plain cut or a very short dissolve while the camera moves fast; report it only when a viewer would notice a "
-        "jump in colour, brightness, materials, objects or realism, or a double image.",
+        *([f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "
+           "plain cut or a very short dissolve while the camera moves fast; report it only when a viewer would notice a "
+           "jump in colour, brightness, materials, objects or realism, or a double image."] if seams else []),
         "Report every defect on the RESTYLED side, using the original only as the reference for what should be there. "
         "Do not report flaws that the original shows identically (game physics, clipping already in the original), "
         "and do not report the intended material change itself.",
@@ -310,3 +314,74 @@ def stills(job: Path, state: dict, source_id: str, times: list[float], span: flo
         canvas.save(out, compress_level=1)
         outputs.append(out)
     return outputs
+
+
+def check_segment(job: Path, state: dict, source_id: str, plan_row: dict, seg: dict) -> dict:
+    """Review one rendered segment before anything continues from it: Gemini watches the segment's source clip beside
+    its result once, and the agent gets lossless stills of it every STILL_STEP s plus the frame the next segment of
+    the shot starts from. Times are seconds of the delivered video (source time minus the kept start)."""
+    from reskin import render as RENDER
+    key = f"{source_id}:{seg['id']}"
+    record = read(RENDER.state_path(job, key)) if RENDER.state_path(job, key).is_file() else {}
+    if record.get("status") != "done":
+        raise ValueError(f"{key} has no finished result to check; run render first")
+    source = next(r for r in state["sources"] if r["id"] == source_id)
+    fps = plan_row["fps"]
+    clip = job / "segments" / f"{source_id}-{seg['id']}.mp4"
+    if not clip.is_file():
+        RENDER.cut_clip(Path(source["path"]), seg["render_frames"], fps, plan_row["width"], plan_row["height"], clip)
+    result_path = job / "ai" / f"{source_id}-{seg['id']}.mp4"
+    begin = seg["render_frames"][0] / fps
+    length = (seg["render_frames"][1] - seg["render_frames"][0]) / fps
+    stretch = length / record["ai"]["duration"]
+    size = (record["ai"]["width"], record["ai"]["height"])
+    offset = begin - plan_row["keep"][0]          # clip time -> delivered video time
+    name = f"{source_id}-{seg['id']}-a{record.get('attempt', 1)}"
+    compare = grid_clip([{"path": clip, "start": 0.0, "end": length, "label": "ORIGINAL"},
+                         {"path": result_path, "start": 0.0, "end": record["ai"]["duration"], "label": "RESTYLED",
+                          "stretch": stretch}], size, job / "review/check" / f"{name}.mp4")
+    layout = "left" if size[1] >= size[0] else "top"
+    text = prompt(state, plan_row, {"seams": []}, layout) + (
+        f"\nThis clip is one rendered segment of the video ({offset:.2f}-{offset + length:.2f} s of it); the next "
+        "segment continues from its last frames, so check the end of the clip as closely as the rest.")
+    log(f"{key}: asking Gemini to check the segment ({compare.stat().st_size / 1e6:.1f} MB)")
+    answer = winky.gemini([winky.inline(compare, "video/mp4", fps=winky.sample_fps(length)), {"text": text}],
+                          schema=SCHEMA)
+    issues = []
+    for number, issue in enumerate(answer.get("issues") or [], 1):
+        a, b = float(issue.get("start", 0)), float(issue.get("end", issue.get("start", 0)))
+        issues.append({"n": number, **issue, "start": round(offset + min(a, b), 2), "end": round(offset + max(a, b), 2),
+                       "segments": [seg["id"]], "source": "gemini"})
+    for problem in record.get("problems") or []:
+        issues.append({"n": len(issues) + 1, "start": round(offset, 2), "end": round(offset + length, 2),
+                       "category": "continuity", "severity": "high", "where": "whole frame", "source": "measured",
+                       "segments": [seg["id"]], "description": problem})
+    moments = every(length, STILL_STEP, fps)
+    following = next((s for s in plan_row["segments"]
+                      if (RENDER.previous_of(plan_row, s) or {}).get("id") == seg["id"]), None)
+    handoff = (following["render_frames"][0] - seg["render_frames"][0]) / fps if following else None
+    if handoff is not None and all(abs(handoff - m) > .05 for m in moments):
+        moments = sorted(moments + [round(handoff, 3)])
+    folder = job / "review/check" / name
+    shutil.rmtree(folder, ignore_errors=True)
+    stills_paths = []
+    for number, u in enumerate(moments, 1):
+        t = offset + u
+        tag = " (next segment starts here)" if handoff is not None and abs(u - handoff) <= .05 else ""
+        stills_paths.append(str(still_pair((source["path"], begin + u, f"ORIGINAL {t:.2f} s{tag}"),
+                                           (str(result_path), min(u / stretch, record["ai"]["duration"] - .02),
+                                            f"RESTYLED {t:.2f} s{tag}"), size, folder / f"{number:02d}-{t:07.2f}.png")))
+    verdict = "fail" if (answer.get("verdict") == "fail" or any(i["severity"] == "high" for i in issues)) else "pass"
+    result = {"segment": key, "attempt": record.get("attempt", 1), "generation_id": record["generation_id"],
+              "verdict": verdict, "summary": answer.get("summary", ""), "issues": issues, "compare": str(compare),
+              "stills": stills_paths, "handoff": None if handoff is None else round(offset + handoff, 2),
+              "next": following and f"{source_id}:{following['id']}"}
+    write(job / "reports/check" / f"{name}.json", result)
+    lines = [f"# Check {key} attempt {result['attempt']}: {verdict}", "", result["summary"], ""]
+    lines += [f"- #{i['n']} [{i['severity']}] {i['category']} {i['start']:.2f}-{i['end']:.2f} s ({i.get('where', '')}; "
+              f"{i['source']}): {i['description']}" for i in issues]
+    lines += ["", f"- stills every {STILL_STEP:g} s (lossless; look at every one): {folder} ({len(stills_paths)} pairs)"]
+    if result["next"]:
+        lines.append(f"- {result['next']} starts from this result's frame at {result['handoff']:.2f} s")
+    write_text(job / "reports/check" / f"{name}.md", "\n".join(lines) + "\n")
+    return result

@@ -1,4 +1,5 @@
-"""video-reskin command line: auth/login -> init -> analyze -> survey -> plan -> refs -> render -> assemble -> review."""
+"""video-reskin command line: auth/login -> init -> analyze -> survey -> plan -> refs -> render <-> check/approve ->
+assemble -> review."""
 from __future__ import annotations
 
 import argparse
@@ -177,12 +178,88 @@ def cmd_render(args) -> int:
     from reskin import render as RENDER
     results = RENDER.run_all(job, state, plan, JOB.style(state), selection(args.only), workers=args.workers)
     failed = [r for r in results if r.get("error")]
-    lines = [f"segments: {sum(1 for r in results if not r.get('error'))} ready "
-             f"({sum(1 for r in results if r.get('reused'))} reused), {len(failed)} failed"]
+    waiting = [r for r in results if r.get("waiting")]
+    ready = [r for r in results if not r.get("error") and not r.get("waiting")]
+    unchecked = [r["key"] for r in ready if not RENDER.approved(job, r["key"])]
+    lines = [f"segments: {len(ready)} ready ({sum(1 for r in ready if r.get('reused'))} reused), "
+             f"{len(waiting)} waiting for approval of the segment before them, {len(failed)} failed"]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append("next: " + ("fix the failures and run render again (finished segments are kept)" if failed else "assemble"))
+    lines += [f"  {r['key']}: {r['waiting']}" for r in waiting]
+    if unchecked:
+        lines.append(f"not approved yet: {', '.join(unchecked)}")
+    if failed:
+        step = "fix the failures and run render again (finished segments are kept)"
+    elif waiting:
+        step = (f"check {' '.join(unchecked)}; look at the stills, then approve the good ones or redo the broken ones, "
+                "and run render again for the segments waiting")
+    else:
+        step = "assemble" + (f" (check and approve {', '.join(unchecked)} first if you have not looked at them)"
+                             if unchecked else "")
+    lines.append(f"next: {step}")
     show(lines)
     return RULE_FAILURE if failed else 0
+
+
+def segment_keys(plan: dict, values: list[str] | None, whole: bool = True) -> list[tuple[str, dict, dict]]:
+    """--segment S01:K02 S01 ... -> [(source id, plan row, segment)]; a bare source id means all its segments
+    (`whole`), else it is refused."""
+    picked = []
+    for value in sorted(selection(values) or []):
+        source_id, _, segment_id = value.partition(":")
+        row = plan["sources"].get(source_id)
+        if not row or (segment_id and segment_id not in {s["id"] for s in row["segments"]}) or not (segment_id or whole):
+            raise ValueError(f"unknown segment {value}; segments look like S01:K02 (see reports/plan.md)")
+        picked += [(source_id, row, s) for s in row["segments"] if not segment_id or s["id"] == segment_id]
+    return picked
+
+
+def cmd_check(args) -> int:
+    job = args.job_dir.resolve()
+    state = JOB.load(job)
+    plan = load_plan(job)
+    runtime.ensure("media")
+    from reskin import render as RENDER, review as REVIEW
+    if args.segment:
+        todo = segment_keys(plan, args.segment)
+    else:       # every finished segment not approved yet
+        todo = [(sid, row, s) for sid, row in plan["sources"].items() for s in row["segments"]
+                if RENDER.state_path(job, f"{sid}:{s['id']}").is_file()
+                and read(RENDER.state_path(job, f"{sid}:{s['id']}")).get("status") == "done"
+                and not RENDER.approved(job, f"{sid}:{s['id']}")]
+    if not todo:
+        show(["nothing to check: every finished segment is approved", "next: render (or assemble)"])
+        return 0
+    lines = []
+    for source_id, row, seg in todo:
+        result = REVIEW.check_segment(job, state, source_id, row, seg)
+        lines.append(f"{result['segment']} attempt {result['attempt']}: {result['verdict']}, {len(result['issues'])} "
+                     f"issues: {result['summary']}")
+        lines += [f"  #{i['n']} [{i['severity']}] {i['category']} {i['start']:.2f}-{i['end']:.2f} s: {i['description']}"
+                  for i in result["issues"]]
+        lines.append(f"  stills (every {REVIEW.STILL_STEP:g} s, lossless): {Path(result['stills'][0]).parent} "
+                     f"({len(result['stills'])} pairs)" + (f"; {result['next']} starts from the frame at "
+                                                          f"{result['handoff']:.2f} s" if result["next"] else ""))
+    show(lines + [f"reports: {job / 'reports/check'}",
+                  "next: look at every still yourself; approve --segment <key> what is right, redo --segment <key> "
+                  "what you confirmed broken; then render (the segments after an approved one start)"])
+    return 0
+
+
+def cmd_approve(args) -> int:
+    from reskin import render as RENDER
+    job = args.job_dir.resolve()
+    JOB.load(job)
+    plan = load_plan(job)
+    lines = []
+    whole = {value for value in selection(args.segment) or [] if ":" not in value}
+    for source_id, _, seg in segment_keys(plan, args.segment):
+        key = f"{source_id}:{seg['id']}"
+        record = RENDER.state_path(job, key)
+        if source_id in whole and not (record.is_file() and read(record).get("status") == "done"):
+            continue        # a source ID approves its finished segments
+        lines.append(f"{key}: approved (result {RENDER.approve(job, key)[:8]})")
+    show(lines + ["next: render (the segments continuing from these start), or assemble when all are rendered"])
+    return 0
 
 
 def cmd_assemble(args) -> int:
@@ -268,17 +345,21 @@ def cmd_redo(args) -> int:
     job = args.job_dir.resolve()
     JOB.load(job)
     plan = load_plan(job)
-    keys = sorted(selection(args.segment) or [])
     lines = []
-    for key in keys:
-        source_id, _, segment_id = key.partition(":")
-        row = plan["sources"].get(source_id)
-        if not row or segment_id not in {s["id"] for s in row["segments"]}:
-            raise ValueError(f"unknown segment {key}; segments look like S01:K02 (see reports/plan.md)")
+    for source_id, row, seg in segment_keys(plan, args.segment, whole=False):
+        key = f"{source_id}:{seg['id']}"
         entry = RENDER.bump(job, key, args.reason, args.prompt, replace=args.replace)
-        lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})")
+        kept, current = [], seg
+        for later in row["segments"][row["segments"].index(seg) + 1:]:
+            if (RENDER.previous_of(row, later) or {}).get("id") != current["id"]:
+                break
+            if RENDER.approved(job, f"{source_id}:{later['id']}"):
+                kept.append(f"{source_id}:{later['id']}")
+            current = later
+        lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})"
+                     + (f"; approved later segments keep their results: {', '.join(kept)}" if kept else ""))
     steps = "refs --redo <the broken scene map or sheet>, render" if args.refs else "render"
-    show(lines + [f"next: {steps}, assemble, review"])
+    show(lines + [f"next: {steps}, check the new result, approve it, then render the rest (or assemble, review)"])
     return 0
 
 
@@ -299,19 +380,24 @@ def cmd_status(args) -> int:
         keys = [s["id"] for s in row["segments"]]
         own = [f"scene{k}" for k in range(1, len(row["scenes"]) + 1)] + [f"P{k:02d}" for k in sorted({k for s in row["segments"] for k in s["subjects"]})]
         frames_ready = sum(1 for k in own if (job / "refs" / f"{source_id}-{k}.png").is_file())
-        rendered = 0
+        from reskin import render as RENDER
+        rendered = approved = 0
         for k in keys:
             record = job / "state/render" / f"{source_id}-{k}.json"
             rendered += record.is_file() and read(record).get("status") == "done"
+            approved += RENDER.approved(job, f"{source_id}:{k}")
         assembled = (job / "state/assembled" / f"{source_id}.json").is_file()
         rounds_path = job / "state/review" / f"{source_id}.json"
         rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
         last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
-        lines.append(f"{source_id}: references {frames_ready}/{len(own)}, segments {rendered}/{len(keys)}, "
+        lines.append(f"{source_id}: references {frames_ready}/{len(own)}, segments {rendered}/{len(keys)} "
+                     f"({approved} approved), "
                      f"assembled: {'yes' if assembled else 'no'}, {last}")
         if step is None:
             if frames_ready < len(own):
                 step = "refs"
+            elif rendered > approved:
+                step = "check, then approve or redo"
             elif rendered < len(keys):
                 step = "render"
             elif not assembled:
@@ -382,6 +468,11 @@ def main() -> None:
     frames.add_argument("--source", required=True)
     frames.add_argument("--at", type=float, nargs="+", required=True, help="seconds in the delivered video")
     frames.add_argument("--span", type=float, default=.3)
+    check = command("check", cmd_check, help="review rendered segments on their own before the shot continues from them")
+    check.add_argument("--segment", nargs="*", help="keys like S01:K02 or source IDs (default: every finished segment "
+                                                   "not approved yet)")
+    approve = command("approve", cmd_approve, help="approve checked segments: the segments continuing from them render")
+    approve.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02, or source IDs")
     redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (twice at most)")
     redo.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")

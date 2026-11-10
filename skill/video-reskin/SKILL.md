@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -88,21 +88,28 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
 6. `render` edits every segment with Seedance 2.5 (`video_edit`) on Lumos at 1080p: the source clip plus the scene
    map and at most two sheets of subjects on screen (those first seen in the segment first). A segment that
    continues a shot also gets, as Image 1, the previous segment's result at the moment it begins (cut from that
-   result's tail), so the segments of one shot render one after the other and a redo re-renders the segments after
-   it in that shot; separate shots and sources render side by side. A result that no longer shows the source's
-   camera and layout (more likely with more sheets) is rejected and rendered once more with the scene map only (not
-   counted as a redo).
-7. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
+   result's tail), so it is submitted only after you approved the segment before it: each `render` run renders
+   the first segment of every shot (shots and sources side by side) and then, per shot, the next segment after an
+   approved one, and stops there (`waiting`). A result that no longer shows the source's camera and layout (more
+   likely with more sheets) is rejected and rendered once more with the scene map only (not counted as a redo).
+7. `check` reviews every finished segment not approved yet on its own: Gemini watches it beside its source clip,
+   and you get lossless stills of it every 3 s plus the frame the next segment starts from
+   (`review/check/<id>-<Kxx>-a<n>/`). Look at all of them: a flaw there (leftover text, a vanished crowd, a wrong
+   material) would be copied into every later segment of the shot. `approve --segment <key>` a clean one, `redo`
+   a confirmed broken one, then `render` again; repeat until every segment is rendered and approved. An approved
+   segment keeps its result when the segment before it is redone later (its seam is judged in the review).
+8. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
    source's moments (the few holds or skips this needs go where the picture stands still), matches colours
    across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain
    cut, or with a very light 6-frame dissolve where a cut would show (no other effects at seams: the user's rule),
    joins everything with the source audio and writes `<name>_realistic.mp4` (the style's label) into the delivery
    folder.
-8. `review` has Gemini watch each whole video beside its original, and writes stills for you: the whole video every
+9. `review` has Gemini watch each whole video beside its original, and writes stills for you: the whole video every
    3 s and one five-frame sheet per seam (-1, -0.5, 0, +0.5, +1 s). Look at all of them yourself, confirm every
-   issue on stills (`frames --source <id> --at <t>`), `redo` the confirmed segments (each at most twice), then
-   (`refs` if a picture was redone,) `render`, `assemble`, `review` again.
-9. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, the
+   issue on stills (`frames --source <id> --at <t>`), `redo` the confirmed segments (each at most twice, counting
+   the redos after `check`), then (`refs` if a picture was redone,) `render`, `check`/`approve` the new results,
+   `assemble`, `review` again.
+10. Final summary, in your reply: videos delivered and the folder; per video the kept range, what was removed, the
    segments and seams, review rounds and verdict; issues dismissed (and why) or still open (with times); fallbacks
    taken (survey corrections, picture redos, segment redos).
 
@@ -115,5 +122,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
 3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
 4. **Confirm before redoing.** Gemini can be wrong: look at the stills of every issue before `redo`; redo only
    confirmed segments, never the whole video for a local flaw; never more than twice per segment.
-5. **Delivery folder.** It holds only the finished `.mp4` files and `temp/`. Everything else (edits drafts, stills,
+5. **Approve before continuing.** Never approve a segment you have not looked at on its `check` stills: the next
+   segment of the shot is drawn from it.
+6. **Delivery folder.** It holds only the finished `.mp4` files and `temp/`. Everything else (edits drafts, stills,
    logs) lives in `temp/`; revisions reuse the same folder.

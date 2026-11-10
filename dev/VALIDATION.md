@@ -67,6 +67,12 @@ described as a ground change (2026-11-03). On a small crf-30 proxy it passed a v
 trees, hence near-lossless clips filling up to the 256,000,000-byte inline limit (a 60 s 2160x1920 side-by-side
 clip of about 200 MB was accepted, 2026-11-06).
 
+**Segment gate** (`render.Waiting`, `check`/`approve`; GOFCN64128 抢鱼之熊, 2026-11-10). Without it one `render`
+run chained a whole shot: a K01 redo kept the bottom warning text, K02 was drawn from that frame and kept the text
+for its whole 28 s, and K02/K03, clean in the previous round, were re-rendered only because their chained frame
+changed (both regressed; three Seedance generations lost). A per-segment `check` on the K03 result found, beside the
+agent's stills, the missing pine forest along the conveyor; stills and the Gemini clip line up with the source.
+
 **Known limitation.** Fast-changing HUD counters are redrawn by the video model and may show other digits for a few
 frames.
 

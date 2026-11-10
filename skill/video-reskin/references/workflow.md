@@ -12,11 +12,13 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `survey [--only S01] [--redo]` | Gemini watches each whole source: scene views and subjects (re-boxed on stills) → `catalog/survey/<id>.json`, `catalog/<id>-survey.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot one after the other (each gets the previous result's frame where it begins, `refs/chain/`), shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit at 1080p → `ai/`: the first segment of every shot, and each segment whose previous one in the shot is approved (it gets that result's frame where it begins, `refs/chain/`); the rest report `waiting`; shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
+| `check [--segment K ...]` | each finished segment not approved yet (or the ones named) on its own: Gemini beside its source clip → `reports/check/<id>-<Kxx>-a<n>.md/json`; agent stills every 3 s plus the frame the next segment starts from → `review/check/<id>-<Kxx>-a<n>/` | ~1 min per segment |
+| `approve --segment S01:K02 [...]` | approves the current result of checked segments (a source ID: all its finished segments); the next `render` continues their shots | - |
 | `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime each clip at one constant speed, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
-| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most); `--replace` drops the earlier corrective sentences | - |
+| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most, after `check` or `review`) and drops their approval; approved later segments of the shot keep their results; `--replace` drops the earlier corrective sentences | - |
 | `status` | progress per source and the next step | - |
 
 Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subject sheet `S01:P02`.
@@ -114,7 +116,9 @@ these sheets are made). Edit the edits file, not the plan.
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, 1080p, slightly shorter than the clip);
   `temp/work/` the retimed clips and the dissolves. `temp/state/render/<id>-<Kxx>.json` `follow`: how well the
   result follows the source clip (matched / typical difference of edges and of coarse layouts; both above 0.93 /
-  0.80 means it left the source).
+  0.80 means it left the source). `temp/config/approved.json`: the result (generation) approved per segment.
+- `temp/reports/check/<id>-<Kxx>-a<n>.md/json` and `temp/review/check/<id>-<Kxx>-a<n>/`: each segment's check, per
+  attempt (issues in delivered-video seconds; `handoff`: where the next segment of the shot starts from).
 - `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and
   `local_ratio`: the jump at the switch frame against the ordinary frame change, overall and in the worst region,
   `same`: how far apart both drawings are there, 0-255; a plain cut passes up to 1.15 / 1.2 / 30), `colour` (raw
