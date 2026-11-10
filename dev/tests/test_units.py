@@ -14,55 +14,67 @@ from reskin.common import read, PROMPTS
 class PromptTests(unittest.TestCase):
     def test_compose_fills_every_placeholder(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        row = {"materials": "真实的冰块", "remove": ["游戏logo", "底部警示语"], "extra": "雪地洁白"}
+        row = {"materials": "clear ice blocks", "remove": ["game logo", "warning line at the bottom"],
+               "extra": "Keep the snow white."}
         texts = {"scene": prompts.compose(style, "scene", row, views=3, look_image=4),
-                 "subject": prompts.compose(style, "subject", row, what="猎人", description="蓝色冬装"),
-                 "video": prompts.compose(style, "video", row, extra="鱼不要变形", refs="Image 1 is the map.")}
+                 "subject": prompts.compose(style, "subject", row, what="hunter", description="blue winter coat"),
+                 "video": prompts.compose(style, "video", row, extra="Keep the fish whole.", refs="Image 1 is the map.")}
         for kind, text in texts.items():
             self.assertNotIn("{", text, kind)
         self.assertIn("Images 1 to 3", texts["scene"])
         self.assertIn("Image 4", texts["scene"])
-        self.assertIn("真实的冰块", texts["scene"])
-        self.assertIn("猎人", texts["subject"])
-        self.assertIn("游戏logo, 底部警示语", texts["video"])
-        self.assertIn("鱼不要变形", texts["video"])
+        self.assertIn("clear ice blocks", texts["scene"])
+        self.assertIn("hunter", texts["subject"])
+        self.assertIn("game logo; warning line at the bottom", texts["video"])
+        self.assertIn("Keep the fish whole.", texts["video"])
         self.assertIn("Image 1 is the map.", texts["video"])
         self.assertTrue(texts["video"].startswith("Edit the video: replace the materials of the input video frame for frame"))
 
+    def test_ground_sentence_goes_to_scene_maps_and_videos_not_sheets(self):
+        style = read(PROMPTS)["presets"]["realistic"]
+        row = {"materials": "x"}
+        self.assertIn(style["ground"], prompts.compose(style, "scene", row, views=1, look_image=2))
+        self.assertIn(style["ground"], prompts.compose(style, "video", row))
+        self.assertNotIn(style["ground"], prompts.compose(style, "subject", row, what="a", description="b"))
+        self.assertIn(style["look"], prompts.compose(style, "subject", row, what="a", description="b"))
+
+    def test_video_prompt_keeps_the_inputs_own_cuts(self):
+        style = read(PROMPTS)["presets"]["realistic"]
+        text = prompts.compose(style, "video", {"materials": "x"})
+        self.assertIn("moves and cuts only where the input does", text)
+        self.assertNotIn("continuous", text)
+
     def test_timed_removals_only_where_on_screen(self):
-        items = ["游戏logo", {"what": "底部警示语", "start": 0, "end": 10}, {"what": "右上角水印", "start": 30}]
-        self.assertEqual(prompts.removals(items, (2, 2)), ["游戏logo", "底部警示语"])
-        self.assertEqual(prompts.removals(items, (12, 20)), ["游戏logo"])
-        self.assertEqual(prompts.removals(items, (25, 31)), ["游戏logo", "右上角水印"])
-        self.assertIn("底部警示语 (0-10 s)", prompts.describe(items))
+        items = ["game logo", {"what": "warning line", "start": 0, "end": 10}, {"what": "watermark", "start": 30}]
+        self.assertEqual(prompts.on_screen(items, (2, 2)), ["game logo", "warning line"])
+        self.assertEqual(prompts.on_screen(items, (12, 20)), ["game logo"])
+        self.assertEqual(prompts.on_screen(items, (25, 31)), ["game logo", "watermark"])
+        self.assertIn("warning line (0-10 s)", prompts.describe(items))
 
     def test_timed_materials(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        row = {"materials": ["积雪地面", {"what": "蓝色皮卡车", "start": 50, "end": 66}], "remove": []}
-        self.assertNotIn("皮卡车", prompts.compose(style, "video", row, span=(0, 11)))
-        self.assertIn("积雪地面, 蓝色皮卡车", prompts.compose(style, "video", row, span=(48, 60)))
-        self.assertIn("积雪地面", prompts.compose(style, "video", {"materials": "积雪地面"}, span=(0, 1)))
+        row = {"materials": ["snowy ground", {"what": "blue pickup truck", "start": 50, "end": 66}], "remove": []}
+        self.assertNotIn("pickup truck", prompts.compose(style, "video", row, span=(0, 11)))
+        self.assertIn("snowy ground, blue pickup truck", prompts.compose(style, "video", row, span=(48, 60)))
+        self.assertIn("snowy ground", prompts.compose(style, "video", {"materials": "snowy ground"}, span=(0, 1)))
 
     def test_no_removal_clause_when_empty(self):
         style = read(PROMPTS)["presets"]["realistic"]
         text = prompts.compose(style, "video", {"materials": "x", "remove": []})
-        self.assertNotIn("Remove the", text)
+        self.assertNotIn("Remove these", text)
 
 
 class SizeTests(unittest.TestCase):
     def test_target_sizes(self):
-        self.assertEqual(assemble.target_size(1080, 1920, "1080p"), (1080, 1920))
-        self.assertEqual(assemble.target_size(1920, 1080, "1080p"), (1920, 1080))
-        self.assertEqual(assemble.target_size(3840, 2160, "1080p"), (1920, 1080))
-        self.assertEqual(assemble.target_size(1080, 1350, "1080p"), (1080, 1350))
-        self.assertEqual(assemble.target_size(1080, 1920, "2K"), (1440, 2560))
-        self.assertEqual(assemble.target_size(1920, 1080, "2K"), (2560, 1440))
+        self.assertEqual(assemble.target_size(1080, 1920), (1080, 1920))
+        self.assertEqual(assemble.target_size(1920, 1080), (1920, 1080))
+        self.assertEqual(assemble.target_size(3840, 2160), (1920, 1080))
+        self.assertEqual(assemble.target_size(1080, 1350), (1080, 1350))
 
     def test_image_aspects(self):
         self.assertEqual(images.aspect_for(1920, 1080), "16:9")
         self.assertEqual(images.aspect_for(1080, 1920), "9:16")
         self.assertEqual(images.aspect_for(1080, 3000), "9:16")          # the nearest preset (4K needs one)
-        self.assertEqual(images.aspect_for(1000, 1000 * 2.1, exact=True), "adaptive")
 
 
 class SeamTests(unittest.TestCase):
@@ -71,13 +83,6 @@ class SeamTests(unittest.TestCase):
         rng = np.random.default_rng(seed)
         base = np.kron(rng.uniform(40, 200, (10, 6, 3)), np.ones((6, 6, 1)))    # smooth: small motion per step
         return np.stack([np.roll(base, i, axis=1) for i in range(count)]).astype(np.float32)
-
-    def test_matching_results_are_clean(self):
-        before = self.moving()
-        self.assertEqual(assemble.measure(before, before + 1.0)["verdict"], "clean")
-
-    def test_different_drawings_are_visible(self):
-        self.assertEqual(assemble.measure(self.moving(seed=1), self.moving(seed=2))["verdict"], "visible")
 
     def test_a_cut_passes_where_both_results_match(self):
         before = self.moving(count=12)
@@ -215,12 +220,12 @@ class RedoTests(unittest.TestCase):
             job = Path(folder)
             render.bump(job, "S01:K02", "colour jump")
             render.bump(job, "S01:K02", "automatic retry", automatic=True)
-            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "雪地为白色")["redos"], 2)
+            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "Keep the snow white.")["redos"], 2)
             with self.assertRaises(ValueError):
                 render.bump(job, "S01:K02", "third time")
             row = read(job / "config/redo.json")["S01:K02"]
             self.assertEqual(row["attempt"], 4)
-            self.assertEqual(row["prompt"], "雪地为白色")
+            self.assertEqual(row["prompt"], "Keep the snow white.")
 
     def test_results_that_left_the_source_are_set_aside_per_round(self):
         from reskin import render
@@ -242,12 +247,9 @@ class RedoTests(unittest.TestCase):
         from reskin import render
         with tempfile.TemporaryDirectory() as folder:
             job = Path(folder)
-            render.bump(job, "S01:K01", "fish too early", "收集框保持空的")
+            render.bump(job, "S01:K01", "fish too early", "Keep the collection box empty.")
             self.assertNotIn("prompt", render.bump(job, "S01:K01", "camera moved", replace=True))
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ChainTests(unittest.TestCase):
@@ -261,10 +263,20 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(ids, [None, "K01", None, "K03"])
 
     def test_the_previous_frame_is_described_first(self):
-        from reskin import render
-        text = render.references_clause([{"role": "previous"}, {"role": "scene", "name": "camp"}])
+        style = read(PROMPTS)["presets"]["realistic"]
+        text = prompts.references_clause(style, [{"role": "previous"}, {"role": "scene", "name": "camp"},
+                                                 {"role": "subject", "what": "hunter"}])
         self.assertTrue(text.startswith("Image 1 is the restyled frame where this clip begins"))
-        self.assertIn("Image 2 is the whole location", text)
+        self.assertIn("Image 2: the whole location", text)
+        self.assertIn("Image 3 is a three-view sheet (front, side, back) of hunter", text)
+        self.assertTrue(text.endswith("that the input video does not show."))
+        self.assertNotIn("{", text)
+
+    def test_two_scene_maps_are_named_together(self):
+        style = read(PROMPTS)["presets"]["realistic"]
+        text = prompts.references_clause(style, [{"role": "scene"}, {"role": "scene"}])
+        self.assertTrue(text.startswith("Images 1 and 2: the whole location"))
+        self.assertEqual(prompts.references_clause(style, []), "")
 
     def test_a_shot_renders_in_order_and_stops_after_a_failure(self):
         import threading
@@ -294,3 +306,7 @@ class ChainTests(unittest.TestCase):
         self.assertLess(order.index("K01"), order.index("K02"))
         self.assertNotIn("K04", order)
         self.assertIn("previous segment S01:K03 failed", [r for r in results if r["key"] == "S01:K04"][0]["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()

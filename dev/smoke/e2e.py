@@ -42,7 +42,7 @@ def main():
     job = Path(launcher(["init", "--work-order", "-"], json.dumps(order, ensure_ascii=False)).splitlines()[0].split(": ", 1)[1])
     launcher(["analyze", "--job-dir", str(job)])
     launcher(["survey", "--job-dir", str(job)])
-    edits = {"defaults": {"remove": ["游戏logo「WHITEOUT SURVIVAL」"]}, "sources": {}}
+    edits = {"defaults": {"remove": ['the game logo "WHITEOUT SURVIVAL"']}, "sources": {}}
     edits_path = job / "config" / "edits-smoke.json"
     edits_path.parent.mkdir(parents=True, exist_ok=True)
     edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")

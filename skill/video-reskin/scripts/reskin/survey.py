@@ -45,25 +45,27 @@ def prompt(duration: float, end_card: float | None) -> str:
            "there on." if end_card else "")
     return " ".join(f"""
 This {duration:.1f}-second video is a mobile game ad rendered in 2.5D (a top-down / isometric camera that travels
-over the game world). It will be converted into realistic materials piece by piece, and for that it needs reference
-pictures. Watch the whole video and answer two things.{end}
+over the game world). It will be restyled in segments that share reference pictures: one map of each location and
+one sheet of each subject. Watch the whole video and answer two things.{end} Write every text in English.
 
 1. scenes: the distinct locations the camera shows (usually one; a new one only after a camera cut to a different
-place). For each: a short Chinese `name`, its time span, a one-sentence Chinese `description`, and 3 to 8 `views`:
-moments whose frames, put together, show every part of that location the camera ever passes over (where the camera
-starts, the far ends of its travel, every area revealed later), each with what part it `shows` (Chinese). Pick
-moments where the picture is sharp (the camera momentarily slow, no motion blur), the full frame shows the world
-(no pop-up, menu, transition or text card covering it) and as few characters as possible stand in front.
+place). For each: a short `name`, its time span, a one-sentence `description`, and 3 to 8 `views`: moments whose
+frames, put together, show every part of that location the camera ever passes over (where the camera starts, the far
+ends of its travel, every area revealed later), each with what part it `shows`. Take each area as early as it is
+clearly in view: when the place fills up or changes during the video (things are built, piled up, delivered, unlocked
+or lit), the map must show it as it first looks; what comes later belongs to the subjects. Pick moments where the
+picture is sharp (the camera momentarily slow, no motion blur), the full frame shows the world (no pop-up, menu,
+transition or text card covering it) and as few characters as possible stand in front.
 
 2. subjects: every character, animal, vehicle, object or prop that is not visible at the start and comes into view
 during the video (walks in, spawns, is built, pops up, is delivered), and the main characters present from the start
 that move around (the player's character, workers). At most {MAX_SUBJECTS}, the most prominent first. Many identical
 copies (a crowd of the same workers, stacks of the same fish) are one subject. Leave out UI, HUD, numbers, icons,
 buttons, logos, text and closing-card content, and fixed scenery (that belongs to the scene). For each: a short
-Chinese `what` naming it as itself (`穿蓝色冬装的伐木工人`, `整条的金枪鱼`), its `kind`, whether it `appears`
+`what` naming it as itself (`lumberjack in a blue winter coat`, `whole tuna`), its `kind`, whether it `appears`
 from_start or later, the span it is on screen (`start`, `end`), a moment `at` where it is fully in view, large,
 sharp, unoccluded and not moving fast, and `box_2d` = [ymin, xmin, ymax, xmax] of it at that moment on a 0-1000
-scale of the frame; a one-sentence Chinese `description` of its look (shape, colours, clothing, parts).
+scale of the frame; a one-sentence `description` of its look (shape, colours, clothing, parts).
 
 All times are seconds from the start of the video.""".split())
 
@@ -137,8 +139,8 @@ BOX_SCHEMA = {"type": "OBJECT", "properties": {"found": {"type": "BOOLEAN"},
 
 
 def refine_box(still: Path, subject: dict) -> list[float] | None:
-    """Gemini finds the subject again on the still itself: boxes read off a video are often off by a body width
-    (GOF3D10232, 2026-11-09), boxes on a still image are tight."""
+    """Gemini finds the subject again on the still itself: boxes read off a video are often off by a body width,
+    boxes on a still image are tight."""
     text = (f"Find {subject['what']} ({subject.get('description', '')}) in this frame of a 2.5D game video. If there "
             "are several, take the single most complete, largest and least covered one. found = false if it is not "
             "in the frame. box_2d = [ymin, xmin, ymax, xmax] of the whole of it on a 0-1000 scale, tight around it.")
@@ -160,9 +162,8 @@ def survey_source(job: Path, row: dict, catalog_row: dict) -> dict:
     clip = proxy(source, info, job / "catalog/survey" / f"{row['id']}-proxy.mp4")
     card = (catalog_row.get("end_card") or {}).get("start")
     log(f"{row['id']}: Gemini watches the whole source ({clip.stat().st_size / 1e6:.1f} MB) for scenes and subjects")
-    part = winky.inline(clip, "video/mp4")
-    rate = 4.0 if catalog_row["duration"] <= 75 else 2.0
-    part["videoMetadata"] = {"fps": rate}
+    rate = winky.sample_fps(catalog_row["duration"])
+    part = winky.inline(clip, "video/mp4", fps=rate)
     answer = winky.gemini([part, {"text": prompt(catalog_row["duration"], card)}], schema=SCHEMA)
     result = normalise(answer, catalog_row["duration"])
     for subject in result["subjects"]:      # the moment Gemini saw: its sampled frames lie on a 1/rate grid
@@ -176,21 +177,21 @@ def survey_source(job: Path, row: dict, catalog_row: dict) -> dict:
             subject["video_box"], subject["box"] = subject["box"], box
     result["raw"] = answer
     write(job / "catalog/survey" / f"{row['id']}.json", result)
-    pictures(job, row["id"], source, result)
+    pictures(job, row["id"], source, result, stills)
     return result
 
 
-def pictures(job: Path, source_id: str, source: Path, result: dict) -> Path:
-    """Frames of every view and crops of every subject (catalog/survey/<id>/), and the sheet the agent checks."""
+def pictures(job: Path, source_id: str, source: Path, result: dict, stills: list[Path]) -> Path:
+    """Frames of every view and crops of every subject (from its still) in catalog/survey/<id>/, and the sheet the
+    agent checks."""
     folder = job / "catalog/survey" / source_id
     tiles = []
     for k, scene in enumerate(result["scenes"], 1):
         for t in scene["views"]:
             path = frame(source, t, folder / f"scene{k}-{t:07.2f}.png")
             tiles.append((path, f"scene {k} {scene['name']} view {t:.2f} s"))
-    for k, subject in enumerate(result["subjects"], 1):
-        full = frame(source, subject["at"], folder / f"P{k:02d}-frame.png")
-        path = crop(full, subject["box"], folder / f"P{k:02d}.png")
+    for k, (subject, still) in enumerate(zip(result["subjects"], stills), 1):
+        path = crop(still, subject["box"], folder / f"P{k:02d}.png")
         tiles.append((path, f"P{k:02d} {subject['what']} at {subject['at']:.2f} s"))
     return sheet(job / "catalog" / f"{source_id}-survey.jpg", tiles)
 

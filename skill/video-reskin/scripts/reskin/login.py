@@ -100,8 +100,8 @@ def run(timeout: float = 300, open_image: bool = True) -> dict:
                         data = frame.evaluate(QR_SCRIPT)
                     except Exception:       # the frame reloads while the code refreshes
                         data = None
-                    # The page draws a first code and replaces it within a second (2026-11-09: the user got a dead
-                    # code): pass a code on only once it has stayed the same for two polls.
+                    # The page draws a first code and replaces it within a second (the user got a dead code once):
+                    # pass a code on only once it has stayed the same for two polls.
                     steady = steady + 1 if data and data == candidate else 0
                     candidate = data
                     if data and data != shown and steady >= 2:

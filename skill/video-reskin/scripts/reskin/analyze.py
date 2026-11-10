@@ -14,7 +14,7 @@ OVERLAY = 160         # width of the frames used for overlay detection
 END_WINDOW = 10.0     # an end card starts within this many seconds of the end
 
 
-CJK_FONTS = ("msyh.ttc", "msyhl.ttc", "simhei.ttf", "simsun.ttc")     # labels carry Chinese subject names
+CJK_FONTS = ("msyh.ttc", "msyhl.ttc", "simhei.ttf", "simsun.ttc")     # labels carry Chinese file names
 
 
 def font(size: int):

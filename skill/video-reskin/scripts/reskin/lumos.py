@@ -14,9 +14,8 @@ from reskin import credentials, net
 
 BASE = "https://lumos.diandian.info"
 SERVER = BASE + "/legil/server"
-VIDEO_MODEL = "doubao-seedance-2-5-260628"   # Seedance 2.5 again from 2026-11-10 (MiniMax H3 on 2026-11-09 fell short)
+VIDEO_MODEL = "doubao-seedance-2-5-260628"   # Seedance 2.5
 VIDEO_RESOLUTION = "1080p"          # Seedance 2.5 renders 480p, 720p or 1080p; deliveries are 1080p
-VIDEO_IMAGES = 30                   # reference images Seedance 2.5 takes at most (30 MB each)
 DONE = {"Succeeded", "Failed", "PartiallySucceeded", "Cancelled"}
 _TOKEN = {"value": None, "expires": 0.0}
 _LOCK = threading.Lock()
@@ -110,8 +109,8 @@ def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolutio
     return call("POST", "/generations/video-to-video", body, timeout=120)
 
 
-def submit_image_to_image(images: list[dict], prompt: str, *, model: str, aspect_ratio: str,
-                          resolution: str = "2K", quality: str = "high") -> dict:
+def submit_image_to_image(images: list[dict], prompt: str, *, model: str, aspect_ratio: str, resolution: str,
+                          quality: str) -> dict:
     body = {"reference_images": images, "prompt": prompt, "aspect_ratio": aspect_ratio, "resolution": resolution,
             "quality": quality, "output_format": "png", "background": "opaque", "output_compression": 100,
             "sample_count": 1, "model": model}
@@ -120,14 +119,6 @@ def submit_image_to_image(images: list[dict], prompt: str, *, model: str, aspect
 
 def generation(generation_id: str) -> dict:
     return call("GET", f"/generations/{generation_id}")
-
-
-def cancel(generation_id: str) -> bool:
-    try:
-        call("POST", f"/generations/{generation_id}:cancel")
-        return True
-    except (RuntimeError, net.HttpError):
-        return False
 
 
 def wait(generation_id: str, *, timeout: float = 3600, poll: float = 10, on_poll=None) -> dict:

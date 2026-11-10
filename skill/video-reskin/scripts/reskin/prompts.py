@@ -1,4 +1,5 @@
-"""Prompt texts: the style preset's templates filled with a source's materials, removals and extra wishes."""
+"""Prompt texts: the style preset's templates (assets/prompts.json) filled with a source's materials, removals and
+extra wishes, and the sentences that say what each reference picture is."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,13 +24,15 @@ def on_screen(items, span: tuple[float, float] | None) -> list[str]:
     return list(dict.fromkeys(chosen))
 
 
-removals = on_screen
+def preset_text(style: dict, key: str):
+    """The style's own text for `key`, else the realistic preset's (a custom style may define only some)."""
+    return style.get(key) or read(PROMPTS)["presets"]["realistic"][key]
 
 
 def remove_clause(items: list[str]) -> str:
     if not items:
         return ""
-    return read(PROMPTS)["remove"].format(items=", ".join(items))
+    return read(PROMPTS)["remove"].format(items="; ".join(items))
 
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
@@ -39,11 +42,28 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
     template when it has none); `fields` fill the kind's own placeholders ({views}, {look_image}, {what}...)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())
     materials = ", ".join(on_screen(row.get("materials"), span)) or style["default_materials"]
-    base = style.get(kind) or read(PROMPTS)["presets"]["realistic"][kind]    # custom styles may lack a kind
+    base = preset_text(style, kind)
     template = base if "{refs}" in base or not refs else base + " {refs}"
     text = template.format(materials=materials, remove=remove_clause(on_screen(row.get("remove"), span)),
-                           look=style.get("look", ""), extra=wishes, refs=refs, **fields)
+                           look=style.get("look", ""), ground=style.get("ground", ""), extra=wishes, refs=refs,
+                           **fields)
     return " ".join(text.split())
+
+
+def references_clause(style: dict, chosen: list[dict]) -> str:
+    """What each reference picture of a video edit is for, in order (Image 1, 2, ...): the previous result's frame
+    (role "previous"), scene maps ("scene"), three-view sheets ("subject", with `what`)."""
+    texts = preset_text(style, "references")
+    parts = [texts["previous"].format(n=n) for n, p in enumerate(chosen, 1) if p["role"] == "previous"]
+    scenes = [n for n, p in enumerate(chosen, 1) if p["role"] == "scene"]
+    if scenes:
+        images = (f"Image {scenes[0]}" if len(scenes) == 1
+                  else "Images " + ", ".join(map(str, scenes[:-1])) + f" and {scenes[-1]}")
+        parts.append(texts["scene"].format(images=images))
+    parts += [texts["subject"].format(n=n, what=p["what"]) for n, p in enumerate(chosen, 1) if p["role"] == "subject"]
+    if parts:
+        parts.append(texts["closing"])
+    return " ".join(parts)
 
 
 def describe(items) -> str:

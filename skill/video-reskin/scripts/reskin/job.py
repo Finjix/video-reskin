@@ -1,7 +1,6 @@
 """Job creation and state: the work order, the sources and the delivery folder."""
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,12 +8,8 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
-DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-RESOLUTION = "1080p"       # deliveries: 1080 on the short side, Seedance 2.5's largest size (2026-11-10)
-RENDER_RESOLUTIONS = ("1080p", "720p")  # what Seedance 2.5 renders at (1080p by default, as delivered)
-# Segments as long as Seedance 2.5 takes (30 s); seams inside a shot go where the camera moves fast (plan).
-DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "render_resolution": "1080p", "max_segment_seconds": 30.0,
-            "fps": 24, "remove_end_card": True}
+RENDER_RESOLUTIONS = ("1080p", "720p")  # what Seedance 2.5 renders at; deliveries are 1080p either way
+DEFAULTS = {"style": "realistic", "render_resolution": "1080p", "max_segment_seconds": 30.0, "fps": 24}
 
 
 def presets() -> dict:
@@ -47,15 +42,13 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     style = order.get("style") or options["style"]
     if isinstance(style, str) and style not in presets():
         raise ValueError(f"unknown style preset {style}; known: {sorted(presets())} (or give style as an object with "
-                         "label, goal, scene, subject and video prompts)")
-    if options["resolution"] != RESOLUTION:
-        raise ValueError(f"options.resolution is fixed at {RESOLUTION} (leave it out)")
+                         "label, look, default_materials and scene, subject and video prompts)")
     if options["render_resolution"] not in RENDER_RESOLUTIONS:
         raise ValueError(f"options.render_resolution must be one of {', '.join(RENDER_RESOLUTIONS)} (default 1080p)")
     if not 12 <= float(options["fps"]) <= 30:
         raise ValueError("options.fps must be between 12 and 30 (default 24, the rate Seedance renders at)")
     if not 4 <= float(options["max_segment_seconds"]) <= 30:
-        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance 2.5 edits 4-30 s clips)")
+        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance 2.5 edits clips of up to 30 s)")
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent
@@ -92,10 +85,3 @@ def load(job: Path) -> dict:
 def style(state: dict) -> dict:
     value = state["style"]
     return presets()[value] if isinstance(value, str) else value
-
-
-def source(state: dict, source_id: str) -> dict:
-    for row in state["sources"]:
-        if row["id"] == source_id:
-            return row
-    raise ValueError(f"unknown source {source_id}; known: {', '.join(r['id'] for r in state['sources'])}")

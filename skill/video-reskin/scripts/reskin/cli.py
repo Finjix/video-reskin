@@ -128,12 +128,12 @@ def cmd_plan(args) -> int:
     catalog = read(catalog_path)
     stored = job / "config/edits.json"
     if args.edits:
-        edits = PLAN.check_edits(read(args.edits), state, catalog)
+        edits = PLAN.check_edits(read(args.edits), catalog)
         write(stored, edits)
     else:
         edits = read(stored) if stored.is_file() else {"defaults": {}, "sources": {}}
     missing = [r["id"] for r in catalog["sources"] if r["id"] not in edits["sources"]]
-    plan = PLAN.build(job, state, edits, catalog, JOB.style(state), float(state["options"]["max_segment_seconds"]))
+    plan = PLAN.build(job, edits, catalog, JOB.style(state), float(state["options"]["max_segment_seconds"]))
     lines = []
     for source_id, row in plan["sources"].items():
         cuts = sum(1 for s in row["segments"] if s["seam"] == "cut")
@@ -206,7 +206,7 @@ def cmd_assemble(args) -> int:
         checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['mode']} (jump {s['ratio']} / region "
                             f"{s['local_ratio']} of the frame change, drawings {s['same']} apart)"
                             for s in result["seams"] if "mode" in s)
-        warped = ", ".join(f"{t['segment']} x{t.get('speed', 1)} ({t.get('held', 0)} held/{t.get('skipped', 0)} "
+        warped = ", ".join(f"{t['segment']} x{t['speed']} ({t['held']} held/{t['skipped']} "
                            f"skipped where it stands still)" for t in result["timing"])
         if warped:
             colour = (colour + "; " if colour else "") + "retimed: " + warped

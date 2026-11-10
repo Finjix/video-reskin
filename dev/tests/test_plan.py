@@ -1,5 +1,5 @@
-"""Segmentation: Seedance 2.5's 4-30 s clips (no whole-second padding), seams on cuts or fast camera moves, overlaps only inside shots;
-edits validation; scenes and subjects per segment."""
+"""Segmentation: Seedance 2.5's clips of up to 30 s (4 s at least, no whole-second padding), seams on cuts or fast
+camera moves, overlaps only inside shots; edits validation; scenes and subjects per segment."""
 import unittest
 
 from reskin import plan
@@ -80,42 +80,42 @@ class EditsTests(unittest.TestCase):
     def test_rejects_bad_keep_and_unknown_sources(self):
         catalog = {"sources": [catalog_row()]}
         with self.assertRaises(ValueError):
-            plan.check_edits({"sources": {"S01": {"keep": [10, 5]}}}, {}, catalog)
+            plan.check_edits({"sources": {"S01": {"keep": [10, 5]}}}, catalog)
         with self.assertRaises(ValueError):
-            plan.check_edits({"sources": {"S01": {"keep": [10, 12]}}}, {}, catalog)    # shorter than the 4 s a render lasts at least
+            plan.check_edits({"sources": {"S01": {"keep": [10, 12]}}}, catalog)    # shorter than the 4 s a render lasts at least
         with self.assertRaises(ValueError):
-            plan.check_edits({"sources": {"S09": {}}}, {}, catalog)
-        with self.assertRaisesRegex(ValueError, "anchor"):
-            plan.check_edits({"sources": {"S01": {"anchor": 3}}}, {}, catalog)
+            plan.check_edits({"sources": {"S09": {}}}, catalog)
+        with self.assertRaisesRegex(ValueError, "unknown key anchor"):
+            plan.check_edits({"sources": {"S01": {"anchor": 3}}}, catalog)
 
     def test_timed_removal_items(self):
         catalog = {"sources": [catalog_row()]}
-        plan.check_edits({"sources": {"S01": {"remove": [{"what": "logo", "start": 1, "end": 5}]}}}, {}, catalog)
+        plan.check_edits({"sources": {"S01": {"remove": [{"what": "logo", "start": 1, "end": 5}]}}}, catalog)
         for bad in ([{"what": "logo", "start": 5, "end": 1}], [{"text": "logo"}], ["  "], "logo"):
             with self.assertRaises(ValueError):
-                plan.check_edits({"sources": {"S01": {"remove": bad}}}, {}, catalog)
+                plan.check_edits({"sources": {"S01": {"remove": bad}}}, catalog)
 
     def test_scenes_and_subjects(self):
         catalog = {"sources": [catalog_row()]}
-        good = {"scenes": [{"name": "营地", "start": 0, "end": 60, "views": [1, 20, 40]}],
-                "subjects": [{"what": "猎人", "kind": "character", "start": 0, "end": 60, "at": 7.5,
+        good = {"scenes": [{"name": "camp", "start": 0, "end": 60, "views": [1, 20, 40]}],
+                "subjects": [{"what": "hunter", "kind": "character", "start": 0, "end": 60, "at": 7.5,
                               "box": [.3, .4, .5, .6]}]}
-        plan.check_edits({"sources": {"S01": good}}, {}, catalog)
+        plan.check_edits({"sources": {"S01": good}}, catalog)
         for bad in ({"scenes": []}, {"scenes": [{"name": "x", "views": [99]}]},
                     {"subjects": [{"what": "x", "at": 1, "box": [.5, .5, .4, .6]}]},
                     {"subjects": [{"what": "x", "kind": "spaceship", "at": 1, "box": [.1, .1, .2, .2]}]}):
             with self.assertRaises(ValueError):
-                plan.check_edits({"sources": {"S01": bad}}, {}, catalog)
+                plan.check_edits({"sources": {"S01": bad}}, catalog)
 
     def test_defaults_merge_and_survey_trimmed_to_keep(self):
         catalog = {"sources": [catalog_row()]}
-        edits = plan.check_edits({"defaults": {"remove": ["底部警示语"]},
-                                  "sources": {"S01": {"remove": ["游戏logo"], "keep": [0, 30]}}}, {}, catalog)
-        survey = {"scenes": [{"name": "营地", "start": 0, "end": 60, "views": [1, 20, 45]}],
+        edits = plan.check_edits({"defaults": {"remove": ["warning line"]},
+                                  "sources": {"S01": {"remove": ["game logo"], "keep": [0, 30]}}}, catalog)
+        survey = {"scenes": [{"name": "camp", "start": 0, "end": 60, "views": [1, 20, 45]}],
                   "subjects": [{"what": "a", "start": 0, "end": 60, "at": 50, "box": [0, 0, .1, .1]},
                                {"what": "b", "start": 40, "end": 60, "at": 45, "box": [0, 0, .1, .1]}]}
         row = plan.source_edits(edits, "S01", catalog["sources"][0], {"default_materials": "x"}, survey)
-        self.assertEqual(row["remove"], ["底部警示语", "游戏logo"])
+        self.assertEqual(row["remove"], ["warning line", "game logo"])
         self.assertEqual(row["keep"], [0.0, 30.0])
         self.assertEqual(row["materials"], "x")
         self.assertEqual(row["scenes"][0]["views"], [1, 20])

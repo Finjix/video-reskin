@@ -1,4 +1,4 @@
-"""Reference pictures every segment of a source shares (they replace per-segment keyframes and chained frames):
+"""Reference pictures the segments of a source share:
 
 - one scene map per scene: GPT Image joins the survey's view frames into one big overview of the whole location in
   realistic materials (4K, quality high), with the look taken from the style's reference picture (or, for a sister
@@ -6,8 +6,8 @@
 - one three-view sheet per subject (front, side, back; 1K, quality medium) for the characters, objects and props
   that come into view during the video, drawn at the scene map's realism.
 
-Every segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so segments
-rendered apart look alike and render side by side.
+Every segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so the same place
+and the same subject look alike in every segment.
 """
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ from reskin.common import digest, log, read, sha, write
 from reskin.prompts import compose, reference
 from reskin.survey import crop, frame
 
-# Lumos fetches every reference picture from storage with a short timeout: a 20 MB 4K PNG timed out (2026-11-09),
-# so larger pictures go as JPEG, and a scene map that only sets the look of a subject sheet goes reduced.
+# Lumos fetches every reference picture from storage with a short timeout (a 20 MB 4K PNG timed out), so larger
+# pictures go as JPEG, and a scene map that only sets the look of a subject sheet goes reduced.
 UPLOAD_LIMIT = 8_000_000     # bytes
 LOOK_SIZE = 2048             # long side of a scene map sent as a look reference
 
@@ -128,7 +128,6 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
     stem = task["key"].replace(":", "-")
     if task["kind"] == "scene":
         views = [frame(source, t, folder / "inputs" / f"{stem}-view{n}.png") for n, t in enumerate(item["views"], 1)]
-        look = None
         if row.get("style_from"):
             other = path_of(job, scene_key(row["style_from"], 1))
             if not other.is_file():

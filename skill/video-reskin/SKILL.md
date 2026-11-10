@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each continuing one chained to the previous result's last frame, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -17,11 +17,13 @@ description: Batch-restyle 2.5D (top-down) game videos, by default into realisti
   can be re-run and redoes only what changed; `render` also resumes generations still running on Lumos.
 - `render` takes minutes per segment (Seedance renders on Lumos, 4 at a time) and prints a heartbeat every 2 minutes. Run
   it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`.
-- The scripts do all media work, segmentation, retiming, colour matching, seam masking and calls to the models. Your
+- The scripts do all media work, segmentation, retiming, colour matching, seams and calls to the models. Your
   part is editorial: where each video stops, what is on screen, what to remove, checking the survey and the
   reference pictures, and confirming review findings on stills. Never write scripts that call Lumos, Winky or FFmpeg
   yourself.
-- Files you write (work order, edits) are JSON; texts inside them are Chinese. Reply in the user's language.
+- Files you write (work order, edits) are JSON. Every text that reaches a model prompt (`materials`, `remove`,
+  `extra`, `scenes`/`subjects` names, `redo --prompt`) is English, like the prompts themselves. Reply in the user's
+  language.
 
 ## Credentials (first)
 
@@ -46,12 +48,13 @@ batch without asking; an open question never stops production: take the default 
 | Situation | Default |
 | --- | --- |
 | End card start unclear | the last frame before the transition into it (wipe, flash, blur, logo zoom); judge from `<id>-end.jpg` |
-| A logo that moves between corners | one `remove` item naming the logo and its text, e.g. `游戏logo「WHITEOUT SURVIVAL」` |
+| A logo that moves between corners | one `remove` item naming the logo and its text, e.g. `the game logo "WHITEOUT SURVIVAL"` |
 | A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
-| Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`整条的金枪鱼`, `绿色的纸币堆`) and leave out materials that are not on screen |
+| Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`whole tuna`, `stacks of green banknotes`) and leave out materials that are not on screen |
 | A survey view is blurred or covered, or a subject crop misses the subject | correct `scenes` / `subjects` for that source in the edits (copy them from `catalog/survey/<id>.json`, change the time or box) |
 | A subject that does not matter (a background crowd, a one-frame effect) | drop it from `subjects`: every sheet costs a picture and takes a reference slot |
 | Two sources are the same ad in other sizes | `style_from` the first: the second's scene map takes its look from the first's |
+| A scene map shows things that only come later (piles, built or lit objects): segments draw them from the start | move that scene's `views` to early moments, before the place fills up, then `refs --redo <key>` |
 | A scene map invents places, keeps cartoon parts, characters, UI or text; a sheet changes the subject | adjust `materials`/`extra` or the views/box, then `refs --redo <key>` (at most twice, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
 | A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` about the look (at most two redos per segment); a sentence about where objects are can make the video model move its camera: on the next redo drop it with `--replace` |
@@ -80,19 +83,21 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
 5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality high: the views joined into one overview of the
    whole location, realistic, no characters, UI or text) and one three-view sheet per subject (1K, quality medium).
    Look at every `sheets/<id>-refs.png`: the map keeps the layout of the views, realistic materials, no cartoon
-   parts, no invented places; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
+   parts, no invented places, nothing that only comes later; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
    rendering: every segment copies them.
 6. `render` edits every segment with Seedance 2.5 (`video_edit`) on Lumos at 1080p: the source clip plus the scene
    map and at most two sheets of subjects on screen (those first seen in the segment first). A segment that
    continues a shot also gets, as Image 1, the previous segment's result at the moment it begins (cut from that
    result's tail), so the segments of one shot render one after the other and a redo re-renders the segments after
-   it in that shot; separate shots and sources render side by side. A result that no longer shows the source's camera and layout (more likely
-   with more sheets) is rejected and rendered once more by itself with the scene map only (not counted as a redo).
+   it in that shot; separate shots and sources render side by side. A result that no longer shows the source's
+   camera and layout (more likely with more sheets) is rejected and rendered once more with the scene map only (not
+   counted as a redo).
 7. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
    source's moments (the few holds or skips this needs go where the picture stands still), matches colours
    across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain
    cut, or with a very light 6-frame dissolve where a cut would show (no other effects at seams: the user's rule),
-   joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
+   joins everything with the source audio and writes `<name>_realistic.mp4` (the style's label) into the delivery
+   folder.
 8. `review` has Gemini watch each whole video beside its original, and writes stills for you: the whole video every
    3 s and one five-frame sheet per seam (-1, -0.5, 0, +0.5, +1 s). Look at all of them yourself, confirm every
    issue on stills (`frames --source <id> --at <t>`), `redo` the confirmed segments (each at most twice), then

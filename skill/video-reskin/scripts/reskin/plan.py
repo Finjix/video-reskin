@@ -1,10 +1,10 @@
 """The agent's edits (kept range, materials, what to remove, scenes and subjects) and the segment plan built from them.
 
-Seedance 2.5 edits clips of 4-30 s, so each kept range is cut into segments of at most 30 s: at camera cuts
-where possible (a hard cut hides the seam), otherwise inside a shot at the moment the camera moves fastest (or the
-picture jumps anyway: a flash, a burst, a whip pan), where `assemble` joins them with a plain cut (or a very light
-dissolve where a cut would show). Segments do not depend on each other: every one gets the same scene map and subject sheets (refs), so
-they render side by side and a redo re-renders only itself.
+Seedance 2.5 edits clips of 2-30 s, so each kept range is cut into segments of at most 30 s: at camera cuts where
+possible (a hard cut hides the seam), otherwise inside a shot at the moment the camera moves fastest (or the picture
+jumps anyway: a flash, a burst, a whip pan), where `assemble` joins them with a plain cut (or a very light dissolve
+where a cut would show). Every segment takes the scene map of its location and at most MAX_SHEETS three-view sheets
+(refs); a segment that continues a shot also takes the previous result's frame where it begins (render).
 
 Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side); a render shorter than
 MIN_RENDER is padded to it; `assemble` trims the padding.
@@ -27,9 +27,9 @@ EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "spli
              "scenes", "subjects"}
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
 MAX_SUBJECTS = 8          # subjects one source lists at most
-# Three-view sheets make the video model feature its subjects (seen with MiniMax H3): with 4 sheets K01 of GOF3D10232 cut to a close-up of its own in
-# three of four attempts, with the scene map alone it kept the source's camera (2026-11-09). A segment takes at most
-# MAX_SHEETS, subjects first seen in it first; only sheets some segment takes are made (refs).
+# The more three-view sheets a segment takes, the more the video model features its subjects (close-ups of its own,
+# dev/VALIDATION.md). A segment takes at most MAX_SHEETS, subjects first seen in it first; only sheets some segment
+# takes are made (refs).
 MAX_SHEETS = 2
 
 
@@ -86,7 +86,7 @@ def subjects_problem(subjects, duration: float) -> str | None:
     return None
 
 
-def check_edits(value: dict, state: dict, catalog: dict) -> dict:
+def check_edits(value: dict, catalog: dict) -> dict:
     """Validate the edits file against the catalog; returns it normalised."""
     if not isinstance(value, dict) or not isinstance(value.get("sources", {}), dict):
         raise ValueError('edits must look like {"defaults": {...}, "sources": {"S01": {...}}}')
@@ -106,8 +106,7 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
             problems.append(f"{source_id}: not a source of this job")
             continue
         for key in set(row) - EDIT_KEYS:
-            problems.append(f"{source_id}: unknown key {key}" + (" (anchor frames are gone: the scene map sets the "
-                                                                  "look)" if key == "anchor" else ""))
+            problems.append(f"{source_id}: unknown key {key}")
         duration = known[source_id]["duration"]
         keep = row.get("keep")
         if keep is not None:
@@ -115,7 +114,7 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
                     or not 0 <= keep[0] < keep[1] <= duration + .05):
                 problems.append(f"{source_id}: keep must be [start, end] seconds inside 0-{duration:.2f}")
             elif keep[1] - keep[0] < MIN_RENDER:
-                problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (Seedance renders 4 s at least)")
+                problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (the shortest render)")
         if "extra" in row and not isinstance(row["extra"], str):
             problems.append(f"{source_id}: extra must be text")
         if "materials" in row and not isinstance(row["materials"], str) and items_problem(row["materials"], "materials"):
@@ -164,7 +163,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict, su
         {"name": "scene", "start": 0.0, "end": catalog_row["duration"], "views": [round((keep[0] + keep[1]) / 2, 2)]}]
     subjects = row.get("subjects") if "subjects" in row else (survey.get("subjects") or [])
     # only what the kept range shows: views and sheets of the rest cost money and add places nobody sees
-    inside = lambda item: on_screen(item, keep[0], keep[1])
+    inside = lambda item: overlaps(item, keep[0], keep[1])
     trimmed = []
     for scene in filter(inside, scenes):
         views = [t for t in scene["views"] if keep[0] <= t <= keep[1]] or scene["views"]
@@ -255,7 +254,8 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     return segments
 
 
-def on_screen(item: dict, start: float, end: float) -> bool:
+def overlaps(item: dict, start: float, end: float) -> bool:
+    """Whether a scene or subject (with start/end seconds) is on screen during start-end."""
     return item.get("start", 0) <= end and start <= item.get("end", float("inf"))
 
 
@@ -265,13 +265,13 @@ def assign_refs(row: dict) -> None:
     fps = row["fps"]
     for seg in row["segments"]:
         start, end = seg["render_frames"][0] / fps, seg["render_frames"][1] / fps
-        seg["scenes"] = [k for k, scene in enumerate(row["scenes"], 1) if on_screen(scene, start, end)] or [1]
+        seg["scenes"] = [k for k, scene in enumerate(row["scenes"], 1) if overlaps(scene, start, end)] or [1]
         here = [(0 if start <= s.get("start", 0) < end else 1, s.get("start", 0), k)
-                for k, s in enumerate(row["subjects"], 1) if on_screen(s, start, end)]
+                for k, s in enumerate(row["subjects"], 1) if overlaps(s, start, end)]
         seg["subjects"] = [k for _, _, k in sorted(here)][:MAX_SHEETS]
 
 
-def build(job: Path, state: dict, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:
+def build(job: Path, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:
     plan = {"sources": {}}
     for row in catalog["sources"]:
         survey_path = job / "catalog/survey" / f"{row['id']}.json"

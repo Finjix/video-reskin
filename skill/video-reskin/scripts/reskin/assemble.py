@@ -1,21 +1,18 @@
 """Put the restyled segments back on the source's clock and hide the seams.
 
-1. Retime: a video model's result need not keep the source's length or pace (Seedance 2.5 returns clips slightly
-   short at an even pace; MiniMax H3, 2026-11-09, GOF3D10232: a 6 s clip came back 6.58 s long, on time for 2.5 s,
-   then half a second slow), so a plain stretch can drift. Every output frame is
-   matched to the result frame showing the same moment (dynamic time warping on edge maps), and the clip is
-   rewritten frame by frame at the output rate and size.
+1. Retime: a result need not keep the source's length or pace exactly (Seedance 2.5 returns clips slightly short),
+   so every clip plays at one constant speed whose ends are pinned to the source's moments at its seams (found by
+   matching edge maps); the few holds or skips this needs go where the picture stands still.
 2. Colours: gain/offset per clip so colours meet across every seam inside a shot (least squares per run).
 3. Seams: at a camera cut the clips are simply joined. Inside a shot (where the camera moves fast, plan) both
    results cover an overlap; the switch goes to the frame there where the jump from the one to the other is
    smallest. When that jump is no larger than the picture's ordinary change from frame to frame there, and the two
    drawings are close, it is a plain cut; otherwise a very light dissolve over DISSOLVE_SECONDS, nothing more (the
-   user's rule, 2026-11-09: no effects at seams unless needed, then only a slight dissolve).
+   user's rule: no effects at seams unless needed, then only a slight dissolve).
 4. Join with the source's own audio of the kept range.
 """
 from __future__ import annotations
 
-import math
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,29 +24,27 @@ from reskin.common import FFMPEG, log, read, run, video_info, write
 GAIN_LIMITS = (.8, 1.25)
 OFFSET_LIMIT = 40.0
 GRID = (10, 6)              # rows, columns of the regions a seam is measured in
-SEAM_EXCESS = 6.0           # switch difference minus motion, 0-255
-SEAM_RATIO = 2.5            # switch difference / motion
-SEAM_LOCAL = 30.0           # largest region difference, 0-255 (and SEAM_RATIO times that region's own motion)
 DISSOLVE_SECONDS = .25      # the light dissolve when a plain cut would show (6 frames at 24 fps)
 # A plain cut passes when the jump at the cut frame is at most CUT_RATIO times the ordinary frame-to-frame change
-# (CUT_LOCAL for the worst region) and the two drawings differ by at most CUT_SAME levels at that moment.
-# GOF3D10232 (2026-11-09): a cut at 1.00 / 0.99 / 24 showed only a block popping in; one at 1.14 / 1.05 / 49 jumped
-# in brightness and drawing.
+# (CUT_LOCAL for the worst region) and the two drawings differ by at most CUT_SAME levels at that moment. Measured:
+# a cut at 1.00 / 0.99 / 24 showed only a block popping in; one at 1.14 / 1.05 / 49 jumped in brightness and drawing.
 CUT_RATIO = 1.15
 CUT_LOCAL = 1.2
 CUT_SAME = 30.0
 SEAM_WIDTH = 192            # width of the frames seams are judged on
 SEAM_REVIEW = 45.0          # drawings this far apart at a dissolved seam go to the review as an issue
+COLOUR_REVIEW = 6.0         # a colour residual above this after matching goes to the review as an issue
+SHORT_SIDE = 1080           # deliveries: 1080 on the short side (Seedance 2.5's largest render size)
 FEATURE = (48, 84)          # width, height of the edge maps clips are aligned on (portrait; swapped for landscape)
 WARP_BAND = 1.5             # seconds a result may run ahead of or behind the source
 WARP_STEP = .08             # extra cost (share of the median frame difference) of holding or skipping a frame
 
 
-def target_size(width: int, height: int, resolution: str) -> tuple[int, int]:
-    short = {"2K": 1440, "1080p": 1080}.get(resolution, 720)      # 1080p: jobs made before 2026-11-09
+def target_size(width: int, height: int) -> tuple[int, int]:
+    """The delivery size: SHORT_SIDE on the short side, the source's aspect, even dimensions."""
     if width >= height:
-        return round(short * width / height / 2) * 2, short
-    return short, round(short * height / width / 2) * 2
+        return round(SHORT_SIDE * width / height / 2) * 2, SHORT_SIDE
+    return SHORT_SIDE, round(SHORT_SIDE * height / width / 2) * 2
 
 
 def timeline(row: dict, out_fps: float) -> list[dict]:
@@ -101,14 +96,15 @@ def structure_maps(path: Path, size: tuple[int, int] = (16, 28), fps: float | No
 
 
 FOLLOW_EDGES = .93          # matched / typical difference of edge maps above which a result may have left the source
-FOLLOW_STRUCTURE = .80      # ... and of coarse layouts. GOF3D10232 (2026-11-09): results that followed 0.71-0.92 /
-                            # 0.50-0.61; one that cut to a close-up of its own 0.976 / 0.89
+FOLLOW_STRUCTURE = .80      # ... and of coarse layouts. Measured: results that followed 0.71-0.92 / 0.50-0.61; one
+                            # that cut to a close-up of its own 0.976 / 0.89
 
 
 def follows(clip: Path, ai: Path, out_fps: float = 24.0) -> dict:
     """Whether a result still shows the source clip's camera and layout (it may set its own pace): both the
     edge maps and the coarse layouts, matched after time warping, must stay clearly below random pairs."""
-    portrait = video_info(clip)["height"] >= video_info(clip)["width"]
+    info = video_info(clip)
+    portrait = info["height"] >= info["width"]
     ratios = {}
     for name, read_maps in (("edges", lambda p, fps=None: edge_maps(p, FEATURE if portrait else FEATURE[::-1], fps=fps)),
                             ("structure", lambda p, fps=None: structure_maps(p, (16, 28) if portrait else (28, 16), fps))):
@@ -123,12 +119,12 @@ def follows(clip: Path, ai: Path, out_fps: float = 24.0) -> dict:
 def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]:
     """Monotonic match of every output frame (rows) to one result frame (columns), by dynamic programming inside a
     band around the even pace: from one output frame to the next the result advances one frame for free, holds
-    (0) or skips ahead (up to `jump` frames: MiniMax H3 stalled for half a second at times) at a small cost per frame of
-    difference from one; the result may start a few frames late and end early (its last frame is then held)."""
+    (0) or skips ahead (up to `jump` frames) at a small cost per frame of difference from one; the result may start a
+    few frames late and end early (its last frame is then held)."""
     rows, cols = cost.shape
     # The cost of a hold or skip scales with how much a right match beats a typical one: under a strong restyle
     # the edges differ everywhere (best 0.8 vs typical 0.93), and a penalty scaled to the typical difference made the
-    # warp trail 1.25 s and hold 32 frames rather than follow H3's catch-up at the end (GOF3D10232 K01, 2026-11-09).
+    # warp trail and hold frames rather than follow a result that catches up.
     spread = float(np.median(cost)) - float(np.median(cost.min(axis=1)))
     step = WARP_STEP * max(spread, 1e-3)
     inf = np.inf
@@ -217,10 +213,8 @@ def pin(mapping: list[int], anchors: list[int], out_fps: float) -> tuple[float, 
     """One constant speed per clip (result frame = offset + speed * output frame) through the result's moments at
     the two pins: where the clip meets its neighbours (the seams inside a shot) or its ends. The moment at a pin is
     the median offset of the frame-by-frame match (edge maps) around it, so the seams show the source's moment;
-    in between the result keeps its own pace, without freezes, skips, slow motion or speed-ups. GOF3D10176
-    (2026-11-10): following the match frame by frame froze 187 of 495 moving frames and played half-second stretches
-    at half speed (the user saw stutter, slow motion and speed-ups); a constant speed fitted on camera velocity left
-    two seams a second apart (a camera standing still fits any timing)."""
+    in between the result keeps its own pace, without freezes, skips, slow motion or speed-ups (following the match
+    frame by frame stuttered; a speed fitted on camera velocity misplaced seams: a still camera fits any timing)."""
     n = len(mapping)
     half = max(2, round(PIN_SECONDS * out_fps))
     def moment(at: int) -> float:
@@ -236,8 +230,8 @@ def pin(mapping: list[int], anchors: list[int], out_fps: float) -> tuple[float, 
 
 def retime(ai: Path, source: Path, render_frames: list[int], fps: float, frames: int, out_fps: float,
            size: tuple[int, int], output: Path, anchors: list[int] | None = None) -> dict:
-    """The AI clip on the source clock: `frames` output frames from the render's start, each the moment of the
-    result (whole or motion-interpolated in-between frame) that shows that moment of the source (`pace`)."""
+    """The AI clip on the source clock: `frames` output frames from the render's start, played at the constant speed
+    `pin` finds (`anchors`: output frames where the clip must show the source's moment, default its ends)."""
     feature = FEATURE if size[1] >= size[0] else FEATURE[::-1]
     start = render_frames[0] / fps
     seconds = frames / out_fps + 1 / out_fps
@@ -269,8 +263,8 @@ def place(line: np.ndarray, knots: list[int], motion: np.ndarray, cols: int) -> 
     """Whole result frames for every output frame: at each knot (the clip's ends and its seams) the frame the line
     gives; between knots the result plays frame by frame, and the holds or skips needed to meet the next knot go
     where the result changes least (the camera and the scene stand still: invisible there), CORRECTION_GAP apart
-    where possible. No interpolated frames: they broke on these clips (GOF3D10176, 2026-11-10: ffmpeg minterpolate
-    returned the same frame for 157 frames of K01) and took minutes per clip."""
+    where possible. No interpolated frames: ffmpeg's motion interpolation repeated one frame for seconds on these
+    clips."""
     targets = [int(min(max(round(line[k]), 0), cols - 1)) for k in knots]
     for i in range(1, len(targets)):                       # monotonic, and never faster than 2 frames per frame
         targets[i] = min(max(targets[i], targets[i - 1]), targets[i - 1] + 2 * (knots[i] - knots[i - 1]))
@@ -420,23 +414,6 @@ def regional(a: np.ndarray, b: np.ndarray) -> float:
     return float(max(diff[r * h:(r + 1) * h, c * w:(c + 1) * w].mean() for r in range(rows) for c in range(cols)))
 
 
-def measure(before: np.ndarray, after: np.ndarray) -> dict:
-    """How different the two results are across the switch (colours corrected) against how much the picture moves
-    from frame to frame there: `visible` when they differ clearly more than it moves, or one region a lot."""
-    count = min(len(before), len(after))
-    difference = float(np.mean([np.abs(before[i] - after[i]).mean() for i in range(count)]))
-    steps = [float(np.abs(clip[i + 1] - clip[i]).mean()) for clip in (before, after) for i in range(count - 1)]
-    motion = float(np.median(steps)) if steps else 0.0
-    middle = count // 2
-    local = regional(before[middle], after[middle])
-    local_steps = [regional(clip[i], clip[i + 1]) for clip in (before, after) for i in range(count - 1)]
-    local_motion = float(np.median(local_steps)) if local_steps else 0.0
-    visible = ((difference - motion > SEAM_EXCESS and difference > SEAM_RATIO * max(motion, .5))
-               or (local > SEAM_LOCAL and local > SEAM_RATIO * max(local_motion, .5)))
-    return {"difference": round(difference, 2), "motion": round(motion, 2), "local": round(local, 2),
-            "local_motion": round(local_motion, 2), "verdict": "visible" if visible else "clean"}
-
-
 def cut_options(before: np.ndarray, after: np.ndarray) -> list[dict]:
     """Every frame i (1..n-1) of an overlap where the switch could go (the earlier clip up to i-1, the later from i):
     the jump there against the ordinary change from frame to frame in both clips, overall and in the worst region,
@@ -485,9 +462,6 @@ def write_transition(frames: list[np.ndarray], size: tuple[int, int], out_fps: f
     return output
 
 
-SEAM_MODES = ("auto", "cut", "dissolve")   # auto: a plain cut where it does not show, else a light dissolve
-
-
 def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], index: int,
               corrections: list[tuple], size: tuple[int, int], out_fps: float, seams: str = "auto") -> dict:
     """The switch between clips index-1 and index inside their overlap: at the least visible frame, a plain cut when
@@ -498,12 +472,9 @@ def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], i
     second = corrected(frames_rgb(clips[index], a - after["out"][0], b - a, SEAM_WIDTH), corrections[index])
     choice = choose_cut(cut_options(first, second), after["body"][0] - a)
     mode = choice["mode"] if seams == "auto" else seams
-    window = slice(max(0, choice["frame"] - 3), choice["frame"] + 3)
-    found = measure(first[window], second[window])
-    found["verdict"] = "clean" if choice["mode"] == "cut" else "visible"      # as a plain cut
     judged = {k: choice[k] for k in ("ratio", "local_ratio", "same")}
     if mode == "cut":
-        return {"start": a + choice["frame"], "length": 0, "clip": None, "mode": "cut", **judged, **found}
+        return {"start": a + choice["frame"], "length": 0, "clip": None, "mode": "cut", **judged}
     length = max(2, round(DISSOLVE_SECONDS * out_fps))
     start = max(a, min(a + choice["frame"] - length // 2, b - length))
     length = min(length, b - start)
@@ -514,7 +485,7 @@ def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], i
                              corrected(right[i].astype(np.float32), corrections[index]), (i + .5) / count)
               for i in range(count)]
     clip = write_transition(frames, size, out_fps, job / "work" / f"{source_id}-{after['id']}-seam.mp4")
-    return {"start": start, "length": count, "clip": clip, "mode": "dissolve", **judged, **found}
+    return {"start": start, "length": count, "clip": clip, "mode": "dissolve", **judged}
 
 
 # --- 4. join ---------------------------------------------------------------------------------------------------
@@ -523,7 +494,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
-    size = target_size(row["width"], row["height"], state["options"]["resolution"])
+    size = target_size(row["width"], row["height"])
     lines = timeline(row, out_fps)
     def one(index: int) -> tuple[Path, dict]:
         line, seg = lines[index], row["segments"][index]
@@ -538,7 +509,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         stamp_path = work.with_suffix(".json")
         if work.is_file() and stamp_path.is_file() and read(stamp_path).get("stamp") == stamp:
             return work, read(stamp_path)["timing"]
-        log(f"{source_id}:{line['id']}: retiming (motion-interpolated in-between frames, a few minutes)")
+        log(f"{source_id}:{line['id']}: retiming")
         # Where the clip's timing must meet the source: its start and every seam inside a shot (the switch lies there).
         joined = lambda near: 0 < near < len(lines) and lines[near]["seam"] == "continuous"
         anchors = [line["body"][0] - line["out"][0] if joined(index) else 0,
@@ -548,7 +519,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         write(stamp_path, {"stamp": stamp, "timing": measured})
         return work, measured
 
-    # Each retime is ffmpeg processes (motion interpolation runs on one core): several side by side.
+    # Each retime is mostly ffmpeg decoding and encoding: several side by side.
     with ThreadPoolExecutor(max_workers=RETIME_WORKERS) as pool:
         done = list(pool.map(one, range(len(lines))))
     clips = [work for work, _ in done]
@@ -620,8 +591,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         if index in switches:
             s = switches[index]
             entry = {**entry, "time": round((s["start"] + s["length"] / 2 - origin) / out_fps, 3),
-                     "frames": s["length"], **{k: s[k] for k in ("mode", "ratio", "local_ratio", "same", "difference",
-                                                                 "motion", "local", "local_motion", "verdict")}}
+                     "frames": s["length"], **{k: s[k] for k in ("mode", "ratio", "local_ratio", "same")}}
             if s["mode"] == "dissolve" and s["same"] > SEAM_REVIEW:
                 problems.append(f"seam before {line['id']} at {entry['time']:.2f} s: the two results differ a lot "
                                 f"(drawings {s['same']} apart, jump {s['ratio']} of the frame change): joined with a "

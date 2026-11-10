@@ -3,8 +3,8 @@
 `review` sends Gemini (`gemini-3.8-flash`, media resolution HIGH) the whole video once: the original and the restyled
 video side by side at the delivery's own size (left/right for vertical videos, top/bottom for horizontal ones),
 frame-synchronised, 24 fps, near-lossless (crf 4) with the bitrate capped to fill, not pass, the 256,000,000-byte
-inline limit, sampled at 4 frames/s up to 75 s, with the seam times and the removal list. There are no separate
-Gemini seam close-ups; the seams are yours (below). It returns issues in seven categories:
+inline limit, sampled at 4 frames/s up to 75 s (2 beyond), with the seam times and the removal list. The seams are
+yours to check on stills (below). It returns issues in seven categories:
 
 | Category | Means |
 | --- | --- |
@@ -45,15 +45,15 @@ the bottom row the result, at T-0.3 s, T and T+0.3 s. Decide:
 
 ## Redo
 
-`redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective Chinese sentence>"] [--refs]`
+`redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective English sentence>"] [--replace] [--refs]`
 
 - Every segment goes back at most twice (`redo` refuses a third time): after that deliver it and list what is open.
   Automatic retries after a failed generation do not count.
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
-  confirmed flaw's look, e.g. `鱼的形状和数量与原视频保持一致，不要变形`, `去掉右上角残留的logo文字`,
-  `整体颜色与参考图保持一致，雪地为白色`. A sentence about where something is or when it appears
-  (`收集框保持空的，不要提前放入鱼`) made MiniMax H3 cut to a close-up of its own (GOF3D10232, 2026-11-09): prefer none, and
-  `--replace` drops the earlier sentences of a segment.
+  confirmed flaw's look, e.g. `Keep every fish whole, with the shape and count of the original.`, `Remove the logo
+  text left in the top-right corner.`, `Keep the overall colours of the reference images; the snow stays white.`.
+  A sentence about where something is or when it appears (`Keep the collection box empty.`) can make the video
+  model move its camera: prefer none, and `--replace` drops the earlier sentences of a segment.
 - A result that cut, zoomed or framed differently from the source is caught by `render` itself (it compares the
   result's edges and coarse layout with the source clip) and rendered once more automatically.
 - `--refs` when the scene map or a subject sheet already shows the flaw (wrong objects, cartoon parts, colour cast):

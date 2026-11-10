@@ -4,12 +4,11 @@ Every segment's inputs (frames, reference pictures, attempt) are hashed; a re-ru
 generations still running on Lumos, and renders only what changed or was sent back with `redo`.
 
 Each segment gets its source clip, the scene map(s) of the location it shows and the three-view sheets of the
-subjects on screen (refs). A segment that continues a shot (a `continuous` seam) also gets the previous segment's
-result at the moment it begins, cut from the tail of that result, as Image 1: rendered side by side the two drawings
-differed too much at the seam (GOF3D10176, 2026-11-10), so the segments of one shot render one after the other and a
-redone segment re-renders the segments after it in the same shot. Separate shots (camera cuts) and separate sources
-still render side by side (`--workers` at a time). A prompt alone barely changes a video model's look (MiniMax H3, 2026-11-09,
-GOF3D10232: the picture stayed cartoon), so the realistic look comes from these pictures.
+subjects on screen (refs); the realistic look comes from these pictures. A segment that continues a shot (a
+`continuous` seam) also gets, as Image 1, the previous segment's result at the moment it begins (cut from the tail
+of that result), so both sides of the seam share one drawing: the segments of one shot render one after the other,
+and a redone segment re-renders the segments after it in that shot. Separate shots (camera cuts) and separate sources
+render side by side (`--workers` at a time).
 """
 from __future__ import annotations
 
@@ -21,17 +20,15 @@ from pathlib import Path
 
 from reskin import credentials, lumos, net
 from reskin.common import FFMPEG, digest, log, read, run, sha, video_info, write
-from reskin.prompts import compose
+from reskin.plan import MAX_SHEETS
+from reskin.prompts import compose, references_clause
 
 POLL_SECONDS = 15
 GENERATION_TIMEOUT = 60 * 60
 SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 UPLOAD_BYTES = 190_000_000     # Seedance 2.5 takes reference videos up to 200 MB
 MAX_PICTURES = 5               # reference pictures one segment gets (Seedance 2.5 takes up to 30)
-# A segment takes at most plan.MAX_SHEETS three-view sheets; the retry after a result that left the source's
-# camera takes none (with the scene map alone K01 of GOF3D10232 kept the source's camera, 2026-11-09).
-from reskin.plan import MAX_SHEETS
-MAX_REDOS = 2                  # a segment goes back at most twice (the user's rule, 2026-11-09)
+MAX_REDOS = 2                  # a segment goes back at most twice after a review (the user's rule)
 
 
 class ResultRejected(RuntimeError):
@@ -140,45 +137,17 @@ def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool 
     return chosen[:MAX_PICTURES]
 
 
-def references_clause(chosen: list[dict]) -> str:
-    """What each reference picture is for, in the video prompt."""
-    parts = []
-    for n, picture in enumerate(chosen, 1):
-        if picture["role"] == "previous":
-            parts.append(f"Image {n} is the restyled frame where this clip begins, taken from the end of the previous "
-                         "part of this same video: the first frame of the output must look exactly like it (every "
-                         "object's materials, textures, colours, brightness, lighting and drawing, the ground and the "
-                         "snow), and the whole clip keeps exactly that look, so the two parts join without any visible "
-                         "change.")
-    scenes = [n for n, p in enumerate(chosen, 1) if p["role"] == "scene"]
-    subjects = [(n, p) for n, p in enumerate(chosen, 1) if p["role"] == "subject"]
-    if scenes:
-        names = " and ".join(f"Image {n}" for n in scenes)
-        parts.append(f"{names} {'is' if len(scenes) == 1 else 'are'} the whole location of this video already "
-                     "converted into realistic materials, seen from the same camera angle: wherever the camera is, "
-                     "every place it shows must look exactly as there (ground, water, ice, buildings, props, "
-                     "materials, textures, lighting, colour grading, brightness and level of realism); never fall "
-                     "back to the game's cartoon look.")
-    for n, picture in subjects:
-        parts.append(f"Image {n} is a three-view sheet (front, side, back) of {picture['what']}, already converted: "
-                     "whenever it is on screen, give it exactly the look of the sheet, at the size and place it has "
-                     "in the input video (the sheet shows it large only to show its look).")
-    if parts:
-        parts.append("The reference images are for look only: composition, camera, motion, timing and content come "
-                     "from the input video; do not add anything from them that the input video does not show.")
-    return " ".join(parts)
-
-
 def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> dict:
     source = next(r for r in state["sources"] if r["id"] == source_id)
     key = f"{source_id}:{seg['id']}"
     redo = redo_log(job).get(key, {})
-    # after a result of this round that left the source, the retry goes without sheets
+    # after a result of this round that left the source, the retry goes with the scene map only (sheets pull the
+    # model towards close-ups of its subjects)
     path = rejected_path(job, key)
     left = path.is_file() and any(r["round"] == redo.get("redos", 0) for r in read(path))
     chosen = pictures(job, plan_row, source_id, seg, sheets=not left)
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
-    prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span, refs=references_clause(chosen))
+    prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span, refs=references_clause(style, chosen))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],
             "duration": seg["render_seconds"], "pictures": [sha(p["path"]) for p in chosen],
             "references": [{**p, "path": str(p["path"])} for p in chosen], "prompt": prompt,
@@ -242,8 +211,8 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
         problems.append(f"length {info['duration']:.2f} s for a {expected:.2f} s clip")
     if min(info["width"], info["height"]) < 700:
         problems.append(f"resolution {info['width']}x{info['height']} is too small")
-    # A video model may set its own camera (MiniMax H3, 2026-11-09: a redo cut to a close-up of the worker 4 s in):
-    # a result that no longer shows the source's camera and layout is caught here, not in the review.
+    # A result that no longer shows the source's camera and layout (a cut or close-up of its own) is caught here,
+    # not in the review.
     from reskin.assemble import follows
     follow = follows(clip, output) if not problems else {}
     ai = {k: info[k] for k in ("width", "height", "fps", "duration", "frames")}
@@ -304,8 +273,8 @@ def run_all(job: Path, state: dict, plan: dict, style: dict, only: set[str] | No
                 return {"key": f"{sid}:{seg['id']}", "error": str(error)}
             except Exception as error:     # the summary lists every failed segment; the rest continue
                 return {"key": f"{sid}:{seg['id']}", "error": f"{type(error).__name__}: {error}"}
-    # Segments of one shot render one after the other (each takes the previous result's last frame); shots and
-    # sources run side by side. A segment whose previous one failed is not rendered.
+    # Segments of one shot render one after the other (each takes the previous result's frame where it begins);
+    # shots and sources run side by side. A segment whose previous one failed is not rendered.
     chains: list[list] = []
     for item in todo:
         sid, row, seg = item
@@ -337,13 +306,12 @@ _REDO_LOCK = threading.Lock()
 def bump(job: Path, key: str, reason: str, prompt: str | None = None, automatic: bool = False,
          replace: bool = False) -> dict:
     """Queue another attempt; corrective sentences accumulate, so a later redo keeps the earlier fixes (`replace`
-    drops them first: a sentence naming objects can backfire, 2026-11-09). Redos asked for after a review count
-    against MAX_REDOS; an automatic retry after a failed generation does not."""
+    drops them first: a sentence about where objects are can make the model move its camera). Redos asked for after
+    a review count against MAX_REDOS; an automatic retry after a failed generation does not."""
     with _REDO_LOCK:
         path = job / "config/redo.json"
         data = read(path) if path.is_file() else {}
         row = data.get(key, {"attempt": 1, "redos": 0, "reasons": []})
-        row.setdefault("redos", 0)
         if not automatic and row["redos"] >= MAX_REDOS:
             raise ValueError(f"{key} was already sent back {MAX_REDOS} times (the limit): deliver it as it is and "
                              "report the open issue")

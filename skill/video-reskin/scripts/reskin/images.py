@@ -5,23 +5,18 @@ from pathlib import Path
 
 from reskin import lumos, net
 
-IMAGE_MODEL = "gpt-image-2.6-sunburst"     # Lumos, from 2026-11-06 (2.5 before)
+IMAGE_MODEL = "gpt-image-2.6-sunburst"     # on Lumos
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
            "4:5": 4 / 5, "5:4": 5 / 4}
-ASPECT_TOLERANCE = .01      # relative; a source further than this from every preset gets "adaptive"
-# The user's settings (2026-11-09): the scene map at 4K and quality high, three-view sheets at 1K and quality medium.
+# The user's settings: the scene map at 4K and quality high, three-view sheets at 1K and quality medium.
 SCENE = {"resolution": "4K", "quality": "high"}
 SUBJECT = {"resolution": "1K", "quality": "medium"}
 
 
-def aspect_for(width: float, height: float, aspects: dict[str, float] = ASPECTS, exact: bool = False) -> str:
-    """The preset matching the ratio, or "adaptive" when none is within ASPECT_TOLERANCE; `exact` False always
-    returns the nearest preset (4K needs one: Lumos hides the resolution for "adaptive")."""
+def aspect_for(width: float, height: float) -> str:
+    """The nearest aspect preset (4K needs one: Lumos offers no 4K for "adaptive")."""
     ratio = width / height
-    name = min(aspects, key=lambda name: abs(aspects[name] / ratio - 1))
-    if not exact:
-        return name
-    return name if abs(aspects[name] / ratio - 1) <= ASPECT_TOLERANCE else "adaptive"
+    return min(ASPECTS, key=lambda name: abs(ASPECTS[name] / ratio - 1))
 
 
 def edit(images: list[Path], prompt: str, output: Path, *, aspect: str, resolution: str, quality: str,

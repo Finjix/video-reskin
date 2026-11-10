@@ -1,4 +1,4 @@
-"""Winky (Lumos model gateway) with the user's API key: Gemini generateContent for the review."""
+"""Winky (Lumos model gateway) with the user's API key: Gemini generateContent for the survey and the review."""
 from __future__ import annotations
 
 import base64
@@ -59,8 +59,8 @@ def check_key() -> dict:
     return {"key": "accepted"}
 
 
-def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW_MODEL, system: str | None = None,
-           temperature: float = 0.2, timeout: float = 900, media_resolution: str | None = MEDIA_RESOLUTION) -> dict | str:
+def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW_MODEL, temperature: float = 0.2,
+           timeout: float = 900, media_resolution: str | None = MEDIA_RESOLUTION) -> dict | str:
     """generateContent; with a schema the JSON answer is parsed. `media_resolution` (default HIGH) sets how finely
     Gemini reads images and video frames."""
     body = {"contents": [{"role": "user", "parts": parts}],
@@ -69,8 +69,6 @@ def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW
         body["generationConfig"]["mediaResolution"] = media_resolution
     if schema:
         body["generationConfig"].update(responseMimeType="application/json", responseSchema=schema)
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
     value = _post(f"{BASE}/gemini/v1/models/{model}:generateContent", body=json.dumps(body).encode("utf-8"),
                   content_type="application/json", timeout=timeout)
     candidates = value.get("candidates") or []
@@ -86,7 +84,16 @@ def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW
     return text
 
 
-def inline(path: Path, mime: str | None = None) -> dict:
+def inline(path: Path, mime: str | None = None, fps: float | None = None) -> dict:
+    """A file as an inline part; `fps` (videos) sets how many frames per second Gemini samples."""
     data = Path(path).read_bytes()
-    return {"inlineData": {"mimeType": mime or mimetypes.guess_type(str(path))[0] or "application/octet-stream",
+    part = {"inlineData": {"mimeType": mime or mimetypes.guess_type(str(path))[0] or "application/octet-stream",
                            "data": base64.b64encode(data).decode()}}
+    if fps:
+        part["videoMetadata"] = {"fps": fps}
+    return part
+
+
+def sample_fps(duration: float) -> float:
+    """Frames per second Gemini samples from a video: short ads get 4 so flicker and brief morphs are not missed."""
+    return 4.0 if duration <= 75 else 2.0

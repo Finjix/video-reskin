@@ -1,16 +1,18 @@
-"""Quality review: Gemini watches the whole original and restyled video side by side once and lists what went wrong
-(no separate seam close-ups); the agent looks at stills itself: the whole video every STILL_STEP s and five frames
-across every seam (SEAM_MOMENTS); `frames` cuts stills around a reported time to confirm an issue before a redo."""
+"""Quality review: Gemini watches the whole original and restyled video side by side once and lists what went wrong;
+the agent looks at stills itself: the whole video every STILL_STEP s and five frames across every seam
+(SEAM_MOMENTS); `frames` cuts stills around a reported time to confirm an issue before a redo."""
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 from reskin import winky
 from reskin.analyze import font
-from reskin.common import FFMPEG, log, read, run, video_info, write, write_text
+from reskin.assemble import COLOUR_REVIEW, SEAM_REVIEW
+from reskin.common import FFMPEG, log, read, run, write, write_text
 from reskin.job import style as job_style
 from reskin.prompts import describe
 
@@ -51,12 +53,12 @@ def _drawtext(text: str) -> str:
             "box=1:boxcolor=black@0.55:boxborderw=6")
 
 
-INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured 2026-11-06)
+INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured)
 PROXY_CRF = 4                  # review clips are near-lossless: Gemini judges the delivered detail
 BUDGET = .93                   # share of INLINE_LIMIT the video bitrate is capped to (container and VBV headroom)
 REVIEW_FPS = 24                # frame rate of the clips Gemini gets (the delivery's); it samples them at its own rate
-STILL_STEP = 3.0               # seconds between the agent's full-size stills of the whole video (user rule, 2026-11-09)
-SEAM_MOMENTS = (-1.0, -.5, 0.0, .5, 1.0)     # the agent's five frames across every seam (user rule, 2026-11-09)
+STILL_STEP = 3.0               # seconds between the agent's full-size stills of the whole video (user rule)
+SEAM_MOMENTS = (-1.0, -.5, 0.0, .5, 1.0)     # the agent's five frames across every seam (user rule)
 
 
 def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF) -> Path:
@@ -100,17 +102,6 @@ def proxy(job: Path, state: dict, source_id: str, assembled: dict) -> tuple[Path
     return clip, ("left" if height >= width else "top")
 
 
-def auto_fps(duration: float) -> float:
-    """Frames per second Gemini samples: short ads get 4 so flicker and brief morphs are not missed."""
-    return 4.0 if duration <= 75 else 2.0
-
-
-def video_part(path: Path, fps: float) -> dict:
-    part = winky.inline(path, "video/mp4")
-    part["videoMetadata"] = {"fps": fps}
-    return part
-
-
 def frame_at(path: str, t: float, width: int, height: int) -> Image.Image:
     """One frame at `t` seconds at width x height (accurate seek)."""
     raw = run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, t):.4f}", "-i", path, "-frames:v", "1",
@@ -150,7 +141,6 @@ def every(length: float, step: float, fps: float) -> list[float]:
 
 def overview_stills(job: Path, state: dict, source_id: str, assembled: dict, round_number: int) -> list[str]:
     """Full-size original | restyled pairs every STILL_STEP s of the delivery, for the agent's own review."""
-    import shutil
     source = next(r for r in state["sources"] if r["id"] == source_id)
     folder = job / "review/stills" / f"{source_id}-r{round_number}"
     shutil.rmtree(folder, ignore_errors=True)
@@ -193,14 +183,15 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
     seams = ", ".join(f"{s['time']:.2f} s ({'hard cut' if s['seam'] == 'cut' else 'inside a shot'})"
                       for s in assembled["seams"]) or "none"
     removal = describe(plan_row["remove"]) or "nothing named"
-    style = state["style"] if isinstance(state["style"], str) else state["style"].get("label")
+    style = job_style(state)
+    look = " ".join(part for part in (style.get("look"), style.get("ground")) if part)
     lines = [
         "You are a strict quality reviewer for AI-restyled game advertising videos.",
         f"The video shows the ORIGINAL on the {layout} and the RESTYLED version on the {other}, frame-synchronised "
         f"(same timestamps). The restyle goal: {describe(plan_row['materials'])} — game-rendered cartoon materials replaced by "
-        f"realistic real-world materials (style preset: {style}) while composition, camera motion, characters, object "
+        f"realistic real-world materials (style preset: {style.get('label', 'custom')}) while composition, camera motion, characters, object "
         "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
-        *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if (look := job_style(state).get("look")) else []),
+        *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if look else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "
         "plain cut or a very short dissolve while the camera moves fast; report it only when a viewer would notice a "
@@ -230,10 +221,12 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
     clip, layout = proxy(job, state, source_id, assembled)
     size = clip.stat().st_size
     if size > INLINE_LIMIT:
-        raise RuntimeError(f"{source_id}: review clip is {size / 1e6:.0f} MB even at crf 36, above the inline limit")
-    fps = fps or auto_fps(assembled["duration"])
+        raise RuntimeError(f"{source_id}: review clip is {size / 1e6:.0f} MB even at the lowest bitrate, above the "
+                           "inline limit")
+    fps = fps or winky.sample_fps(assembled["duration"])
     log(f"{source_id}: asking Gemini to review ({size / 1e6:.1f} MB comparison clip, {fps:g} frames/s)")
-    answer = winky.gemini([video_part(clip, fps), {"text": prompt(state, plan_row, assembled, layout)}], schema=SCHEMA)
+    answer = winky.gemini([winky.inline(clip, "video/mp4", fps=fps), {"text": prompt(state, plan_row, assembled, layout)}],
+                          schema=SCHEMA)
     issues = []
     for number, issue in enumerate(answer.get("issues") or [], 1):
         a, b = float(issue.get("start", 0)), float(issue.get("end", issue.get("start", 0)))
@@ -241,14 +234,14 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
         issues.append({"n": number, **issue, "start": round(a, 2), "end": round(b, 2),
                        "segments": segment_for(a, b, assembled), "source": "gemini"})
     for seam in assembled.get("seams") or []:
-        if seam.get("mode") == "dissolve" and seam.get("same", 0) > 45:
+        if seam.get("mode") == "dissolve" and seam.get("same", 0) > SEAM_REVIEW:
             issues.append({"n": len(issues) + 1, "start": round(seam["time"] - .25, 2), "end": round(seam["time"] + .25, 2),
                            "category": "seam_color", "severity": "medium", "where": "whole frame", "source": "measured",
                            "description": f"段内接缝 {seam['segment']} 处两段画面差异较大（两版画面相差 {seam['same']}，"
                                           f"跳变为正常帧间变化的 {seam['ratio']} 倍），直接切会跳，已用轻微叠化，看接缝图确认",
                            "segments": [seam["segment"]]})
     for seam in assembled.get("colour") or []:
-        if seam["residual"] > 6:
+        if seam["residual"] > COLOUR_REVIEW:
             when = next((s["time"] for s in assembled["seams"] if s["segment"] == seam["before"]), 0.0)
             issues.append({"n": len(issues) + 1, "start": when, "end": when, "category": "seam_color",
                            "severity": "medium", "where": "whole frame", "source": "measured",
@@ -310,12 +303,7 @@ def stills(job: Path, state: dict, source_id: str, times: list[float], span: flo
         for row, (path, offset, name) in enumerate(((source["path"], assembled["keep"][0], "original"),
                                                     (assembled["output"], 0.0, "restyled"))):
             for column, moment in enumerate(moments):
-                raw = run([FFMPEG, "-v", "error", "-ss", f"{moment + offset:.3f}", "-i", path, "-frames:v", "1",
-                           "-vf", f"scale={tile_w}:{tile_h}:flags=bicubic", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                          binary=True)
-                if len(raw) >= tile_w * tile_h * 3:
-                    canvas.paste(Image.frombytes("RGB", (tile_w, tile_h), raw[: tile_w * tile_h * 3]),
-                                 (column * tile_w, row * (tile_h + 26) + 26))
+                canvas.paste(frame_at(path, moment + offset, tile_w, tile_h), (column * tile_w, row * (tile_h + 26) + 26))
                 draw.text((column * tile_w + 4, row * (tile_h + 26) + 4), f"{name} {moment:.2f} s", fill="black", font=label)
         out = job / "review/frames" / f"{source_id}-{t:07.2f}.png"
         out.parent.mkdir(parents=True, exist_ok=True)

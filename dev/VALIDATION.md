@@ -1,87 +1,75 @@
 # Validation record
 
-## 2026-11-09: MiniMax H3 with shared scene maps and subject sheets
+The evidence behind the skill's current rules and thresholds. Each finding names the run it comes from; findings
+measured with a model the skill no longer uses are marked, so they can be checked again with Seedance 2.5.
 
-GOF3D10232 射冰取鱼 (1080x1920, 60 fps), kept 0-30 s, one long shot. Lumos login of the developer.
+## Runs
 
-| Step | Result |
-| --- | --- |
-| H3 probe, prompt only (6 s, 768P) | composition and motion kept, but the picture stayed cartoon (wood a little darker): the look must come from pictures |
-| `survey` (Gemini, 720p proxy, 51 MB) | 1 scene with 6 views, 8 subjects. Boxes read off the video missed two characters by a body width; boxes found again on the stills were tight |
-| `refs` scene map (4K, max, 4 views + style picture) | 3200x2560 PNG (20 MB) in about 4 min. Layout of the views kept (river, ice blocks, dock, camp floor, pads, bench, hut, log fence), realistic, no characters, UI or text |
-| `refs` 7 three-view sheets (1K, high) | about 1 min each, shapes and colours kept. The first try of one sheet failed: Lumos timed out fetching the 20 MB PNG, so pictures over 8 MB go as JPEG and look references go reduced to 2048 px |
-| `render` 3 segments (12 + 12 + 9 s, 2K, 5 pictures each) | all three side by side, done after 13-18 min. 1440x2560, 24 fps, 2-5 % longer than asked, realism far above the prompt-only probe |
-| `assemble` | 33 s. Colour residuals at the two seams 0.14 and 0.12; both seams `whip` at 41-46 px of camera motion per frame. No ghosting or jump on the frame-by-frame look; at a 64 px peak the blur read as a deliberate swish, now 48 px at most |
-| `review` round 1 | Gemini: 2 medium issues, both confirmed on stills (a tuna drawn early on an empty pad in K01, a carried tuna melting into a dark blob in K03). Seam sheets clean |
-| redo 1 (K01, K03; K02 reused) | K03 better, still a dark smear of the carried tuna for a moment and blurry flying cash (medium, H3's weak spot with fast small objects). K01 with the sentence `收集框保持空的，不要提前放入鱼` cut to a close-up of the worker cutting fish from 4 s on (Gemini: high) |
-| redo 2 (K01, stronger prompt, sentence dropped) | both attempts left the source the same way (edges 0.972 / 0.983, layout 0.875 / 0.829), caught by the new render check and retried automatically |
+| Date | Footage | Setup | Outcome |
+| --- | --- | --- | --- |
+| 2026-11-03 | `.素材`: GOF3D10232 射冰取鱼 1080x1920, GOF3D10374 锤木过桥卖炭 1920x1080, GOF3D10057 甩枪获鱼 1080x1920 | Seedance 2.5 `video_edit` 1080p on per-segment keyframes (since replaced by scene maps and sheets) | 2 of 3 passed; open: whole tuna drawn as salmon steaks, a stack of thin logs drawn as one trunk |
+| 2026-11-09 | GOF3D10232, 0-30 s, one long shot | MiniMax H3 (dropped 2026-11-10) with survey, one scene map, three-view sheets, 3 segments | round 3 without high issues; open (medium): a tuna about a second early, a carried cash stack melting |
+| 2026-11-10 | GOF3D10176 | Seedance 2.5 with the scene map and sheets | seams of parallel segments jumped; led to chaining and constant-speed retiming |
 
-Findings that changed the skill:
+## Findings behind current rules
 
-- H3 is no frame-locked editor. With reference pictures it keeps the story and composition but sets its own pace:
-  in K01 the camera ran up to 1.7 s ahead and fell back by the end. Even without pictures, a 6 s clip came back
-  6.58 s long, on time for 2.5 s, then half a second slow. `assemble` therefore matches every output frame to
-  the result frame of the same moment (dynamic time warping on edge maps, holds and skips up to 0.75 s). On the
-  stills the retimed clips line up with the source to about a frame. Match quality against the typical frame
-  difference is 0.35 for a weak restyle and 0.7-0.92 for a strong one; only values near 1 mean it failed.
-- Seams placed where the camera moves fast and hidden under a 9-frame directional blur plus cross-fade showed no
-  step between the ±0.5 and ±1 s frames, although the two results differed at the switch by 25-46 levels.
-- Segments no longer depend on each other: a redo resubmitted only the redone segments; the third segment was
-  reused.
-- H3 now and then makes a camera of its own: K01 (the dock, then the camp with a worker cutting fish) left the
-  source in three of four attempts, K02 and K03 never. Neither the prompt's first sentence (frame for frame, same
-  camera, no close-ups) nor dropping the corrective sentence helped. `render` now compares every result with its
-  clip (edges and coarse layout after time warping) and rejects one that left the source: followed 0.71-0.92 /
-  0.50-0.61, left 0.97-0.98 / 0.83-0.89. A second rejection in a redo round keeps the closer result and the review
-  lists it as high.
-- With the scene map alone (no sheets) K01 kept the source's camera at the first try (0.916 / 0.773), with the
-  same realism, and the early tuna on the empty pad was gone. A segment therefore takes at most two sheets, and the
-  automatic retry after a rejection takes none. One sample: watch the rejection rate in the next batches.
-- Round 3 (K01 scene map only): no high issue; open (medium, both segments at their two redos): a tuna on the
-  cutting table about a second early in K01 (7.25-8.5 s), the carried cash stack melting in K03 (29.25-29.75 s).
-  Seams clean (colour residual 0.12 / 0.10). Rendering: 12 s at 2K took 13-18 min, the scene-map-only run 14 min.
-- Seams with plain cuts (`assemble --seams cut`, to compare): at 11.58 s the switch K01 → K02 jumped in
-  brightness and grading, in how the crowd and fence are drawn, and a bench of fish steaks vanished; at 22.17 s an
-  extra ice block popped in. The masked switch hides both. The cut also showed that K01 trailed the source by
-  1.25 s before the seam with 32 frames held: the warp's hold/skip cost was scaled to the typical difference, too
-  dear under a strong restyle where right and wrong matches differ little, so it did not follow H3's catch-up at the
-  end. The cost now scales with how much the best match beats the typical one, and the holds and skips a result's
-  pace needs are spread evenly (running mean) instead of freezing in one place.
-- Seams now take no effect unless needed (the user's rule): the switch goes to the overlap frame with the smallest
-  jump; a plain cut when the jump is at most 1.15 times the ordinary frame change (1.2 in the worst region) and the
-  drawings are at most 30 apart, else a 6-frame dissolve without blur. Here 22.25 s cut (1.00 / 0.99 / 25), 11.54 s
-  dissolved (1.14 / 1.05 / 49): six frames of the two drawings fading into each other, no other effect.
+**Seedance timing.** Results come back 24 fps and slightly shorter than the input with the motion compressed
+evenly (5.00 s → 4.71 s; source time = 1.069 × output time; 2026-11-03). Retiming: following an edge-map match
+frame by frame froze 187 of 495 moving frames and played half-second stretches at half speed; a speed fitted on
+camera velocity left two seams a second apart (a still camera fits any timing); ffmpeg `minterpolate` returned the
+same frame for 157 frames of K01 (all GOF3D10176, 2026-11-10). Hence one constant speed per clip pinned at its seams,
+holds and skips where the picture stands still, no interpolation. The warp's hold/skip cost scales with how much the
+best match beats the typical one: scaled to the typical difference it trailed 1.25 s under a strong restyle
+(GOF3D10232, 2026-11-09).
 
-## 2026-11-03: first end-to-end runs on `.素材`
+**Chaining inside a shot.** Segments rendered side by side from the same scene map differed too much at the seams
+(GOF3D10176, 2026-11-10, Seedance). A segment that continues a shot now takes the previous result's frame where it
+begins, so the segments of one shot render one after the other.
 
-Lumos login of the developer, Winky key `dev`. The key may not use any GPT Image model
-(`winky_permission_error`), so every keyframe went through the Lumos image-to-image API with
-`gpt-image-2.5-sunburst` (about 50 s per image). Seedance 2.5 `video_edit` at 1080p took 3.5-6 min per 10-12 s
-segment, 4 in flight.
+**Colours.** Two results of the same moment differ by 7-30 levels of mean brightness; a chained match drifted, a
+least-squares gain/offset per clip over each run of in-shot seams left residuals of 0.03-0.45 (2026-11-03) and
+0.10-0.14 (2026-11-09).
 
-| Source | Kept | Segments | Rounds | Result |
-| --- | --- | --- | --- | --- |
-| GOF3D10232 射冰取鱼 1080x1920 | 0-59.08 s | 6 (all inside one shot) | 3 | open: whole-tuna stacks drawn as salmon steaks (`materials` listed 三文鱼) |
-| GOF3D10374 锤木过桥卖炭 1920x1080 | 0-61.0 s | 6 (1 at a cut) | 3 | pass; open (medium): a carried stack of thin logs drawn as one trunk |
-| GOF3D10057 甩枪获鱼 1080x1920 | 0-65.7 s | 6 | 2 | pass, 0 issues; logo removed in both corners; seams matched |
+**Seams.** Plain-cut thresholds (`assemble.CUT_*`): a switch at 1.00 / 0.99 / 24-25 (jump against the frame
+change, worst region, drawings apart) showed only an ice block popping in; one at 1.14 / 1.05 / 49 jumped in
+brightness, in how the crowd and fence are drawn, and a bench of fish steaks vanished, so it gets the 6-frame
+dissolve (GOF3D10232, 2026-11-09).
 
-Findings that changed the plugin:
+**Prompt wording** (Seedance, 2026-11-03). Naming text that is not on screen (a warning line in a source without
+one) made the model draw garbled warning text there; untimed materials (a pickup truck present only at the end) put
+trucks into the opening; `salmon` in the materials turned whole tuna and cash stacks into salmon steaks. Hence timed
+`remove` and `materials` items, "the list only describes materials, do not add anything because of it" and "do not
+add any new text" in every prompt, and the `added_text` review category.
 
-- Seedance returns 24 fps clips slightly shorter than the input (5.00 s → 4.71 s) with the whole motion uniformly
-  compressed (measured: source time = 1.069 × output time); `assemble` stretches each clip back exactly.
-- Two Seedance segments of the same moment differ by 7-30 levels of mean brightness. A chained match drifted;
-  a least-squares gain/offset per clip over each run of in-shot seams leaves residuals of 0.03-0.45, with a 0.5 s
-  cross-fade on top.
-- Naming text that is not on screen (`画面底部的警示文字` in a source without one) makes Seedance draw garbled
-  warning text there; untimed materials (`蓝色皮卡车`, present only at the end) put trucks into the opening; an
-  anchor from another part of the ad passed as a second reference leaked its coal pile and chimney into other
-  segments; `三文鱼` in the materials turned tuna and cash stacks into salmon steaks. Hence timed `remove` and
-  `materials` items, keyframe-only video references, "不要添加任何新的文字…" and "下面的列表只说明材质，不要据此添加物体"
-  in every prompt, and an `added_text` review category.
-- Gemini (`gemini-3.8-flash`, inline side-by-side clip at 2 fps, about 25 s per minute of video) found every
-  defect later confirmed on stills except one garbled caption it described as a ground change; its seam reports
-  matched the measured colour steps. It accepts 8-11 MB inline clips.
-- Known limitation: fast-changing HUD counters are redrawn by Seedance and may show other digits for a few frames.
+**Scene maps.** Views taken late in a build-up video (2-63.5 s) gave a map of the finished camp (fish rack, steak
+tower, cash, lit pot), and the video model drew them from 9 s on; views of the still empty camp (2-18 s, the crowd
+named in `materials`) fixed it for every segment, only a small prop on the map still leaked into the first seconds
+(GOF3D10176, 2026-11-09, H3). Hence the survey takes each area as early as it is clearly in view. A 20 MB 4K PNG
+timed out when Lumos fetched it as a reference (2026-11-09), so pictures over 8 MB go as JPEG and a scene map used
+only as a look reference goes at 2048 px.
 
-`dev/test_bootstrap.py` (cold start in a Unicode temp path, JSON stdin, offline reuse) and `dev/run_tests.py`
-(19 tests) pass.
+**Survey boxes.** Boxes read off the video missed two characters by a body width; boxes found again on the still
+were tight (GOF3D10232, 2026-11-09).
+
+**Sheets and the camera** (H3, GOF3D10232, 2026-11-09; not yet re-checked with Seedance). With 4 sheets K01 cut to
+a close-up of its own in three of four attempts; with the scene map alone it kept the source's camera at the first
+try with the same realism, and an early tuna on an empty pad was gone. Hence at most two sheets per segment and the
+automatic retry with the scene map only. A corrective sentence about where things are (`keep the collection box
+empty`) made K01 cut to a close-up from 4 s on, hence `redo --replace`. A prompt alone left H3's picture cartoon:
+the look comes from the pictures.
+
+**Follow check** (`assemble.FOLLOW_*`, H3, GOF3D10232, 2026-11-09; not yet re-checked with Seedance). Matched /
+typical difference of edges and coarse layouts: results that followed 0.71-0.92 / 0.50-0.61, results that left the
+source 0.97-0.98 / 0.83-0.89.
+
+**Review.** Gemini (`gemini-3.8-flash`) found every defect later confirmed on stills except one garbled caption it
+described as a ground change (2026-11-03). On a small crf-30 proxy it passed a visible 0.5 s dissolve and cartoon
+trees, hence near-lossless clips filling up to the 256,000,000-byte inline limit (a 60 s 2160x1920 side-by-side
+clip of about 200 MB was accepted, 2026-11-06).
+
+**Known limitation.** Fast-changing HUD counters are redrawn by the video model and may show other digits for a few
+frames.
+
+## Offline checks
+
+`dev/test_bootstrap.py` (cold start in a Unicode temp path, JSON stdin, offline reuse) and `dev/run_tests.py` pass.
