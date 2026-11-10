@@ -52,7 +52,7 @@ the bottom row the result, at T-0.3 s, T and T+0.3 s. Decide:
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
   confirmed flaw's look, e.g. `鱼的形状和数量与原视频保持一致，不要变形`, `去掉右上角残留的logo文字`,
   `整体颜色与参考图保持一致，雪地为白色`. A sentence about where something is or when it appears
-  (`收集框保持空的，不要提前放入鱼`) made H3 cut to a close-up of its own (GOF3D10232, 2026-11-09): prefer none, and
+  (`收集框保持空的，不要提前放入鱼`) made MiniMax H3 cut to a close-up of its own (GOF3D10232, 2026-11-09): prefer none, and
   `--replace` drops the earlier sentences of a segment.
 - A result that cut, zoomed or framed differently from the source is caught by `render` itself (it compares the
   result's edges and coarse layout with the source clip) and rendered once more automatically.

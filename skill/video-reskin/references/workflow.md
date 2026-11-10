@@ -12,7 +12,7 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `survey [--only S01] [--redo]` | Gemini watches each whole source: scene views and subjects (re-boxed on stills) → `catalog/survey/<id>.json`, `catalog/<id>-survey.jpg` | ~1 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
-| `render [--only K] [--workers 4]` | MiniMax H3 video edit of every segment at 2K → `ai/`; segments independent, side by side; results that leave the source's camera are rejected and rendered once more | 13-18 min per 12 s segment at 2K, 4 at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit of every segment at 1080p → `ai/`; segments of one shot one after the other (each gets the previous result's frame where it begins, `refs/chain/`), shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
 | `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime frame by frame, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder | ~1 min per video |
 | `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
 | `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
@@ -28,7 +28,7 @@ Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subjec
  "request": "<the user's request, verbatim>",
  "output_root": "<optional folder; default: the user's Desktop>",
  "style": "realistic",
- "options": {"max_segment_seconds": 15, "fps": 24, "render_resolution": "2K"}}
+ "options": {"max_segment_seconds": 30, "fps": 24, "render_resolution": "1080p"}}
 ```
 
 - `sources`: video files (.mp4/.mov/.mkv/.m4v) or folders (their videos, not recursive).
@@ -37,9 +37,9 @@ Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subjec
   `look`, `scene`, `subject`, `video`, `default_materials` and optionally `reference` (a look picture, absolute or
   relative to `assets/`) like the preset, for another look. All prompt texts are English. The reference picture goes
   with every scene map as its last image (look only, nothing copied from its content).
-- `options.max_segment_seconds`: 4-15 (default 15; H3 edits clips of 4-15 whole seconds). `render_resolution`: `2K`
-  (default) or `768P`, what H3 renders at; deliveries are 2K (1440 on the short side) either way. `fps`: output frame rate (default 24,
-  H3's rate, never above the source).
+- `options.max_segment_seconds`: 4-30 (default 30; Seedance 2.5 edits clips of 2-30 s, the result as long as the
+  input). `render_resolution`: `1080p` (default) or `720p`, what Seedance renders at; deliveries are 1080p either way.
+  `fps`: output frame rate (default 24, Seedance's rate, never above the source).
 
 ## Catalog (`analyze`)
 
@@ -89,12 +89,12 @@ covered or a crop misses its subject.
 - `style_from`: another source whose scene map gives this source's scene maps their look (sister cuts of one ad).
 - `extra`: one short Chinese sentence added to every prompt of the source (e.g. `雪地保持洁白，不要偏紫`).
 - `split_at`: extra split times (seconds) when a segment boundary must hit a particular moment.
-- `max_segment_seconds`: per-source override (4-15); `skip: true` leaves a source out.
+- `max_segment_seconds`: per-source override (4-30); `skip: true` leaves a source out.
 
 ## Plan (`config/plan.json`, `reports/plan.md`)
 
 Each source lists its segments `K01...` with `frames` (source frames it delivers), `render_frames` (what is sent to
-H3: whole seconds, the delivered frames plus 0.3 s on either side of a seam inside a shot, padded at the end),
+Seedance: the delivered frames plus 0.3 s on either side of a seam inside a shot, padded to 4 s when shorter),
 `render_seconds`, `seam` before it (`start`; `cut`: a camera cut hides the join; `continuous`: inside a shot, with
 `seam_score`, how fast the camera moves there against the rest of the video, and `seam_camera`), `inner_cuts`, and
 its references: `scenes` and `subjects` (indices, at most two, subjects first seen in the segment first; only
@@ -102,10 +102,10 @@ these sheets are made). Edit the edits file, not the plan.
 
 ## Outputs
 
-- Delivery folder: `<source name>_写实.mp4` per source (1440 on the short side, H.264, AAC, the source audio of the
+- Delivery folder: `<source name>_写实.mp4` per source (1080 on the short side, H.264, AAC, the source audio of the
   kept range).
 - `temp/refs/<id>-scene1.png`, `<id>-P01.png`; their inputs in `temp/refs/inputs/`; `temp/sheets/<id>-refs.png`.
-- `temp/ai/<id>-<Kxx>.mp4`: H3 results as delivered (24 fps, 2K, uneven pace); `temp/work/` the retimed clips and the
+- `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, 1080p, slightly shorter than the clip); `temp/work/` the retimed clips and the
   seam switches. `temp/state/render/<id>-<Kxx>.json` `follow`: how well the result follows the source clip (matched /
   typical difference of edges and of coarse layouts; both above 0.93 / 0.80 means it left the source).
 - `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and

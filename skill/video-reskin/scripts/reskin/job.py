@@ -10,10 +10,10 @@ from reskin.common import PROMPTS, desktop, read, sha, write
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
 DELIVERY_NAME = re.compile(r"视频换风格_\d{8}_\d{6}")
-RESOLUTION = "2K"          # deliveries: 1440 on the short side for every job (the user's choice, 2026-11-09)
-RENDER_RESOLUTIONS = ("2K", "768P")     # what MiniMax H3 renders at (2K by default, as delivered)
-# Segments as long as MiniMax H3 takes (15 s); seams inside a shot go where the camera moves fast (plan).
-DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "render_resolution": "2K", "max_segment_seconds": 15.0,
+RESOLUTION = "1080p"       # deliveries: 1080 on the short side, Seedance 2.5's largest size (2026-11-10)
+RENDER_RESOLUTIONS = ("1080p", "720p")  # what Seedance 2.5 renders at (1080p by default, as delivered)
+# Segments as long as Seedance 2.5 takes (30 s); seams inside a shot go where the camera moves fast (plan).
+DEFAULTS = {"style": "realistic", "resolution": RESOLUTION, "render_resolution": "1080p", "max_segment_seconds": 30.0,
             "fps": 24, "remove_end_card": True}
 
 
@@ -51,11 +51,11 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     if options["resolution"] != RESOLUTION:
         raise ValueError(f"options.resolution is fixed at {RESOLUTION} (leave it out)")
     if options["render_resolution"] not in RENDER_RESOLUTIONS:
-        raise ValueError(f"options.render_resolution must be one of {', '.join(RENDER_RESOLUTIONS)} (default 2K)")
+        raise ValueError(f"options.render_resolution must be one of {', '.join(RENDER_RESOLUTIONS)} (default 1080p)")
     if not 12 <= float(options["fps"]) <= 30:
-        raise ValueError("options.fps must be between 12 and 30 (default 24, the rate H3 renders at)")
-    if not 4 <= float(options["max_segment_seconds"]) <= 15:
-        raise ValueError("options.max_segment_seconds must be between 4 and 15 (MiniMax H3 edits 4-15 s clips)")
+        raise ValueError("options.fps must be between 12 and 30 (default 24, the rate Seedance renders at)")
+    if not 4 <= float(options["max_segment_seconds"]) <= 30:
+        raise ValueError("options.max_segment_seconds must be between 4 and 30 (Seedance 2.5 edits 4-30 s clips)")
     if job_dir:
         job = Path(job_dir).resolve()
         delivery = job.parent

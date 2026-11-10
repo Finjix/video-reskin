@@ -261,7 +261,7 @@ def review_source(job: Path, state: dict, source_id: str, plan_row: dict, fps: f
             where = next((s for s in assembled["segments"] if s["id"] == seg["id"]), {"start": 0, "end": 0})
             issues.append({"n": len(issues) + 1, "start": where["start"], "end": where["end"], "category": "continuity",
                            "severity": "high", "where": "whole frame", "source": "measured", "segments": [seg["id"]],
-                           "description": "H3 两次结果都偏离了原片的机位和构图（自行推近、切镜或改取景），保留了较接近的一次，"
+                           "description": "视频模型两次结果都偏离了原片的机位和构图（自行推近、切镜或改取景），保留了较接近的一次，"
                                           "看静帧确认"})
     seams = [{**seam, "sheet": str(seam_sheet(job, state, source_id, assembled, seam))} for seam in assembled["seams"]]
     rounds_path = job / "state/review" / f"{source_id}.json"

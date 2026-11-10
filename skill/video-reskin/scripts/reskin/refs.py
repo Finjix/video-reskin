@@ -6,7 +6,7 @@
 - one three-view sheet per subject (front, side, back; 1K, quality medium) for the characters, objects and props
   that come into view during the video, drawn at the scene map's realism.
 
-Every H3 segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so segments
+Every segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so segments
 rendered apart look alike and render side by side.
 """
 from __future__ import annotations

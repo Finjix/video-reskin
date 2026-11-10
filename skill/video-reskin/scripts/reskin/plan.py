@@ -1,13 +1,13 @@
 """The agent's edits (kept range, materials, what to remove, scenes and subjects) and the segment plan built from them.
 
-MiniMax H3 edits clips of 4-15 whole seconds, so each kept range is cut into segments of at most 15 s: at camera cuts
+Seedance 2.5 edits clips of 4-30 s, so each kept range is cut into segments of at most 30 s: at camera cuts
 where possible (a hard cut hides the seam), otherwise inside a shot at the moment the camera moves fastest (or the
 picture jumps anyway: a flash, a burst, a whip pan), where `assemble` joins them with a plain cut (or a very light
 dissolve where a cut would show). Segments do not depend on each other: every one gets the same scene map and subject sheets (refs), so
 they render side by side and a redo re-renders only itself.
 
-Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side), and every render is
-padded to whole seconds (H3 takes a whole-second duration); `assemble` trims the padding.
+Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side); a render shorter than
+MIN_RENDER is padded to it; `assemble` trims the padding.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from pathlib import Path
 from reskin.common import read, write, write_text
 from reskin.prompts import describe
 
-MAX_SECONDS = 15.0        # MiniMax H3: reference videos 2-15 s, output duration 4-15 whole seconds
-MIN_RENDER = 4            # whole seconds H3 renders at least
+MAX_SECONDS = 30.0        # Seedance 2.5 video edit: reference videos of 2-30 s, the result as long as the input
+MIN_RENDER = 4            # seconds a render lasts at least (shorter clips are padded)
 MIN_SECONDS = 2.0         # delivered pieces shorter than this are merged into a neighbour
 OVERLAP_SECONDS = .6      # rendered by both segments around a seam inside a shot (half before, half after)
 SEARCH_SECONDS = 7.0      # a seam inside a shot is searched in the last this-many seconds a segment can reach
@@ -27,7 +27,7 @@ EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "spli
              "scenes", "subjects"}
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
 MAX_SUBJECTS = 8          # subjects one source lists at most
-# Three-view sheets make H3 feature their subjects: with 4 sheets K01 of GOF3D10232 cut to a close-up of its own in
+# Three-view sheets make the video model feature its subjects (seen with MiniMax H3): with 4 sheets K01 of GOF3D10232 cut to a close-up of its own in
 # three of four attempts, with the scene map alone it kept the source's camera (2026-11-09). A segment takes at most
 # MAX_SHEETS, subjects first seen in it first; only sheets some segment takes are made (refs).
 MAX_SHEETS = 2
@@ -115,7 +115,7 @@ def check_edits(value: dict, state: dict, catalog: dict) -> dict:
                     or not 0 <= keep[0] < keep[1] <= duration + .05):
                 problems.append(f"{source_id}: keep must be [start, end] seconds inside 0-{duration:.2f}")
             elif keep[1] - keep[0] < MIN_RENDER:
-                problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (H3 renders 4 s at least)")
+                problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (Seedance renders 4 s at least)")
         if "extra" in row and not isinstance(row["extra"], str):
             problems.append(f"{source_id}: extra must be text")
         if "materials" in row and not isinstance(row["materials"], str) and items_problem(row["materials"], "materials"):
@@ -240,13 +240,12 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
         after = segments[number + 1]["seam"] if number + 1 < len(segments) else None
         a = row["frames"][0] - (half if row["seam"] == "continuous" else 0)
         b = row["frames"][1] + (half if after == "continuous" else 0)
-        # H3 renders whole seconds (4-15): pad the clip, later first, earlier where the source ends
-        seconds = min(int(max_seconds), max(MIN_RENDER, math.ceil((b - a) / fps - 1e-6)))
-        want = round(seconds * fps)
+        # at least MIN_RENDER seconds: pad a short clip, later first, earlier where the source ends
+        want = min(maximum, max(round(MIN_RENDER * fps), b - a))
         b = min(total, a + want)
         a = max(0, b - want)
         row["render_frames"] = [a, b]
-        row["render_seconds"] = seconds
+        row["render_seconds"] = round((b - a) / fps, 3)
         row["start"], row["end"] = round(row["frames"][0] / fps, 3), round(row["frames"][1] / fps, 3)
         row["seconds"] = round((b - a) / fps, 3)
         if row["seam"] == "continuous":
@@ -317,7 +316,7 @@ def markdown(plan: dict, catalog: dict) -> str:
             inner = f", contains cuts at {', '.join(f'{c / row['fps']:.2f}' for c in seg['inner_cuts'])} s" if seg["inner_cuts"] else ""
             seam = seg["seam"] + (f" (seam score {seg['seam_score']:.2f})" if "seam_score" in seg else "")
             refs = ", ".join([f"scene {k}" for k in seg["scenes"]] + [f"P{k:02d}" for k in seg["subjects"]])
-            lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['render_seconds']} s), "
+            lines.append(f"- {seg['id']} {seg['start']:.2f}-{seg['end']:.2f} s (renders {seg['render_seconds']:g} s), "
                          f"seam before: {seam}{inner}; refs: {refs}")
         lines.append("")
     return "\n".join(lines)

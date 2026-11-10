@@ -27,7 +27,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("游戏logo, 底部警示语", texts["video"])
         self.assertIn("鱼不要变形", texts["video"])
         self.assertIn("Image 1 is the map.", texts["video"])
-        self.assertTrue(texts["video"].startswith("Restyle the input video frame for frame"))
+        self.assertTrue(texts["video"].startswith("Edit the video: replace the materials of the input video frame for frame"))
 
     def test_timed_removals_only_where_on_screen(self):
         items = ["游戏logo", {"what": "底部警示语", "start": 0, "end": 10}, {"what": "右上角水印", "start": 30}]
@@ -248,3 +248,49 @@ class RedoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChainTests(unittest.TestCase):
+    """Segments of one shot render one after the other; each continuing one takes the previous result's frame."""
+    ROW = {"segments": [{"id": "K01", "seam": "start"}, {"id": "K02", "seam": "continuous"},
+                        {"id": "K03", "seam": "cut"}, {"id": "K04", "seam": "continuous"}]}
+
+    def test_previous_is_the_segment_before_in_the_same_shot(self):
+        from reskin import render
+        ids = [None if p is None else p["id"] for p in (render.previous_of(self.ROW, s) for s in self.ROW["segments"])]
+        self.assertEqual(ids, [None, "K01", None, "K03"])
+
+    def test_the_previous_frame_is_described_first(self):
+        from reskin import render
+        text = render.references_clause([{"role": "previous"}, {"role": "scene", "name": "camp"}])
+        self.assertTrue(text.startswith("Image 1 is the restyled frame where this clip begins"))
+        self.assertIn("Image 2 is the whole location", text)
+
+    def test_a_shot_renders_in_order_and_stops_after_a_failure(self):
+        import threading
+        import time
+        from reskin import render
+        order, lock, running = [], threading.Lock(), set()
+        original = render.render_segment
+
+        def fake(job, state, row, sid, seg, style):
+            with lock:
+                previous = render.previous_of(row, seg)
+                self.assertFalse(previous and previous["id"] in running, "a segment started before the one it continues finished")
+                running.add(seg["id"])
+                order.append(seg["id"])
+            time.sleep(.05)
+            with lock:
+                running.discard(seg["id"])
+            if seg["id"] == "K03":
+                raise RuntimeError("boom")
+            return {"key": f"{sid}:{seg['id']}"}
+        render.render_segment = fake
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                results = render.run_all(Path(folder), {}, {"sources": {"S01": self.ROW}}, {}, workers=4)
+        finally:
+            render.render_segment = original
+        self.assertLess(order.index("K01"), order.index("K02"))
+        self.assertNotIn("K04", order)
+        self.assertIn("previous segment S01:K03 failed", [r for r in results if r["key"] == "S01:K04"][0]["error"])

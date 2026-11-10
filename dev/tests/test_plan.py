@@ -1,4 +1,4 @@
-"""Segmentation: H3's whole-second 4-15 s clips, seams on cuts or fast camera moves, overlaps only inside shots;
+"""Segmentation: Seedance 2.5's 4-30 s clips (no whole-second padding), seams on cuts or fast camera moves, overlaps only inside shots;
 edits validation; scenes and subjects per segment."""
 import unittest
 
@@ -35,6 +35,13 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(segments[0]["seam"], "start")
         self.assertTrue(all(s["seam"] == "continuous" for s in segments[1:]))
         self.assertLessEqual(len(segments), 6)
+
+    def test_seedance_segments_run_to_thirty_seconds_unpadded(self):
+        row = catalog_row(63.5, 30.0)
+        segments = plan.segment(row, [0, 63.5], plan.MAX_SECONDS, [1.0] * row["info"]["frames"], [], [])
+        self.check(segments, 30.0, [0, 63.5], 30)
+        self.assertEqual(len(segments), 3)
+        self.assertTrue(any(s["render_seconds"] != int(s["render_seconds"]) for s in segments))
 
     def test_cuts_become_seams(self):
         row = catalog_row(40.0, 30.0, cuts=(8.0, 19.0, 30.0))
@@ -75,7 +82,7 @@ class EditsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan.check_edits({"sources": {"S01": {"keep": [10, 5]}}}, {}, catalog)
         with self.assertRaises(ValueError):
-            plan.check_edits({"sources": {"S01": {"keep": [10, 12]}}}, {}, catalog)    # shorter than H3's 4 s
+            plan.check_edits({"sources": {"S01": {"keep": [10, 12]}}}, {}, catalog)    # shorter than the 4 s a render lasts at least
         with self.assertRaises(ValueError):
             plan.check_edits({"sources": {"S09": {}}}, {}, catalog)
         with self.assertRaisesRegex(ValueError, "anchor"):

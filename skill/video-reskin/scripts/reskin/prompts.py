@@ -34,7 +34,7 @@ def remove_clause(items: list[str]) -> str:
 
 def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[float, float] | None = None,
             refs: str = "", **fields) -> str:
-    """kind: scene (the scene map), subject (a three-view sheet) or video (the H3 edit); `span` is the source time
+    """kind: scene (the scene map), subject (a three-view sheet) or video (the Seedance edit); `span` is the source time
     the text is for; `refs` says what the reference pictures are (video only; placed at {refs}, or after the
     template when it has none); `fields` fill the kind's own placeholders ({views}, {look_image}, {what}...)."""
     wishes = " ".join(part.strip() for part in (row.get("extra") or "", extra or "") if part and part.strip())

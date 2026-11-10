@@ -1,7 +1,8 @@
 """Put the restyled segments back on the source's clock and hide the seams.
 
-1. Retime: MiniMax H3 follows the source's motion at an uneven pace (2026-11-09, GOF3D10232: a 6 s clip came back
-   6.58 s long, on time for 2.5 s, then half a second slow), so a plain stretch drifts. Every output frame is
+1. Retime: a video model's result need not keep the source's length or pace (Seedance 2.5 returns clips slightly
+   short at an even pace; MiniMax H3, 2026-11-09, GOF3D10232: a 6 s clip came back 6.58 s long, on time for 2.5 s,
+   then half a second slow), so a plain stretch can drift. Every output frame is
    matched to the result frame showing the same moment (dynamic time warping on edge maps), and the clip is
    rewritten frame by frame at the output rate and size.
 2. Colours: gain/offset per clip so colours meet across every seam inside a shot (least squares per run).
@@ -105,7 +106,7 @@ FOLLOW_STRUCTURE = .80      # ... and of coarse layouts. GOF3D10232 (2026-11-09)
 
 
 def follows(clip: Path, ai: Path, out_fps: float = 24.0) -> dict:
-    """Whether an H3 result still shows the source clip's camera and layout (it may set its own pace): both the
+    """Whether a result still shows the source clip's camera and layout (it may set its own pace): both the
     edge maps and the coarse layouts, matched after time warping, must stay clearly below random pairs."""
     portrait = video_info(clip)["height"] >= video_info(clip)["width"]
     ratios = {}
@@ -122,7 +123,7 @@ def follows(clip: Path, ai: Path, out_fps: float = 24.0) -> dict:
 def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]:
     """Monotonic match of every output frame (rows) to one result frame (columns), by dynamic programming inside a
     band around the even pace: from one output frame to the next the result advances one frame for free, holds
-    (0) or skips ahead (up to `jump` frames: H3 stalls for half a second at times) at a small cost per frame of
+    (0) or skips ahead (up to `jump` frames: MiniMax H3 stalled for half a second at times) at a small cost per frame of
     difference from one; the result may start a few frames late and end early (its last frame is then held)."""
     rows, cols = cost.shape
     # The cost of a hold or skip scales with how much a right match beats a typical one: under a strong restyle

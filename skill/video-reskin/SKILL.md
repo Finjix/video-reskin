@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 2K deliverables (1440 on the short side) without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, MiniMax H3 video editing on Lumos in segments of up to 15 s rendered side by side, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each continuing one chained to the previous result's last frame, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a review with at most two redos per segment.
 ---
 
 # Video reskin
@@ -15,7 +15,7 @@ description: Batch-restyle 2.5D (top-down) game videos, by default into realisti
   fix it and run the same command again. `credential error:` names the key or login to provide. `runtime error:` /
   `service error:` name a network, disk or Lumos problem: fix the cause and run the same command again. Every command
   can be re-run and redoes only what changed; `render` also resumes generations still running on Lumos.
-- `render` takes minutes per segment (H3 renders on Lumos, 4 at a time) and prints a heartbeat every 2 minutes. Run
+- `render` takes minutes per segment (Seedance renders on Lumos, 4 at a time) and prints a heartbeat every 2 minutes. Run
   it with a long timeout (an hour or more for a batch) and wait; never poll or edit `state/`.
 - The scripts do all media work, segmentation, retiming, colour matching, seam masking and calls to the models. Your
   part is editorial: where each video stops, what is on screen, what to remove, checking the survey and the
@@ -33,7 +33,7 @@ Run `auth`. It shows the stored Winky key and whether the Lumos login works.
   the path) and ask them to scan it with the Feishu app. Feishu replaces the code every minute or two: every new
   `qr:` line is a new image, send it at once. Do not sit idle while waiting: carry on with work that needs no
   Lumos (init, analyze, survey, edits). `login` ends with `lumos: logged in as ...`. `login --check` only checks.
-- The Winky key is only for Gemini (survey, review); pictures (GPT Image) and videos (MiniMax H3) run on the Lumos
+- The Winky key is only for Gemini (survey, review); pictures (GPT Image) and videos (Seedance 2.5) run on the Lumos
   login.
 
 ## Talking to the user
@@ -54,7 +54,7 @@ batch without asking; an open question never stops production: take the default 
 | Two sources are the same ad in other sizes | `style_from` the first: the second's scene map takes its look from the first's |
 | A scene map invents places, keeps cartoon parts, characters, UI or text; a sheet changes the subject | adjust `materials`/`extra` or the views/box, then `refs --redo <key>` (at most twice, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
-| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` about the look (at most two redos per segment); a sentence about where objects are can make H3 move its camera: on the next redo drop it with `--replace` |
+| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` about the look (at most two redos per segment); a sentence about where objects are can make the video model move its camera: on the next redo drop it with `--replace` |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
 | A segment still flawed after two redos | deliver; list each remaining issue with its time |
 
@@ -74,7 +74,7 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
 4. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world `materials`
    of what is on screen, what to `remove` (only logos and warning lines you actually saw, timed when they come and
    go; HUD stays), and corrected `scenes`/`subjects` when the survey picked badly. `plan --edits <file>` cuts every
-   kept range into segments of at most 15 s: at camera cuts where possible, otherwise where the camera moves
+   kept range into segments of at most 30 s: at camera cuts where possible, otherwise where the camera moves
    fastest; writes `reports/plan.md` with each segment's references (the scene map and up to two sheets; only
    sheets some segment takes are made).
 5. `refs` makes one scene map per scene (GPT Image 2.6, 4K, quality high: the views joined into one overview of the
@@ -82,11 +82,12 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    Look at every `sheets/<id>-refs.png`: the map keeps the layout of the views, realistic materials, no cartoon
    parts, no invented places; each sheet keeps its subject's shape, colours and parts. Redo bad ones before
    rendering: every segment copies them.
-6. `render` edits every segment with MiniMax H3 on Lumos at 2K: the source clip plus the scene map and at most two
-   sheets of subjects on screen (those first seen in the segment first). Segments do not depend on each other and
-   render side by side. H3 keeps the story and layout but sets its own pace and now and then its own camera (more
-   often with more sheets): a result that no longer shows the source's camera and layout is rejected and rendered
-   once more by itself with the scene map only (not counted as a redo).
+6. `render` edits every segment with Seedance 2.5 (`video_edit`) on Lumos at 1080p: the source clip plus the scene
+   map and at most two sheets of subjects on screen (those first seen in the segment first). A segment that
+   continues a shot also gets, as Image 1, the previous segment's result at the moment it begins (cut from that
+   result's tail), so the segments of one shot render one after the other and a redo re-renders the segments after
+   it in that shot; separate shots and sources render side by side. A result that no longer shows the source's camera and layout (more likely
+   with more sheets) is rejected and rendered once more by itself with the scene map only (not counted as a redo).
 7. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
    source's moments (the few holds or skips this needs go where the picture stands still), matches colours
    across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain

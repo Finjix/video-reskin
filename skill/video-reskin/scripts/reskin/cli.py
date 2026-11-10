@@ -367,7 +367,7 @@ def main() -> None:
     refs.add_argument("--only", nargs="*", help="source IDs or keys like S01:scene1 S01:P02")
     refs.add_argument("--redo", nargs="*", help="keys or source IDs to make again even if unchanged")
     refs.add_argument("--workers", type=int, default=3)
-    render = command("render", cmd_render, help="MiniMax H3 video edit of every segment on Lumos")
+    render = command("render", cmd_render, help="Seedance 2.5 video edit of every segment on Lumos")
     render.add_argument("--only", nargs="*", help="source IDs or keys like S01:K02")
     render.add_argument("--workers", type=int, default=4, help="generations in flight at once")
     assemble = command("assemble", cmd_assemble, help="retime, colour-match and join segments with the original audio")
