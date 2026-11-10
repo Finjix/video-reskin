@@ -44,7 +44,11 @@ add any new text" in every prompt, and the `added_text` review category.
 **Scene maps.** Views taken late in a build-up video (2-63.5 s) gave a map of the finished camp (fish rack, steak
 tower, cash, lit pot), and the video model drew them from 9 s on; views of the still empty camp (2-18 s, the crowd
 named in `materials`) fixed it for every segment, only a small prop on the map still leaked into the first seconds
-(GOF3D10176, 2026-11-09, H3). Hence the survey takes each area as early as it is clearly in view. A 20 MB 4K PNG
+(GOF3D10176, 2026-11-09, H3). Hence the survey takes each area as early as it is clearly in view. Early views
+alone were not enough while the map prompt named every material of the scene's whole time range: GOFCN48484's
+dock map (views 7.5-42.5 s) drew the road, pickup trucks, sharks and jet ski that arrive at 50-70 s, and the
+conveyor robots of the shot before it (a material ending at the scene's start); naming only the materials on screen
+between the first and last view removed them all (2026-11-10). A 20 MB 4K PNG
 timed out when Lumos fetched it as a reference (2026-11-09), so pictures over 8 MB go as JPEG and a scene map used
 only as a look reference goes at 2048 px.
 

@@ -138,7 +138,9 @@ def make(job: Path, task: dict, style: dict, lock) -> dict:
         references = views + ([look] if look else [])
         camera_path = job / "catalog/motion" / f"{source_id}-camera.json"
         aspect = scene_aspect(row, item, read(camera_path) if camera_path.is_file() else [])
-        span = (item.get("start", 0), item.get("end", row["keep"][1]))
+        # Only materials on screen at the views: the map is drawn from them, and naming what comes later puts it
+        # into every segment from the start.
+        span = (min(item["views"]), max(item["views"]))
         prompt = compose(style, "scene", row, span=span, views=len(views), look_image=len(views) + 1)
         settings = images.SCENE
     else:
