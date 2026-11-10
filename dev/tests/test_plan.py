@@ -136,9 +136,9 @@ class RefsTests(unittest.TestCase):
                             {"id": "K03", "seam": "cut", "render_frames": [1800, 2400]}]}
         plan.assign_refs(row)
         self.assertEqual(row["segments"][0]["subjects"], [2, 3])          # cash and tuna fill K01 most, at most 2
-        self.assertEqual(row["segments"][0]["scenes"], [1, 2])
+        self.assertEqual(row["segments"][0]["scenes"], [1])               # scene b only touches K01's last frame
         self.assertEqual(row["segments"][1]["subjects"], [4, 1])          # cash and tuna come with the chained frame
-        self.assertEqual(row["segments"][1]["scenes"], [1, 2])
+        self.assertEqual(row["segments"][1]["scenes"], [2])               # scene a ends 0.3 s into K02
         self.assertEqual(row["segments"][2]["subjects"], [4, 2])          # after a cut nothing is carried
         self.assertEqual(row["segments"][2]["scenes"], [2])
 

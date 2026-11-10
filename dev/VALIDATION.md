@@ -48,7 +48,10 @@ named in `materials`) fixed it for every segment, only a small prop on the map s
 alone were not enough while the map prompt named every material of the scene's whole time range: GOFCN48484's
 dock map (views 7.5-42.5 s) drew the road, pickup trucks, sharks and jet ski that arrive at 50-70 s, and the
 conveyor robots of the shot before it (a material ending at the scene's start); naming only the materials on screen
-between the first and last view removed them all (2026-11-10). A 20 MB 4K PNG
+between the first and last view removed them all (2026-11-10). The survey put that cut at 7.2 s, the catalog at
+7.30 s, so each segment beside it took both scene maps: the dock segment drew the conveyor and robot arms over the
+bay, the conveyor segment a fence and stairs from the dock. A scene or subject now needs 0.5 s inside a segment to
+send its picture along. A 20 MB 4K PNG
 timed out when Lumos fetched it as a reference (2026-11-09), so pictures over 8 MB go as JPEG and a scene map used
 only as a look reference goes at 2048 px.
 

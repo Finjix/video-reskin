@@ -254,9 +254,15 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     return segments
 
 
+MIN_SHARED = 0.5   # seconds a scene or subject must share with a segment to send its picture along
+
+
 def overlaps(item: dict, start: float, end: float) -> bool:
-    """Whether a scene or subject (with start/end seconds) is on screen during start-end."""
-    return item.get("start", 0) <= end and start <= item.get("end", float("inf"))
+    """Whether a scene or subject (with start/end seconds) is on screen during start-end, for at least MIN_SHARED
+    seconds (or the whole segment when shorter): Gemini's scene and subject times are a few frames off at cuts, and a
+    picture sent for a sliver of a segment makes the video model draw that location or subject all through it."""
+    shared = min(end, item.get("end", float("inf"))) - max(start, item.get("start", 0))
+    return shared >= min(MIN_SHARED, end - start)
 
 
 def presence(subject: dict, start: float, end: float) -> float:
