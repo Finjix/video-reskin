@@ -3,6 +3,8 @@ import json
 import os
 import tempfile
 import unittest
+
+import numpy as np
 from pathlib import Path
 
 from reskin import assemble, images, net, prompts, review
@@ -123,22 +125,18 @@ class WarpTests(unittest.TestCase):
         self.assertEqual(mapping[:70], truth[:70])
         self.assertEqual(mapping[-1], 79)
 
-    def test_smooth_removes_single_frame_jitter(self):
-        smoothed = assemble.smooth([0, 1, 2, 9, 4, 5, 6, 7])
-        self.assertEqual(smoothed[0], 0)
-        self.assertEqual(smoothed[-1], 7)
-        self.assertTrue(all(b >= a for a, b in zip(smoothed, smoothed[1:])))
-        self.assertLess(max(smoothed[:5]), 9)
-
-    def test_smooth_spreads_a_freeze_into_even_holds(self):
-        # the result holds for 6 frames, then runs on: the holds come out spread, no run of more than 2 frames
-        mapping = list(range(20)) + [19] * 6 + list(range(20, 40))
-        smoothed = assemble.smooth(mapping)
-        runs, run = [], 1
-        for a, b in zip(smoothed, smoothed[1:]):
-            run = run + 1 if a == b else 1
-            runs.append(run)
-        self.assertLessEqual(max(runs), 2)
+    def test_place_hides_skips_where_the_result_stands_still(self):
+        # speed 1.1 over 100 frames: 10 skips, all inside the still stretch 40-79, the knots hit exactly
+        motion = np.ones(130)
+        motion[40:80] = .01
+        line = 1.1 * np.arange(101)
+        picks = assemble.place(line, [0, 100], motion, 130)
+        self.assertEqual((picks[0], picks[-1]), (0, 110))
+        steps = [b - a for a, b in zip(picks, picks[1:])]
+        self.assertEqual(steps.count(2), 10)
+        self.assertEqual(steps.count(0), 0)
+        self.assertTrue(all(40 <= picks[j] + 1 < 80 for j, d in enumerate(steps) if d == 2))
+        self.assertEqual(len(picks), 101)
 
 
 class TimelineTests(unittest.TestCase):

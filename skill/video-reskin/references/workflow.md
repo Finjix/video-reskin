@@ -111,6 +111,7 @@ these sheets are made). Edit the edits file, not the plan.
 - `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and
   `local_ratio`: the jump at the switch frame against the ordinary frame change, overall and in the worst region,
   `same`: how far apart both drawings are there, 0-255; a plain cut passes up to 1.15 / 1.2 / 30), `colour` (raw difference and residual per
-  seam inside a shot, 0-255), `timing` (per segment: frames `held`/`skipped` by the retiming, `matched` vs `typical`
+  seam inside a shot, 0-255), `timing` (per segment: the constant `speed` and `offset` the clip plays at, frames `held`/`skipped` where the
+  picture stands still, `camera_error`: camera on screen vs the source's, pixels at 270 wide, `typical`
   edge difference), segment times in the delivered video.
 - `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

@@ -206,8 +206,8 @@ def cmd_assemble(args) -> int:
         checked = "; ".join(f"{s['segment']} at {s['time']:.2f} s {s['mode']} (jump {s['ratio']} / region "
                             f"{s['local_ratio']} of the frame change, drawings {s['same']} apart)"
                             for s in result["seams"] if "mode" in s)
-        warped = ", ".join(f"{t['segment']} {t['held']} held/{t['skipped']} skipped" for t in result["timing"]
-                           if t["held"] or t["skipped"])
+        warped = ", ".join(f"{t['segment']} x{t.get('speed', 1)} ({t.get('held', 0)} held/{t.get('skipped', 0)} "
+                           f"skipped where it stands still)" for t in result["timing"])
         if warped:
             colour = (colour + "; " if colour else "") + "retimed: " + warped
         if checked:

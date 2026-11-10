@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -157,32 +158,17 @@ def warp(cost: np.ndarray, band: int, jump: int = 18) -> tuple[list[int], float]
     return mapping, float(np.mean([cost[i, m] for i, m in enumerate(mapping)]))
 
 
-def smooth(mapping: list[int], spread: int = 6) -> list[int]:
-    """A running median over up to 5 frames (no single-frame back-and-forth from noisy matches), then a running mean
-    over up to 2 * `spread` + 1 frames, so the holds and skips a result's own pace needs spread out evenly instead of
-    freezing or jumping in one place; both narrower at the ends, so the ends stay put, and kept monotonic."""
-    n = len(mapping)
-    median = []
-    for i in range(n):
-        k = min(2, i, n - 1 - i)
-        window = sorted(mapping[i - k: i + k + 1])
-        median.append(window[len(window) // 2])
-    out, last = [], 0
-    for i in range(n):
-        k = min(spread, i, n - 1 - i)
-        last = max(last, int(round(sum(median[i - k: i + k + 1]) / (2 * k + 1))))
-        out.append(last)
-    return out
+RETIME_WORKERS = 6          # segments retimed side by side
 
 
 def write_frames(ai: Path, mapping: list[int], out_fps: float, size: tuple[int, int], output: Path) -> Path:
     """The clip whose frame k is result frame mapping[k] (monotonic: streamed, one frame in memory)."""
     width, height = size
     frame_bytes = width * height * 3
-    decoder = subprocess.Popen([str(FFMPEG), "-v", "error", "-i", str(ai), "-vf",
-                                f"scale={width}:{height}:flags=lanczos,format=rgb24", "-fps_mode", "passthrough",
-                                "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               creationflags=0x08000000)     # stopped early on purpose: no broken-pipe noise
+    filters = [f"scale={width}:{height}:flags=lanczos", "format=rgb24"]
+    decoder = subprocess.Popen([str(FFMPEG), "-v", "error", "-i", str(ai), "-vf", ",".join(filters),
+                                "-fps_mode", "passthrough", "-f", "rawvideo", "-"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, creationflags=0x08000000)   # stopped early on purpose
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
     encoder = subprocess.Popen([str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -210,26 +196,113 @@ def write_frames(ai: Path, mapping: list[int], out_fps: float, size: tuple[int, 
     return output
 
 
+CAMERA_WIDTH = 270          # width the camera's path is measured at (phase correlation, pixels)
+
+
+def camera_path(path: Path, *, start: float | None = None, seconds: float | None = None,
+                fps: float | None = None) -> np.ndarray:
+    """The camera's position on screen per frame (pixels at CAMERA_WIDTH, cumulative phase-correlation shifts)."""
+    from reskin.analyze import _shift, decode
+    grey = decode(path, CAMERA_WIDTH, fps=fps, start=start, duration=seconds, gray=True).astype(np.float32)
+    steps = [(0.0, 0.0)] + [_shift(grey[i - 1], grey[i]) for i in range(1, len(grey))]
+    return np.cumsum(np.array(steps), axis=0)
+
+
+PIN_SECONDS = .5            # half-width of the window around a pin whose matches give the result's moment there
+PIN_SPEEDS = (.75, 1.33)    # the constant speed a clip may play at
+
+
+def pin(mapping: list[int], anchors: list[int], out_fps: float) -> tuple[float, float]:
+    """One constant speed per clip (result frame = offset + speed * output frame) through the result's moments at
+    the two pins: where the clip meets its neighbours (the seams inside a shot) or its ends. The moment at a pin is
+    the median offset of the frame-by-frame match (edge maps) around it, so the seams show the source's moment;
+    in between the result keeps its own pace, without freezes, skips, slow motion or speed-ups. GOF3D10176
+    (2026-11-10): following the match frame by frame froze 187 of 495 moving frames and played half-second stretches
+    at half speed (the user saw stutter, slow motion and speed-ups); a constant speed fitted on camera velocity left
+    two seams a second apart (a camera standing still fits any timing)."""
+    n = len(mapping)
+    half = max(2, round(PIN_SECONDS * out_fps))
+    def moment(at: int) -> float:
+        lo, hi = max(0, at - half), min(n, at + half + 1)
+        return at + float(np.median([mapping[i] - i for i in range(lo, hi)]))
+    a, b = min(anchors), max(anchors)
+    if b - a < out_fps:                                 # pins too close for a speed: keep the result's pace
+        return moment(a) - a, 1.0
+    speed = (moment(b) - moment(a)) / (b - a)
+    speed = min(max(speed, PIN_SPEEDS[0]), PIN_SPEEDS[1])
+    return moment(a) - speed * a, speed
+
+
 def retime(ai: Path, source: Path, render_frames: list[int], fps: float, frames: int, out_fps: float,
-           size: tuple[int, int], output: Path) -> dict:
-    """The AI clip on the source clock: `frames` output frames from the render's start, each the result frame
-    showing that moment of the source."""
+           size: tuple[int, int], output: Path, anchors: list[int] | None = None) -> dict:
+    """The AI clip on the source clock: `frames` output frames from the render's start, each the moment of the
+    result (whole or motion-interpolated in-between frame) that shows that moment of the source (`pace`)."""
     feature = FEATURE if size[1] >= size[0] else FEATURE[::-1]
     start = render_frames[0] / fps
-    src = edge_maps(source, feature, start=start, seconds=frames / out_fps + 1 / out_fps, fps=out_fps)[:frames]
+    seconds = frames / out_fps + 1 / out_fps
+    src = edge_maps(source, feature, start=start, seconds=seconds, fps=out_fps)[:frames]
     if len(src) < frames:
         src = np.concatenate([src, np.repeat(src[-1:], frames - len(src), axis=0)])
     res = edge_maps(ai, feature)
     cost = np.stack([np.abs(res - src[i]).mean(axis=1) for i in range(frames)])
-    mapping, matched = warp(cost, max(4, round(WARP_BAND * out_fps)))
-    mapping = smooth(mapping)
-    write_frames(ai, mapping, out_fps, size, output)
-    even = [round(i * (len(res) - 1) / max(1, frames - 1)) for i in range(frames)]
-    return {"frames": frames, "result_frames": int(len(res)), "matched": round(matched, 3),
-            "typical": round(float(np.median(cost)), 3),
-            "even": round(float(np.mean([cost[i, j] for i, j in enumerate(even)])), 3),
-            "held": sum(1 for a, b in zip(mapping, mapping[1:]) if a == b),
-            "skipped": sum(max(0, b - a - 1) for a, b in zip(mapping, mapping[1:]))}
+    src_path = camera_path(source, start=start, seconds=seconds, fps=out_fps)[:frames]
+    res_path = camera_path(ai)[: len(res)]
+    mapping, _ = warp(cost, max(4, round(WARP_BAND * out_fps)))
+    offset, speed = pin(mapping, anchors or [0, frames - 1], out_fps)
+    line = offset + speed * np.arange(frames)
+    motion = np.r_[0.0, np.abs(np.diff(res, axis=0)).mean(axis=1)]     # how much the result changes per frame
+    picks = place(line, sorted(set([0, frames - 1] + list(anchors or []))), motion, len(res))
+    write_frames(ai, picks, out_fps, size, output)
+    steps = [b - a for a, b in zip(picks, picks[1:])]
+    seen = res_path[np.array(picks)]
+    return {"frames": frames, "result_frames": int(len(res)), "typical": round(float(np.median(cost)), 3),
+            "speed": round(speed, 4), "offset": round(offset / out_fps, 3),
+            "held": sum(1 for d in steps if d == 0), "skipped": sum(1 for d in steps if d > 1),
+            "camera_error": round(float(np.median(np.hypot(*(seen - src_path[: len(seen)]).T))), 1)}
+
+
+CORRECTION_GAP = 4          # output frames at least between two holds or skips
+
+
+def place(line: np.ndarray, knots: list[int], motion: np.ndarray, cols: int) -> list[int]:
+    """Whole result frames for every output frame: at each knot (the clip's ends and its seams) the frame the line
+    gives; between knots the result plays frame by frame, and the holds or skips needed to meet the next knot go
+    where the result changes least (the camera and the scene stand still: invisible there), CORRECTION_GAP apart
+    where possible. No interpolated frames: they broke on these clips (GOF3D10176, 2026-11-10: ffmpeg minterpolate
+    returned the same frame for 157 frames of K01) and took minutes per clip."""
+    targets = [int(min(max(round(line[k]), 0), cols - 1)) for k in knots]
+    for i in range(1, len(targets)):                       # monotonic, and never faster than 2 frames per frame
+        targets[i] = min(max(targets[i], targets[i - 1]), targets[i - 1] + 2 * (knots[i] - knots[i - 1]))
+    picks = [targets[0]]
+    for (k0, t0), (k1, t1) in zip(zip(knots, targets), zip(knots[1:], targets[1:])):
+        n = k1 - k0                                        # output frames after k0 up to k1
+        frames = list(range(t0 + 1, t1 + 1))               # result frames after t0 up to t1
+        extra = len(frames) - n                            # > 0: result frames to leave out, < 0: to show twice
+        inner = frames[:-1] if len(frames) > 1 else frames # the knot's own frame stays
+        order = sorted(inner, key=lambda f: (motion[min(f, len(motion) - 1)], f))
+        chosen: list[int] = []
+        for gap in (CORRECTION_GAP, 2, 1):
+            for f in order:
+                if len(chosen) >= abs(extra):
+                    break
+                if f not in chosen and all(abs(f - c) >= gap for c in chosen):
+                    chosen.append(f)
+            if len(chosen) >= abs(extra):
+                break
+        if extra > 0:
+            shown = [f for f in frames if f not in set(chosen)]
+            while len(shown) > n:                          # faster than 2 frames per frame: rare
+                shown.pop(int(np.argmin([motion[min(f, len(motion) - 1)] for f in shown[:-1]])))
+        else:
+            twice = set(chosen)
+            shown = []
+            for f in frames:
+                shown += [f, f] if f in twice else [f]
+            while len(shown) < n:                          # slower than half speed: hold the knot frame
+                shown.insert(0, shown[0] if shown else t0)
+            shown = shown[len(shown) - n:]
+        picks += shown
+    return picks
 
 
 # --- 2. colours ------------------------------------------------------------------------------------------------
@@ -451,8 +524,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
     size = target_size(row["width"], row["height"], state["options"]["resolution"])
     lines = timeline(row, out_fps)
-    clips, timing = [], []
-    for line, seg in zip(lines, row["segments"]):
+    def one(index: int) -> tuple[Path, dict]:
+        line, seg = lines[index], row["segments"][index]
         ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
         record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
         record = read(record_path) if record_path.is_file() else {}
@@ -460,15 +533,25 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
             raise ValueError(f"{source_id}:{line['id']} is not rendered yet; run render first")
         frames = line["out"][1] - line["out"][0]
         work = job / "work" / f"{source_id}-{line['id']}.mp4"
-        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size), "retime": 3}
+        stamp = {"ai": record.get("generation_id"), "frames": frames, "fps": out_fps, "size": list(size), "retime": 10}
         stamp_path = work.with_suffix(".json")
         if work.is_file() and stamp_path.is_file() and read(stamp_path).get("stamp") == stamp:
-            measured = read(stamp_path)["timing"]
-        else:
-            measured = retime(ai, Path(source["path"]), seg["render_frames"], row["fps"], frames, out_fps, size, work)
-            write(stamp_path, {"stamp": stamp, "timing": measured})
-        timing.append({"segment": line["id"], **measured})
-        clips.append(work)
+            return work, read(stamp_path)["timing"]
+        log(f"{source_id}:{line['id']}: retiming (motion-interpolated in-between frames, a few minutes)")
+        # Where the clip's timing must meet the source: its start and every seam inside a shot (the switch lies there).
+        joined = lambda near: 0 < near < len(lines) and lines[near]["seam"] == "continuous"
+        anchors = [line["body"][0] - line["out"][0] if joined(index) else 0,
+                   line["body"][1] - line["out"][0] if joined(index + 1) else frames - 1]
+        measured = retime(ai, Path(source["path"]), seg["render_frames"], row["fps"], frames, out_fps, size, work,
+                          anchors)
+        write(stamp_path, {"stamp": stamp, "timing": measured})
+        return work, measured
+
+    # Each retime is ffmpeg processes (motion interpolation runs on one core): several side by side.
+    with ThreadPoolExecutor(max_workers=RETIME_WORKERS) as pool:
+        done = list(pool.map(one, range(len(lines))))
+    clips = [work for work, _ in done]
+    timing = [{"segment": line["id"], **measured} for line, (_, measured) in zip(lines, done)]
     corrections, colour = match_colours(clips, lines)
     switches = {index: make_seam(job, source_id, clips, lines, index, corrections, size, out_fps, seams)
                 for index, line in enumerate(lines) if index and line["seam"] == "continuous"}
@@ -525,11 +608,10 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     if (made["width"], made["height"]) != size:
         problems.append(f"size {made['width']}x{made['height']}, expected {size[0]}x{size[1]}")
     for entry in timing:
-        # a strong restyle changes the edges too: matches of 0.7-0.92 of the typical difference lined up on the stills
-        # (GOF3D10232, 2026-11-09); near 1 the result no longer follows the source
-        if entry["matched"] > .95 * entry["typical"]:
-            problems.append(f"{entry['segment']}: the result does not follow the source's motion (match "
-                            f"{entry['matched']} vs typical {entry['typical']})")
+        # the camera on screen far from the source's at the ends of a clip: the seams there may not line up
+        if entry.get("camera_error", 0) > 25:
+            problems.append(f"{entry['segment']}: the result's camera runs far from the source's (median "
+                            f"{entry['camera_error']} px at {CAMERA_WIDTH} wide)")
     origin = lines[0]["body"][0]
     seam_times = []
     for index, line in enumerate(lines[1:], 1):

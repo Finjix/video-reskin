@@ -87,7 +87,8 @@ Commands and file formats: [workflow](references/workflow.md). Review loop: [rev
    render side by side. H3 keeps the story and layout but sets its own pace and now and then its own camera (more
    often with more sheets): a result that no longer shows the source's camera and layout is rejected and rendered
    once more by itself with the scene map only (not counted as a redo).
-7. `assemble` retimes every result frame by frame onto the source clock (H3's pace is uneven), matches colours
+7. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
+   source's moments (the few holds or skips this needs go where the picture stands still), matches colours
    across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain
    cut, or with a very light 6-frame dissolve where a cut would show (no other effects at seams: the user's rule),
    joins everything with the source audio and writes `<name>_写实.mp4` into the delivery folder.
