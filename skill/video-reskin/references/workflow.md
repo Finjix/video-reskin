@@ -9,16 +9,15 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `login [--no-open] [--timeout 300] [--check]` | Feishu QR login to Lumos; prints `qr: <image>` for every new code until scanned | until scanned |
 | `init --work-order -` | validates the order (JSON on stdin or a file), creates the delivery folder and job dir | seconds |
 | `analyze [--only S01]` | media facts, camera cuts, camera speed, end-card candidate, still overlays, sheets | ~10 s per source |
-| `survey [--only S01] [--redo]` | Gemini watches each whole source: scene views and subjects (re-boxed on stills) → `catalog/survey/<id>.json`, `catalog/<id>-survey.jpg` | ~1 min per source |
+| `survey [--only S01] [--redo]` | Gemini watches each whole source (6 frames/s): scene views, subjects (re-boxed on stills), the end card, overlays to remove and HUD; then checks the views and crops as stills → `catalog/survey/<id>.json` (with `suggested` edits and `checks`), one marked still per removal and the end-card strip in `catalog/survey/<id>/`, all on `catalog/<id>-survey.jpg` | 1-2 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
-| `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`, `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
+| `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`; Gemini checks each new picture against its inputs → `reports/refs/<id>.md`, flagged ones side by side with their inputs in `refs/check/<key>.png`; all on `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
 | `render [--only K] [--workers 4]` | Seedance 2.5 video edit at 1080p → `ai/`: the first segment of every shot, and each segment whose previous one in the shot is approved (it gets that result's frame where it begins, `refs/chain/`); the rest report `waiting`; shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
-| `check [--segment K ...]` | each finished segment not approved yet (or the ones named) on its own: Gemini beside its source clip → `reports/check/<id>-<Kxx>-a<n>.md/json`; agent stills every 3 s plus the frame the next segment starts from → `review/check/<id>-<Kxx>-a<n>/` | ~1 min per segment |
-| `approve --segment S01:K02 [...]` | approves the current result of checked segments (a source ID: all its finished segments); the next `render` continues their shots | - |
-| `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime each clip at one constant speed, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder | ~1 min per video |
-| `review [--only S01] [--fps F]` | Gemini watches original and result side by side → `reports/review/<id>-r<n>.md/json`; agent stills → `review/stills/<id>-r<n>/` (every 3 s), `review/seams/<id>-<Kxx>.png` (5 frames per seam) | 2-4 min per video |
-| `frames --source S01 --at T [T...]` | stills: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
-| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (twice per segment at most, after `check` or `review`) and drops their approval; approved later segments of the shot keep their results; `--replace` drops the earlier corrective sentences | - |
+| `check [--segment K ...]` | the gate of each finished segment not approved yet (or the ones named): Gemini beside its source clip and the frame the next segment starts from, then the seam to the segment before on a preview of the segments joined so far (`work/preview/`), 1 s either side beside the original, with the start frame it was given beside its own first frame (6 frames/s, near-lossless up to 256 MB) → `reports/check/<id>-<Kxx>-a<n>.md/json`; for the agent one three-frame sheet per issue, and the seam's five-frame sheet and the full-size handoff frame where Gemini found nothing there → `review/check/<id>-<Kxx>-a<n>/` | 2-3 min per segment |
+| `approve --segment S01:K02 [...] [--dismiss R]` | approves the current result of segments whose check of that result passed (a failed one only with `--dismiss`, why each issue is wrong; a source ID: all its finished segments); the next `render` continues their shots | - |
+| `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime each clip at one constant speed, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder; there is no review after it | ~1 min per video |
+| `frames --source S01 --at T [T...]` | stills of the delivery: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
+| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (three times per segment at most) and drops their approval; approved later segments of the shot keep their results (check them again: their seam changed); `--replace` drops the earlier corrective sentences | - |
 | `status` | progress per source and the next step | - |
 
 Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subject sheet `S01:P02`.
@@ -59,8 +58,14 @@ camera's screen speed per frame (frame widths/heights per second), used to place
 `catalog/survey/<id>.json`: `scenes` (`name`, `start`, `end`, `views`: 3-8 times whose frames together show the
 whole location, each area as early as it is clearly in view) and `subjects` (`what`, `kind`, `appears`
 from_start/later, `start`, `end`, `at`: a moment it is clearly in view, `box`: [x0, y0, x1, y1] fractions of that
-frame, found again by Gemini on the still). `catalog/<id>-survey.jpg` shows every view and every crop. Correct them
-in the edits when a view is blurred, covered or late (the place already full) or a crop misses its subject.
+frame, found again by Gemini on the still), `end_card` (`start`: the last frame before its transition, `how`; null
+when there is none), `overlays` (`id`, `kind` logo/warning/watermark/caption/hud, `text` as on screen, `what`: the
+English phrase for the prompt, `where`, `start`, `end`, `at`, `box`, `remove`: true for all but the HUD),
+`overlay_stills` (one marked frame per removal), `end_strip` (0.5 s before, at and after the end-card start),
+`checks` (the views and crops Gemini flagged on the stills: `problem` blurred/covered/late/wrong_subject/partial,
+`note`, `path`) and `suggested` (`keep` and timed `remove` for the edits). `catalog/<id>-survey.jpg` shows every
+view and every crop. Correct them in the edits where a flag holds (a view blurred, covered or late, the place
+already full, or a crop that misses its subject).
 
 ## Edits (`plan --edits`)
 
@@ -86,7 +91,7 @@ All texts are English: they go into the model prompts.
   time. Each prompt names only the items on screen during its segment. Never list a material the video does not
   show or one another object could turn into (`salmon` turned stacks of whole tuna and of cash into salmon steaks).
 - `remove`: on-screen elements to delete, each naming what it shows (`the game logo "…"`, `the small white warning
-  text along the bottom`); merged with `defaults.remove`; text or a timed item. List only what the sheets show.
+  text along the bottom`); merged with `defaults.remove`; text or a timed item. List only what you confirmed on the survey's removal strips.
   Never list HUD counters, prices, labels or buttons.
 - `scenes`: replaces the survey's scenes: `[{"name": text, "start": s, "end": s, "views": [seconds, ...]}]` (1-12
   views). `subjects`: replaces the survey's subjects (at most 8): `[{"what", "kind", "start", "end", "at", "box"}]`
@@ -113,17 +118,22 @@ sheet come last; only these sheets are made). Edit the edits file, not the plan.
 - Delivery folder: `<source name>_<style label>.mp4` per source (`_realistic` by default; 1080 on the short side,
   H.264, AAC, the source audio of the kept range).
 - `temp/refs/<id>-scene1.png`, `<id>-P01.png`; their inputs in `temp/refs/inputs/`; the chained start frames in
-  `temp/refs/chain/`; `temp/sheets/<id>-refs.png`.
+  `temp/refs/chain/`; `temp/sheets/<id>-refs.png` (only the sheets some segment takes); Gemini's check of each
+  picture in `temp/state/refs-check.json` (kept until the picture changes), `temp/reports/refs/<id>.md`, and each
+  flagged one beside its inputs in `temp/refs/check/<key>.png`.
 - `temp/ai/<id>-<Kxx>.mp4`: Seedance results as delivered (24 fps, 1080p, slightly shorter than the clip);
   `temp/work/` the retimed clips and the dissolves. `temp/state/render/<id>-<Kxx>.json` `follow`: how well the
   result follows the source clip (matched / typical difference of edges and of coarse layouts; both above 0.93 /
   0.80 means it left the source). `temp/config/approved.json`: the result (generation) approved per segment.
 - `temp/reports/check/<id>-<Kxx>-a<n>.md/json` and `temp/review/check/<id>-<Kxx>-a<n>/`: each segment's check, per
-  attempt (issues in delivered-video seconds; `handoff`: where the next segment of the shot starts from).
+  attempt (issues in delivered-video seconds, each with its `part` segment/seam and its `sheet`; `seam`: the join
+  to the segment before, its `verdict`, the measured `mode`/`ratio`/`same`, the `preview` it was judged on and its
+  `sheet` when Gemini found nothing there, or `pending`; `handoff`: where the next segment of the shot starts from,
+  `handoff_still` its full-size frame when no issue covers it). `temp/config/dismissed.json`: why a failed check was
+  approved. `temp/work/preview/<id>-upto-<Kxx>.mp4`: the segments joined up to that one.
 - `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and
   `local_ratio`: the jump at the switch frame against the ordinary frame change, overall and in the worst region,
   `same`: how far apart both drawings are there, 0-255; a plain cut passes up to 1.15 / 1.2 / 30), `colour` (raw
   difference and residual per seam inside a shot, 0-255), `timing` (per segment: the constant `speed` and `offset`
   the clip plays at, frames `held`/`skipped` where the picture stands still, `camera_error`: camera on screen vs
   the source's, pixels at 270 wide, `typical` edge difference), segment times in the delivered video.
-- `temp/reports/review/<id>-r<n>.md`: each issue with severity, category, times, segments and description.

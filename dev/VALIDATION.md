@@ -72,7 +72,36 @@ source 0.97-0.98 / 0.83-0.89.
 **Review.** Gemini (`gemini-3.8-flash`) found every defect later confirmed on stills except one garbled caption it
 described as a ground change (2026-11-03). On a small crf-30 proxy it passed a visible 0.5 s dissolve and cartoon
 trees, hence near-lossless clips filling up to the 256,000,000-byte inline limit (a 60 s 2160x1920 side-by-side
-clip of about 200 MB was accepted, 2026-11-06).
+clip of about 200 MB was accepted, 2026-11-06). Gemini samples an inline video on its side at
+`videoMetadata.fps`, not at the clip's frame rate: at 4 frames/s rounds 1-2 of GOFCN64128 抢鱼之熊 (2026-11-10) and
+the K03 check passed a conveyor whose fish stood still while the belt ran (51.5-55.3 s, seen by the user in the
+delivery), a belt item moving about one spacing per 0.25 s. Sampling every frame (24/s) on Winky: a 55.3 s, 207 MB
+clip took 339,761 prompt tokens (about 256 per frame at media resolution HIGH, 2026-11-11); with every frame and the
+`motion` category and movement sentence in the prompt (round 4) Gemini still did not report the standing fish, so
+the frame rate is necessary, not sufficient, and motion of evenly spaced items is not yet caught by any check.
+`GEMINI_FPS` 6 for every clip whatever its length is the user's ceiling (2026-11-11): about 1,540 tokens per second
+of video, a 55 s review about 85k tokens. The agent stopped reading the whole video every 3 s (20 full-size pairs a
+round here, 24 more per set of segment checks) and reads one three-frame sheet per reported issue, the seam sheets
+and the handoff frames.
+
+**Per-segment gate, no whole-video review** (user rule, 2026-11-11). On GOFCN64128 抢鱼之熊 every flaw the
+whole-video rounds found had been in a segment check or at a seam already (the warning text K02 carried over from
+K01's handoff frame, the cash drawn early in K03), and each round cost a 207 MB, 86-340k-token clip. So the seam is
+judged when the later segment is checked, on a preview of the segments joined so far (the same retimed clips as the
+delivery; colour matching is solved again per shot at the end, residuals of about 0.05 here), Gemini also sees the
+handoff frame as a still, approval needs a passed check of the current result (or a written dismissal), and a
+segment may go back three times.
+
+**Survey and refs checks** (GOFCN64128 抢鱼之熊, 2026-11-11). The survey's one watch (6 frames/s, 95k tokens) also
+named the end card (55.6-55.67 s against the measured 55.32 s and the transition the agent judged at about 55.3 s: the
+strip around it is still for the agent to confirm), the logo and the warning lines; it gave the logo as top-left for
+the whole video though it moves to the bottom corners at 15 s, hence one strip per removal (start, middle, end) and
+analyze's still-box span beside Gemini's (0-15 s here). The still check (14k tokens for 12 pictures) caught the
+P03 crop that showed tuna instead of the polar bear and the late 52.3 s view with the conveyor; told only "later
+things", it also flagged views because characters stood in them, hence "late" defined as the place itself changed.
+The refs check (7 pictures, about 25k tokens) flagged the scene map's queue area drawn as pine forest (the cause of
+the crowd vanishing from K01's first result), the cash sheet drawn as one stack instead of two, and the conveyor
+sheet's back view; one note (fish drawn in the water) was wrong, the source shows them.
 
 **Segment gate** (`render.Waiting`, `check`/`approve`; GOFCN64128 抢鱼之熊, 2026-11-10). Without it one `render`
 run chained a whole shot: a K01 redo kept the bottom warning text, K02 was drawn from that frame and kept the text

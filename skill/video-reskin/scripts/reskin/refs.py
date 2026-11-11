@@ -7,7 +7,8 @@
   that come into view during the video, drawn at the scene map's realism.
 
 Every segment gets the scene map(s) it shows and the sheets of the subjects on screen (render), so the same place
-and the same subject look alike in every segment.
+and the same subject look alike in every segment. Gemini checks every new picture against what it was made from
+(the map against its view frames, a sheet against its crop); the agent looks only at the ones it flags.
 """
 from __future__ import annotations
 
@@ -17,16 +18,25 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from reskin import images
+from reskin import images, winky
 from reskin.analyze import font
-from reskin.common import digest, log, read, sha, write
+from reskin.common import digest, log, read, sha, write, write_text
 from reskin.prompts import compose, reference
-from reskin.survey import crop, frame
+from reskin.survey import crop, frame, scaled
 
 # Lumos fetches every reference picture from storage with a short timeout (a 20 MB 4K PNG timed out), so larger
 # pictures go as JPEG, and a scene map that only sets the look of a subject sheet goes reduced.
 UPLOAD_LIMIT = 8_000_000     # bytes
 LOOK_SIZE = 2048             # long side of a scene map sent as a look reference
+CHECK_MAP = 1536             # long side of a made picture Gemini checks (its inputs go at survey.CHECK_SIZE)
+CHECK_KINDS = ("layout", "cartoon", "invented", "late", "people_ui_text", "colour", "wrong_subject", "missing_part",
+               "extra", "other")
+CHECK_SCHEMA = {"type": "OBJECT", "properties": {
+    "ok": {"type": "BOOLEAN"},
+    "problems": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "kind": {"type": "STRING", "enum": list(CHECK_KINDS)}, "note": {"type": "STRING"}},
+        "required": ["kind", "note"]}}},
+    "required": ["ok", "problems"]}
 
 
 def scene_key(source_id: str, k: int) -> str:
@@ -88,7 +98,7 @@ def tasks(job: Path, state: dict, plan: dict, only: set[str] | None, redo: set[s
     for source_id in order:
         row = plan["sources"][source_id]
         wanted = lambda key: not only or source_id in only or key in only
-        used = {k for seg in row["segments"] for k in seg.get("subjects") or []}
+        used = used_subjects(row)
         for k, subject in enumerate(row["subjects"], 1):
             if k not in used:       # no segment takes its sheet
                 continue
@@ -204,6 +214,33 @@ def _safe(job, task, style, lock) -> dict:
             return {"key": task["key"], "error": f"{type(error).__name__}: {error}"}
 
 
+def used_subjects(row: dict) -> set[int]:
+    """Subjects some segment takes a sheet of: only these are made, checked and shown."""
+    return {k for seg in row["segments"] for k in seg.get("subjects") or []}
+
+
+def strip(title: str, inputs: list[Path], made: Path, width: int = 1800, band: int = 28) -> Image.Image:
+    """One row: the pictures a reference was made from, then the reference."""
+    height = 420 if len(inputs) <= 1 else 520
+    canvas = Image.new("RGB", (width, height + band), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.text((6, 4), title, fill="black", font=font(20))
+    x = 0
+    share = .38 if len(inputs) <= 1 else .5
+    cell = int(width * share / max(1, len(inputs))) if len(inputs) > 1 else int(width * share)
+    for path in inputs:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((cell - 6, height - 6), Image.LANCZOS)
+            canvas.paste(image, (x + 3, band + 3))
+        x += cell
+    with Image.open(made) as image:
+        image = image.convert("RGB")
+        image.thumbnail((width - x - 6, height - 6), Image.LANCZOS)
+        canvas.paste(image, (x + 3, band + 3))
+    return canvas
+
+
 def sheet(job: Path, source_id: str, row: dict) -> Path | None:
     """What the agent judges: per scene its view frames and the scene map, per subject its crop and its sheet."""
     folder = job / "refs"
@@ -213,41 +250,104 @@ def sheet(job: Path, source_id: str, row: dict) -> Path | None:
         views = sorted((folder / "inputs").glob(f"{source_id}-scene{k}-view*.png"))
         if made.is_file():
             blocks.append((f"scene {k} {scene['name']}: views | scene map", views, made))
+    used = used_subjects(row)
     for k, subject in enumerate(row["subjects"], 1):
         made = path_of(job, subject_key(source_id, k))
         close = folder / "inputs" / f"{source_id}-P{k:02d}-crop.png"
-        if made.is_file() and close.is_file():
+        if k in used and made.is_file() and close.is_file():
             blocks.append((f"P{k:02d} {subject['what']}: crop | three views", [close], made))
     if not blocks:
         return None
-    width, band = 1800, 28
-    label = font(20)
-    rendered = []
-    for title, inputs, made in blocks:
-        height = 420 if len(inputs) <= 1 else 520
-        strip = Image.new("RGB", (width, height + band), "white")
-        draw = ImageDraw.Draw(strip)
-        draw.text((6, 4), title, fill="black", font=label)
-        x = 0
-        share = .38 if len(inputs) <= 1 else .5
-        cell = int(width * share / max(1, len(inputs))) if len(inputs) > 1 else int(width * share)
-        for path in inputs:
-            with Image.open(path) as image:
-                image = image.convert("RGB")
-                image.thumbnail((cell - 6, height - 6), Image.LANCZOS)
-                strip.paste(image, (x + 3, band + 3))
-            x += cell
-        with Image.open(made) as image:
-            image = image.convert("RGB")
-            image.thumbnail((width - x - 6, height - 6), Image.LANCZOS)
-            strip.paste(image, (x + 3, band + 3))
-        rendered.append(strip)
-    canvas = Image.new("RGB", (width, sum(s.height for s in rendered)), "white")
+    rendered = [strip(*block) for block in blocks]
+    canvas = Image.new("RGB", (rendered[0].width, sum(s.height for s in rendered)), "white")
     y = 0
-    for strip in rendered:
-        canvas.paste(strip, (0, y))
-        y += strip.height
+    for row_image in rendered:
+        canvas.paste(row_image, (0, y))
+        y += row_image.height
     out = job / "sheets" / f"{source_id}-refs.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(out, compress_level=1)
     return out
+
+
+def check_prompt(task: dict) -> str:
+    row, item = task["row"], task["item"]
+    if task["kind"] == "scene":
+        later = "; ".join(f"{x['what']} (from {x['start']:g} s)" for x in row["subjects"]
+                          if x.get("start", 0) > max(item["views"]) + .5)
+        return " ".join(f"""
+The first pictures are frames of a 2.5D game ad; the last one is a map of the whole location that an image model
+drew from them in realistic materials, to be used as the look reference for restyling every part of the video. Check
+the map against the frames and report each problem: `layout` (the arrangement of paths, buildings, water, fences,
+props differs from the frames, or an area the frames show is missing), `cartoon` (game-like materials left: flat,
+smooth or toy-like surfaces, simple blob trees), `invented` (places or large objects the frames do not show),
+`late` (things that only come later in the video: {later or 'none listed'}), `people_ui_text` (characters, animals,
+HUD, icons, text or logos drawn in), `colour` (a colour cast or a brightness far from a natural realistic look).
+ok = no problem worth redrawing the map for. Each `note` one short sentence in Chinese.""".split())
+    return " ".join(f"""
+The first picture is a crop of {item['what']} ({item.get('description', '')}) from a 2.5D game ad; the second is a
+three-view sheet (front, side, back) an image model drew of it in realistic materials, to be used as its look
+reference. Check the sheet against the crop and report each problem: `wrong_subject` (it shows something else),
+`missing_part` (a part, colour or item the crop shows is missing or changed: clothing, held objects, markings),
+`extra` (things added that the crop does not show), `cartoon` (still toy-like or game-like), `layout` (not three
+views of the one subject on a plain background), `people_ui_text` (text, labels or logos drawn in). ok = no problem
+worth redrawing the sheet for. Each `note` one short sentence in Chinese.""".split())
+
+
+def check_inputs(job: Path, task: dict) -> list[Path]:
+    stem = task["key"].replace(":", "-")
+    folder = job / "refs/inputs"
+    if task["kind"] == "scene":
+        return [folder / f"{stem}-view{n}.png" for n in range(1, len(task["item"]["views"]) + 1)]
+    return [folder / f"{stem}-crop.png"]
+
+
+def check_one(job: Path, task: dict) -> dict:
+    made = path_of(job, task["key"])
+    inputs = check_inputs(job, task)
+    stem = task["key"].replace(":", "-")
+    folder = job / "refs/check"
+    parts = [winky.inline(scaled(path, folder / f"{stem}-in{n}.jpg"), "image/jpeg") for n, path in enumerate(inputs, 1)]
+    parts += [winky.inline(scaled(made, folder / f"{stem}-made.jpg", CHECK_MAP), "image/jpeg"),
+              {"text": check_prompt(task)}]
+    answer = winky.gemini(parts, schema=CHECK_SCHEMA, timeout=600)
+    problems = [p for p in answer.get("problems") or [] if p.get("note")]
+    result = {"key": task["key"], "ok": bool(answer.get("ok")) and not problems, "problems": problems}
+    if not result["ok"]:
+        title = f"{task['key']}: " + ("views | scene map" if task["kind"] == "scene" else "crop | three views")
+        path = folder / f"{stem}.png"
+        strip(title, inputs, made).save(path, compress_level=1)
+        result["look"] = str(path)
+    return result
+
+
+def check_all(job: Path, state: dict, plan: dict, workers: int = 3) -> list[dict]:
+    """Gemini checks every current reference once (again when the picture changed); returns the results per key and
+    writes reports/refs/<id>.md."""
+    rows = [t for t in tasks(job, state, plan, None, set()) if path_of(job, t["key"]).is_file()]
+    store_path = job / "state/refs-check.json"
+    store = read(store_path) if store_path.is_file() else {}
+    todo = [t for t in rows if store.get(t["key"], {}).get("picture") != sha(path_of(job, t["key"]))]
+
+    def one(task):
+        try:
+            return {**check_one(job, task), "picture": sha(path_of(job, task["key"]))}
+        except (RuntimeError, ValueError) as error:
+            return {"key": task["key"], "ok": False, "picture": "",
+                    "problems": [{"kind": "other", "note": f"check failed: {str(error)[:200]}; look at the refs sheet"}],
+                    "look": str(job / "sheets" / f"{task['source']}-refs.png")}
+    if todo:
+        log(f"Gemini checks {len(todo)} reference picture(s)")
+    with ThreadPoolExecutor(max(1, workers)) as executor:
+        for result in executor.map(one, todo):
+            store[result["key"]] = result
+    write(store_path, store)
+    results = [store[t["key"]] for t in rows if t["key"] in store]
+    for source_id in plan["sources"]:
+        mine = [r for r in results if r["key"].startswith(f"{source_id}:")]
+        lines = [f"# References {source_id}", ""]
+        for r in mine:
+            lines.append(f"- {r['key']}: " + ("ok" if r["ok"] else "; ".join(f"{p['kind']}: {p['note']}" for p in r["problems"])
+                                              + f"\n  look at {r.get('look', '')}"))
+        write_text(job / "reports/refs" / f"{source_id}.md", "\n".join(lines) + "\n")
+    return results

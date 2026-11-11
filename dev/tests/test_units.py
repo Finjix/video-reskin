@@ -202,29 +202,46 @@ class CredentialTests(unittest.TestCase):
 
 
 class ReviewTests(unittest.TestCase):
-    def test_issue_maps_to_segments(self):
-        assembled = {"segments": [{"id": "K01", "start": 0, "end": 10}, {"id": "K02", "start": 10, "end": 20}]}
-        self.assertEqual(review.segment_for(3, 4, assembled), ["K01"])
-        self.assertEqual(review.segment_for(9.9, 10.1, assembled), ["K01", "K02"])
-        self.assertEqual(review.segment_for(25, 26, assembled), ["K02"])
+    def test_gemini_watches_a_second_either_side_of_every_seam(self):
+        self.assertEqual(review.SEAM_SPAN, 1.0)
+        text = review.seam_prompt({"time": 15.04}, 14.04, True, "left", True)
+        self.assertIn("1.00 s into this clip", text)
+        self.assertIn("B must look like A", text)
+        self.assertNotIn("B must look like A", review.seam_prompt({"time": 15.04}, 14.04, False, "left", False))
 
-    def test_the_agent_sees_five_frames_per_seam_and_a_still_every_three_seconds(self):
-        self.assertEqual(review.SEAM_MOMENTS, (-1.0, -.5, 0.0, .5, 1.0))
-        self.assertEqual(review.every(10.0, review.STILL_STEP, 24.0), [0.0, 3.0, 6.0, 9.0])
+    def test_the_agent_sees_five_frames_per_seam_and_three_per_issue(self):
+        self.assertEqual(review.SEAM_MOMENTS, (-.5, -.25, 0.0, .25, .5))
+        self.assertEqual(review.issue_moments(10.0, 20.0, 55.0), [10.0, 15.0, 20.0])
+        self.assertEqual(review.issue_moments(47.0, 47.2, 55.0), [46.8, 47.1, 47.4])
+        self.assertEqual(review.issue_moments(0.0, 0.0, 55.0), [0.0, 0.0, 0.3])
+        self.assertEqual(review.issue_moments(55.2, 55.3, 55.25), [54.95, 55.25, 55.25])
+
+    def test_gemini_samples_six_frames_a_second_whatever_the_length(self):
+        from reskin import winky
+        self.assertEqual(winky.sample_fps(), 6.0)
+        self.assertEqual(winky.sample_fps(24), 6.0)          # never above 6
+        self.assertEqual(winky.sample_fps(2), 2.0)           # a lower rate may be asked for
+
+    def test_motion_is_its_own_category_and_the_prompt_asks_for_it(self):
+        self.assertIn("motion", review.CATEGORIES)
+        self.assertIn("motion", review.SCHEMA["properties"]["issues"]["items"]["properties"]["category"]["enum"])
+        text = review.prompt({"style": "realistic"}, {"remove": [], "materials": "snow"}, {"seams": []}, "left")
+        self.assertIn("Compare movement", text)
 
 
 class RedoTests(unittest.TestCase):
-    def test_a_segment_goes_back_twice_at_most(self):
+    def test_a_segment_goes_back_three_times_at_most(self):
         from reskin import render
         with tempfile.TemporaryDirectory() as folder:
             job = Path(folder)
             render.bump(job, "S01:K02", "colour jump")
             render.bump(job, "S01:K02", "automatic retry", automatic=True)
-            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "Keep the snow white.")["redos"], 2)
+            render.bump(job, "S01:K02", "logo left")
+            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "Keep the snow white.")["redos"], 3)
             with self.assertRaises(ValueError):
-                render.bump(job, "S01:K02", "third time")
+                render.bump(job, "S01:K02", "fourth time")
             row = read(job / "config/redo.json")["S01:K02"]
-            self.assertEqual(row["attempt"], 4)
+            self.assertEqual(row["attempt"], 5)
             self.assertEqual(row["prompt"], "Keep the snow white.")
 
     def test_results_that_left_the_source_are_set_aside_per_round(self):
@@ -343,8 +360,9 @@ class GateTests(unittest.TestCase):
         self.render.inputs_for, self.lumos.upload, self.render.cut_clip = self.saved
         self.folder.cleanup()
 
-    def finish(self, seg_id, generation):
-        """A finished result of `seg_id`, current for the inputs it has now."""
+    def finish(self, seg_id, generation, verdict="pass"):
+        """A finished result of `seg_id`, current for the inputs it has now, checked with `verdict` (None: not
+        checked)."""
         seg = next(s for s in self.ROW["segments"] if s["id"] == seg_id)
         inputs = self.render.inputs_for(self.job, {}, self.ROW, "S01", seg, {})
         (self.job / "ai").mkdir(exist_ok=True)
@@ -353,6 +371,22 @@ class GateTests(unittest.TestCase):
                         "generation_id": generation, "status": "done"}
         from reskin.common import write
         write(self.render.state_path(self.job, f"S01:{seg_id}"), write_record)
+        if verdict:
+            write(self.job / "reports/check" / f"S01-{seg_id}-a{generation}.json",
+                  {"segment": f"S01:{seg_id}", "generation_id": generation, "verdict": verdict,
+                   "issues": [] if verdict == "pass" else [{"n": 1}]})
+
+    def test_approval_needs_a_passed_check_of_the_current_result(self):
+        self.finish("K01", "gen-k01", verdict=None)
+        with self.assertRaises(ValueError):            # not checked
+            self.render.approve(self.job, "S01:K01")
+        self.finish("K01", "gen-k01b", verdict="fail")
+        with self.assertRaises(ValueError):            # failed, nothing dismissed
+            self.render.approve(self.job, "S01:K01")
+        self.assertFalse(self.render.approved(self.job, "S01:K01"))
+        self.render.approve(self.job, "S01:K01", dismiss="the logo Gemini saw is the original's HUD icon")
+        self.assertTrue(self.render.approved(self.job, "S01:K01"))
+        self.assertIn("S01:K01", read(self.job / "config/dismissed.json"))
 
     def segment(self, seg_id):
         return next(s for s in self.ROW["segments"] if s["id"] == seg_id)
@@ -404,6 +438,66 @@ class GateTests(unittest.TestCase):
         finally:
             self.render.render_segment = original
         self.assertEqual([bool(r.get("waiting")) for r in results], [False, True, True])
+
+
+class SurveyHandoverTests(unittest.TestCase):
+    """What the agent no longer reads off the catalog sheets comes from the survey as text."""
+
+    answer = {"scenes": [], "subjects": [],
+              "end_card": {"present": True, "start": 55.3, "how": "white flash"},
+              "overlays": [
+                  {"kind": "logo", "text": "无尽冬日", "what": 'the game logo "无尽冬日" in the top-left corner',
+                   "where": "top-left", "start": 0, "end": 15.0, "at": 5, "box_2d": [0, 0, 63, 287]},
+                  {"kind": "logo", "text": "无尽冬日", "what": 'the game logo "无尽冬日" in the bottom-right corner',
+                   "where": "bottom-right", "start": 15.0, "end": 58.0, "at": 30, "box_2d": [930, 750, 990, 990]},
+                  {"kind": "hud", "text": "60", "what": "cash counter", "where": "top-right", "start": 49, "end": 55,
+                   "at": 50, "box_2d": [0, 800, 53, 919]}]}
+
+    def test_overlays_and_end_card_are_normalised(self):
+        from reskin import survey
+        result = survey.normalise(self.answer, 58.9)
+        self.assertEqual(result["end_card"], {"start": 55.3, "how": "white flash"})
+        self.assertEqual([o["remove"] for o in result["overlays"]], [True, True, False])
+        self.assertEqual(result["overlays"][0]["box"], [0.0, 0.0, 0.287, 0.063])
+
+    def test_suggested_edits_keep_up_to_the_end_card_and_time_each_removal(self):
+        from reskin import survey
+        suggested = survey.suggested_edits(survey.normalise(self.answer, 58.9), 58.9)
+        self.assertEqual(suggested["keep"], [0, 55.3])
+        self.assertEqual([(r["start"], r["end"]) for r in suggested["remove"]], [(0.0, 15.0), (15.0, 55.3)])
+        self.assertTrue(all("cash counter" not in r["what"] for r in suggested["remove"]))
+
+    def test_a_measured_still_box_at_the_same_place_is_set_beside_the_span(self):
+        from reskin import survey
+        result = survey.normalise(self.answer, 58.9)
+        survey.measured_spans(result, [{"box": [0.0, 0.0, 0.287, 0.063], "start": 0.0, "end": 15.0},
+                                       {"box": [0.8, 0.0, 0.919, 0.053], "start": 49.5, "end": 55.5}])
+        self.assertEqual(result["overlays"][0]["measured"], "0-15 s")
+        self.assertNotIn("measured", result["overlays"][1])       # nothing measured in that corner
+        self.assertNotIn("measured", result["overlays"][2])       # the HUD is not a removal
+
+    def test_no_end_card_keeps_the_whole_video(self):
+        from reskin import survey
+        result = survey.normalise({**self.answer, "end_card": {"present": False, "start": 58.9, "how": ""}}, 58.9)
+        self.assertIsNone(result["end_card"])
+        self.assertEqual(survey.suggested_edits(result, 58.9)["keep"], [0, 58.9])
+
+
+class RefsCheckTests(unittest.TestCase):
+    row = {"segments": [{"subjects": [2, 5]}, {"subjects": [5]}],
+           "subjects": [{"what": f"thing {k}", "start": float(k * 10)} for k in range(1, 6)]}
+
+    def test_only_subjects_a_segment_takes_are_shown_and_checked(self):
+        from reskin import refs
+        self.assertEqual(refs.used_subjects(self.row), {2, 5})
+
+    def test_the_scene_check_names_what_comes_after_its_views(self):
+        from reskin import refs
+        text = refs.check_prompt({"kind": "scene", "row": self.row, "item": {"views": [0.5, 12.0]}})
+        self.assertIn("thing 2 (from 20 s)", text)
+        self.assertNotIn("thing 1 (", text)
+        sheet = refs.check_prompt({"kind": "subject", "row": self.row, "item": {"what": "whole tuna"}})
+        self.assertIn("whole tuna", sheet)
 
 
 if __name__ == "__main__":

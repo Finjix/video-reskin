@@ -30,7 +30,7 @@ GENERATION_TIMEOUT = 60 * 60
 SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 UPLOAD_BYTES = 190_000_000     # Seedance 2.5 takes reference videos up to 200 MB
 MAX_PICTURES = 5               # reference pictures one segment gets (Seedance 2.5 takes up to 30)
-MAX_REDOS = 2                  # a segment goes back at most twice after a review (the user's rule)
+MAX_REDOS = 3                  # a segment goes back at most three times after its check (the user's rule)
 
 
 class ResultRejected(RuntimeError):
@@ -60,16 +60,40 @@ def approved(job: Path, key: str) -> bool:
         approvals(job).get(key) == record["generation_id"]
 
 
-def approve(job: Path, key: str) -> str:
-    """Approve the segment's current result (after `check`); returns its generation id."""
+def latest_check(job: Path, key: str, generation_id: str) -> dict | None:
+    """The newest `check` report of this result (the segment on its own and the seam before it)."""
+    reports = sorted((job / "reports/check").glob(f"{key.replace(':', '-')}-a*.json"),
+                     key=lambda path: path.stat().st_mtime)
+    for path in reversed(reports):
+        report = read(path)
+        if report.get("generation_id") == generation_id:
+            return report
+    return None
+
+
+def approve(job: Path, key: str, dismiss: str | None = None) -> str:
+    """Approve the segment's current result; returns its generation id. The gate: a result is approved only after
+    `check` judged it (the segment and the seam to the one before it), and a failed check only with `dismiss`, the
+    agent's reason why none of its issues holds on the sheets."""
     record_path = state_path(job, key)
     record = read(record_path) if record_path.is_file() else {}
     if record.get("status") != "done":
         raise ValueError(f"{key} has no finished result to approve; run render first")
+    report = latest_check(job, key, record["generation_id"])
+    if report is None:
+        raise ValueError(f"{key}: its current result is not checked yet; run check --segment {key} first")
+    if report["verdict"] != "pass" and not (dismiss and dismiss.strip()):
+        raise ValueError(f"{key}: its check failed ({len(report['issues'])} issues): redo it, or, only when every "
+                         f"issue is wrong on its sheet, approve it with --dismiss \"<why, per issue>\"")
     with _REDO_LOCK:
         data = approvals(job)
         data[key] = record["generation_id"]
         write(job / "config/approved.json", data)
+        if dismiss and dismiss.strip():
+            path = job / "config/dismissed.json"
+            dismissed = read(path) if path.is_file() else {}
+            dismissed[key] = {"generation_id": record["generation_id"], "reason": dismiss.strip()}
+            write(path, dismissed)
     return record["generation_id"]
 
 
@@ -376,7 +400,8 @@ def bump(job: Path, key: str, reason: str, prompt: str | None = None, automatic:
         data = read(path) if path.is_file() else {}
         row = data.get(key, {"attempt": 1, "redos": 0, "reasons": []})
         if not automatic and row["redos"] >= MAX_REDOS:
-            raise ValueError(f"{key} was already sent back {MAX_REDOS} times (the limit): deliver it as it is and "
+            raise ValueError(f"{key} was already sent back {MAX_REDOS} times (the limit): ask the user, saying what is wrong "
+                             "and that the shot continues from it; or deliver it as it is and "
                              "report the open issue")
         row["attempt"] += 1
         row["redos"] += 0 if automatic else 1

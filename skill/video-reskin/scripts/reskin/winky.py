@@ -7,10 +7,12 @@ import mimetypes
 from pathlib import Path
 
 from reskin import credentials, net
+from reskin.common import log
 
 BASE = "https://lumos.diandian.info/winky"
 REVIEW_MODEL = "gemini-3.8-flash"
 MEDIA_RESOLUTION = "MEDIA_RESOLUTION_HIGH"     # video frames were 66 tokens each by default: too coarse to judge
+GEMINI_FPS = 6.0                               # frames per second Gemini samples from every video, any length
 
 
 class PermissionDenied(RuntimeError):
@@ -71,6 +73,9 @@ def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW
         body["generationConfig"].update(responseMimeType="application/json", responseSchema=schema)
     value = _post(f"{BASE}/gemini/v1/models/{model}:generateContent", body=json.dumps(body).encode("utf-8"),
                   content_type="application/json", timeout=timeout)
+    usage = value.get("usageMetadata") or {}
+    if usage:
+        log(f"gemini: {usage.get('promptTokenCount', '?')} prompt tokens, {usage.get('totalTokenCount', '?')} in all")
     candidates = value.get("candidates") or []
     if not candidates:
         raise RuntimeError(f"Gemini returned no answer: {str(value)[:500]}")
@@ -94,6 +99,7 @@ def inline(path: Path, mime: str | None = None, fps: float | None = None) -> dic
     return part
 
 
-def sample_fps(duration: float) -> float:
-    """Frames per second Gemini samples from a video: short ads get 4 so flicker and brief morphs are not missed."""
-    return 4.0 if duration <= 75 else 2.0
+def sample_fps(requested: float | None = None) -> float:
+    """Frames per second Gemini samples from a video (survey, check, review): GEMINI_FPS whatever its length, or a
+    lower rate asked for; never above GEMINI_FPS. Gemini samples the clip on its side at this rate."""
+    return min(float(requested or GEMINI_FPS), GEMINI_FPS)

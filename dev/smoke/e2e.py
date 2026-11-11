@@ -48,18 +48,21 @@ def main():
     edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
     launcher(["plan", "--job-dir", str(job), "--edits", str(edits_path)])
     launcher(["refs", "--job-dir", str(job)])
-    # render, check and approve until every shot is through (the smoke test approves unseen; real runs look first)
+    # render, check and approve until every shot is through (the smoke test approves unseen, failed checks included;
+    # real runs look first)
+    checks = []
     while True:
         rendered = launcher(["render", "--job-dir", str(job)])
-        launcher(["check", "--job-dir", str(job)])
-        launcher(["approve", "--job-dir", str(job), "--segment", *[f"S{k:02d}" for k in range(1, len(sources) + 1)]])
+        checked = launcher(["check", "--job-dir", str(job)])
+        checks += [line for line in checked.splitlines() if " attempt " in line]
+        launcher(["approve", "--job-dir", str(job), "--segment", *[f"S{k:02d}" for k in range(1, len(sources) + 1)],
+                  "--dismiss", "smoke test: approved unseen"])
         if " 0 waiting" in rendered.splitlines()[0]:
             break
     launcher(["assemble", "--job-dir", str(job)])
-    review = launcher(["review", "--job-dir", str(job)])
     delivered = sorted(str(p) for p in job.parent.glob("*.mp4"))
     report = {"job": str(job), "sources": [p.name for p in sources], "delivered": delivered,
-              "review": [line for line in review.splitlines() if " round " in line]}
+              "checks": checks}
     (ROOT / "dev/smoke/latest.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=1))
 

@@ -1,5 +1,5 @@
-"""video-reskin command line: auth/login -> init -> analyze -> survey -> plan -> refs -> render <-> check/approve ->
-assemble -> review."""
+"""video-reskin command line: auth/login -> init -> analyze -> survey -> plan -> refs -> render <-> check/approve
+(each segment and its seam to the one before) -> assemble."""
 from __future__ import annotations
 
 import argparse
@@ -112,9 +112,27 @@ def cmd_survey(args) -> int:
                              for k, x in enumerate(r["subjects"], 1))
         lines.append(f"{r['id']}{' (reused)' if r.get('reused') else ''}: scenes: {scenes or 'none'}; "
                      f"subjects: {subjects or 'none'}")
-    show(lines + [f"survey: {job / 'catalog/survey'} (<id>.json); sheets: {job / 'catalog'} (<id>-survey.jpg)",
-                  "next: look at every survey sheet with the catalog sheets, write the edits file (correct scenes or "
-                  "subjects there when Gemini picked a bad view, crop or moment), then plan --edits <edits.json>"])
+        card = r.get("end_card")
+        lines.append(f"  end card: {'from ' + format(card['start'], '.2f') + ' s (' + card['how'] + ')' if card else 'none'}"
+                     + (f"; confirm on {r['end_strip']}" if r.get("end_strip") else ""))
+        for o in r.get("overlays") or []:
+            if o["remove"]:
+                lines.append(f"  remove {o['id']} {o['kind']} {o['where']} {o['start']:g}-{o['end']:g} s: {o['what']}"
+                             + (f" (a still box was measured there {o['measured']})" if o.get("measured") else "")
+                             + f"\n     confirm on {(r.get('overlay_stills') or {}).get(o['id'], '-')}")
+        kept = [o for o in r.get("overlays") or [] if not o["remove"]]
+        if kept:
+            lines.append(f"  HUD kept: " + "; ".join(f"{o['where']} {o['text'] or o['what']}" for o in kept))
+        for c in r.get("checks") or []:
+            lines.append(f"  flagged {c['picture']} ({c['problem']}): {c['note']}\n     look at {c['path']}")
+        if not r.get("checks"):
+            lines.append("  views and crops: Gemini found nothing wrong on the stills")
+        if r.get("suggested"):
+            lines.append(f"  suggested edits: {json.dumps(r['suggested'], ensure_ascii=False)}")
+    show(lines + [f"survey: {job / 'catalog/survey'} (<id>.json); all views and crops on {job / 'catalog'}/<id>-survey.jpg",
+                  "next: look at the end-card strip, each removal strip and each flagged picture (not the whole "
+                  "sheets; on each also look for anything else wrong, never only what it was made for), write the edits file from the suggested edits plus the materials (correct scenes or "
+                  "subjects where a flag holds), then plan --edits <edits.json>"])
     return RULE_FAILURE if failed else 0
 
 
@@ -162,10 +180,18 @@ def cmd_refs(args) -> int:
     made = [r for r in results if not r.get("error") and not r.get("reused")]
     lines = [f"references: {len(made)} made, {len(results) - len(made) - len(failed)} reused, {len(failed)} failed"]
     lines += [f"  {r['key']}: {r['error']}" for r in failed]
-    lines.append(f"sheets: {job / 'sheets'} (<id>-refs.png: views | scene map, crop | three views)")
+    checks = REFS.check_all(job, state, plan, workers=args.workers)
+    flagged = [c for c in checks if not c["ok"]]
+    lines.append(f"Gemini check: {len(checks) - len(flagged)} ok, {len(flagged)} flagged")
+    for c in flagged:
+        lines.append(f"  {c['key']}: " + "; ".join(f"{p['kind']}: {p['note']}" for p in c["problems"])
+                     + f"\n     look at {c.get('look', '')}")
+    lines.append(f"reports: {job / 'reports/refs'}; all pictures on {job / 'sheets'}/<id>-refs.png")
     lines.append("next: " + ("fix the failures and run refs again" if failed else
-                             "look at every refs sheet (make a bad one again with refs --redo <id>:scene1 or <id>:P02 "
-                             "after adjusting the edits), then render"))
+                             "look at each flagged picture (not the whole sheets), confirm or dismiss it and look for "
+                             "anything else wrong on it; make a "
+                             "confirmed one again with refs --redo <id>:scene1 or <id>:P02 after adjusting the edits, "
+                             "then render" if flagged else "render"))
     show(lines)
     return RULE_FAILURE if failed else 0
 
@@ -234,14 +260,27 @@ def cmd_check(args) -> int:
         result = REVIEW.check_segment(job, state, source_id, row, seg)
         lines.append(f"{result['segment']} attempt {result['attempt']}: {result['verdict']}, {len(result['issues'])} "
                      f"issues: {result['summary']}")
-        lines += [f"  #{i['n']} [{i['severity']}] {i['category']} {i['start']:.2f}-{i['end']:.2f} s: {i['description']}"
-                  for i in result["issues"]]
-        lines.append(f"  stills (every {REVIEW.STILL_STEP:g} s, lossless): {Path(result['stills'][0]).parent} "
-                     f"({len(result['stills'])} pairs)" + (f"; {result['next']} starts from the frame at "
-                                                          f"{result['handoff']:.2f} s" if result["next"] else ""))
+        lines += [f"  #{i['n']} [{i['severity']}] {i['part']} {i['category']} {i['start']:.2f}-{i['end']:.2f} s: "
+                  f"{i['description']}\n     sheet: {i['sheet']}" for i in result["issues"]]
+        seam = result.get("seam")
+        if seam and seam.get("pending"):
+            lines.append(f"  seam: not checked yet: {seam['pending']}")
+        elif seam:
+            lines.append(f"  seam at {seam['time']:.2f} s ({seam['seam']}): {seam['verdict']}; "
+                         + (f"Gemini found nothing, review it yourself: {seam['sheet']}" if seam["sheet"]
+                            else "confirm Gemini's seam issues on their sheets"))
+        if result.get("handoff_still"):
+            lines.append(f"  handoff ({result['next']} starts here, {result['handoff']:.2f} s): Gemini found nothing, "
+                         f"review it yourself: {result['handoff_still']}")
+        elif result.get("handoff_reported"):
+            lines.append(f"  handoff ({result['next']} starts here, {result['handoff']:.2f} s): confirm Gemini's "
+                         "issues there on their sheets")
     show(lines + [f"reports: {job / 'reports/check'}",
-                  "next: look at every still yourself; approve --segment <key> what is right, redo --segment <key> "
-                  "what you confirmed broken; then render (the segments after an approved one start)"])
+                  "next: confirm or dismiss each issue on its sheet and look over the whole sheet for anything else "
+                  "wrong (never only the reported issue); review the seam "
+                  "sheet and the handoff frame where Gemini found nothing there; approve --segment <key> a passed "
+                  "result (a failed one only with --dismiss \"<why each issue is wrong>\"), redo --segment <key> "
+                  "what you confirmed broken; then render (the segment after an approved one starts)"])
     return 0
 
 
@@ -257,7 +296,8 @@ def cmd_approve(args) -> int:
         record = RENDER.state_path(job, key)
         if source_id in whole and not (record.is_file() and read(record).get("status") == "done"):
             continue        # a source ID approves its finished segments
-        lines.append(f"{key}: approved (result {RENDER.approve(job, key)[:8]})")
+        lines.append(f"{key}: approved (result {RENDER.approve(job, key, args.dismiss)[:8]})"
+                     + (f", dismissed: {args.dismiss}" if args.dismiss else ""))
     show(lines + ["next: render (the segments continuing from these start), or assemble when all are rendered"])
     return 0
 
@@ -292,41 +332,9 @@ def cmd_assemble(args) -> int:
         lines.append(f"{source_id}: {Path(result['output']).name} {result['size'][0]}x{result['size'][1]} "
                      f"{result['duration']:.2f} s" + (f", seam colours: {colour}" if colour else "")
                      + (f", problems: {'; '.join(result['problems'])}" if result["problems"] else ""))
-    show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else "review")])
-    return RULE_FAILURE if failed else 0
-
-
-def cmd_review(args) -> int:
-    job = args.job_dir.resolve()
-    state = JOB.load(job)
-    plan = load_plan(job)
-    runtime.ensure("media")
-    from reskin import review as REVIEW
-    only = selection(args.only)
-    lines, failed = [], False
-    for source_id, row in plan["sources"].items():
-        if only and source_id not in only:
-            continue
-        if not (job / "state/assembled" / f"{source_id}.json").is_file():
-            lines.append(f"{source_id}: not assembled yet")
-            failed = True
-            continue
-        result = REVIEW.review_source(job, state, source_id, row, fps=args.fps)
-        high = sum(1 for i in result["issues"] if i["severity"] == "high")
-        lines.append(f"{source_id} round {result['round']}: {result['verdict']}, {len(result['issues'])} issues "
-                     f"({high} high): {result['summary']}")
-        for issue in result["issues"]:
-            lines.append(f"  #{issue['n']} [{issue['severity']}] {issue['category']} {issue['start']:.2f}-{issue['end']:.2f} s "
-                         f"-> {', '.join(issue['segments'])}: {issue['description']}")
-        if result.get("stills"):
-            lines.append(f"  stills (every {REVIEW.STILL_STEP:g} s, lossless): {Path(result['stills'][0]).parent} "
-                         f"({len(result['stills'])} pairs)")
-        for seam in result.get("seams") or []:
-            lines.append(f"  seam {seam['segment']} at {seam['time']:.2f} s ({seam['seam']}): {seam['sheet']}")
-    show(lines + [f"reports: {job / 'reports/review'}",
-                  "next: look at every still and every seam sheet yourself; confirm each issue with frames "
-                  "--source <id> --at <seconds>; send confirmed flaws back with redo (at most twice per segment), "
-                  "then (refs,) render, assemble and review again"])
+    show(lines + ["next: " + ("render the missing segments, then assemble again" if failed else
+                              "deliver: every segment and seam passed its check (frames --source <id> --at <t> for a "
+                              "look at any moment)")])
     return RULE_FAILURE if failed else 0
 
 
@@ -359,7 +367,7 @@ def cmd_redo(args) -> int:
         lines.append(f"{key}: attempt {entry['attempt']} queued ({args.reason})"
                      + (f"; approved later segments keep their results: {', '.join(kept)}" if kept else ""))
     steps = "refs --redo <the broken scene map or sheet>, render" if args.refs else "render"
-    show(lines + [f"next: {steps}, check the new result, approve it, then render the rest (or assemble, review)"])
+    show(lines + [f"next: {steps}, check the new result, approve it, then render the rest (or assemble)"])
     return 0
 
 
@@ -387,12 +395,8 @@ def cmd_status(args) -> int:
             rendered += record.is_file() and read(record).get("status") == "done"
             approved += RENDER.approved(job, f"{source_id}:{k}")
         assembled = (job / "state/assembled" / f"{source_id}.json").is_file()
-        rounds_path = job / "state/review" / f"{source_id}.json"
-        rounds = read(rounds_path)["rounds"] if rounds_path.is_file() else []
-        last = f"round {rounds[-1]['round']} {rounds[-1]['verdict']} ({rounds[-1]['issues']} issues)" if rounds else "no review"
         lines.append(f"{source_id}: references {frames_ready}/{len(own)}, segments {rendered}/{len(keys)} "
-                     f"({approved} approved), "
-                     f"assembled: {'yes' if assembled else 'no'}, {last}")
+                     f"({approved} approved), assembled: {'yes' if assembled else 'no'}")
         if step is None:
             if frames_ready < len(own):
                 step = "refs"
@@ -402,9 +406,7 @@ def cmd_status(args) -> int:
                 step = "render"
             elif not assembled:
                 step = "assemble"
-            elif not rounds:
-                step = "review"
-    show(lines + [f"next: {step or 'confirm review issues, redo what is broken, or deliver'}"])
+    show(lines + [f"next: {step or 'deliver'}"])
     return 0
 
 
@@ -461,19 +463,17 @@ def main() -> None:
     assemble.add_argument("--seams", choices=("auto", "cut", "dissolve"), default="auto",
                           help="seams inside a shot: auto (a plain cut where it does not show, else a light dissolve; "
                                "default), or always cut / always dissolve, to compare")
-    review = command("review", cmd_review, help="Gemini review of each delivered video against its original")
-    review.add_argument("--only", nargs="*", help="source IDs")
-    review.add_argument("--fps", type=float, default=None, help="frames per second Gemini samples (default: 4 up to 75 s, else 2)")
     frames = command("frames", cmd_frames, help="stills of original and restyled around given times")
     frames.add_argument("--source", required=True)
     frames.add_argument("--at", type=float, nargs="+", required=True, help="seconds in the delivered video")
     frames.add_argument("--span", type=float, default=.3)
-    check = command("check", cmd_check, help="review rendered segments on their own before the shot continues from them")
+    check = command("check", cmd_check, help="judge rendered segments and the seam to the segment before each, before anything continues from them")
     check.add_argument("--segment", nargs="*", help="keys like S01:K02 or source IDs (default: every finished segment "
                                                    "not approved yet)")
     approve = command("approve", cmd_approve, help="approve checked segments: the segments continuing from them render")
     approve.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02, or source IDs")
-    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (twice at most)")
+    approve.add_argument("--dismiss", help="approve a result whose check failed: why each of its issues is wrong on the sheets")
+    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (three times at most)")
     redo.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")

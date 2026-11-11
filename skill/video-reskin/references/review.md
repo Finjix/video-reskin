@@ -1,67 +1,87 @@
-# Review loop
+# Gate and checks
 
-## Segment check (before a shot continues)
+Every segment passes a gate before anything continues from it, and there is no review of the whole video
+afterwards: a video whose every segment and every seam passed is done. Gemini (`gemini-3.8-flash`, media resolution
+HIGH) does the watching; you confirm what it reports and look for anything else.
 
-A segment that continues a shot is drawn from the previous segment's last frames, so `render` submits it only after
-that segment is approved. After every `render` run, `check` the new results: Gemini watches each one beside its
-source clip (same categories as below), and `review/check/<id>-<Kxx>-a<n>/` holds lossless stills of it every 3 s
-plus the frame the next segment starts from (marked). Look at all of them, the handoff frame above all: leftover
-warning text or logos, a crowd or object that vanished, a wrong material or colour there is copied into the next
-segment. Confirm Gemini's issues on these stills like any other, then `approve --segment <key>` the clean results and
-`redo` the confirmed broken ones (it counts against the same two redos), and `render` again. An approved segment
-keeps its result when a segment before it is redone later; if the seam then shows, `redo` it on its own.
+## The gate: `check`, then `approve`
 
-## Whole video
+A segment that continues a shot is drawn from the previous segment's frame where it begins (the handoff frame), so
+`render` submits it only after that segment is approved. After every `render` run, `check` the new results. For each:
 
-`review` sends Gemini (`gemini-3.8-flash`, media resolution HIGH) the whole video once: the original and the restyled
-video side by side at the delivery's own size (left/right for vertical videos, top/bottom for horizontal ones),
-frame-synchronised, 24 fps, near-lossless (crf 4) with the bitrate capped to fill, not pass, the 256,000,000-byte
-inline limit, sampled at 4 frames/s up to 75 s (2 beyond), with the seam times and the removal list. The seams are
-yours to check on stills (below). It returns issues in seven categories:
+1. **The segment.** Gemini watches it beside its source clip: both side by side at the delivery's own size
+   (left/right for vertical videos, top/bottom for horizontal ones), frame-synchronised, 24 fps, near-lossless (crf 4)
+   with the bitrate capped to fill, not pass, the 256,000,000-byte inline limit, sampled at 6 frames/s (whatever its
+   length), with the removal list. It also gets, as a still, the frame the next segment will start from: a flaw
+   there is reported high.
+2. **The seam to the segment before.** The script joins every segment up to this one (a preview, no audio: the same
+   retimed clips, colour matching and switch the delivery gets), and Gemini watches the join 1 s either side beside
+   the original; inside a shot it also compares the frame this segment was told to start from (A) with its own
+   first frame (B) and the original (C). The measured seam figures (a dissolved seam whose two drawings differ a
+   lot, a colour residual above 6 after matching) join the issues. At a camera cut only the look must carry over.
+   While the segment before has no approved result the seam is `pending`: check again after approving it.
+3. **The verdict.** `fail` on a high issue anywhere, two or more medium issues in the segment, any medium or high
+   issue at the seam, or a pending seam. `approve --segment <key>` takes a passed check of the current result; a
+   failed one only with `--dismiss "<why each issue is wrong>"` once you saw every sheet and none holds. Anything
+   you confirmed goes to `redo`.
+
+Issue categories (segment and seam alike):
 
 | Category | Means |
 | --- | --- |
-| `continuity` | 穿帮: something differs from the original (cartoon material left, an object changes shape, colour or count, things appear or vanish, motion no longer matches) |
+| `continuity` | 穿帮: something differs from the original (cartoon material left, an object changes shape, colour or count, things appear or vanish) |
+| `motion` | 运动不一致: what the original moves (conveyor items, walking characters, flying objects, the camera) stands still, moves the other way or at another speed, or something still starts moving |
 | `artifact` | bug: morphing, melting, flicker, jitter, frozen frames, garbled HUD text or numbers, strong noise or a fragmented look |
 | `added_text` | captions, warning lines, watermarks or garbled characters the original does not have (the model draws them when a prompt names text that is not on screen) |
-| `seam_color` | 拼接色差: a jump in colour, brightness, texture or realism, mostly at seams; `measured` issues come from `assemble`: a dissolved seam inside a shot whose two drawings differ a lot (medium; check its sheet) or a colour residual above 6 after matching |
+| `seam_color` | 拼接色差: a jump in colour, brightness, texture or realism at the join |
 | `leftover_overlay` | a logo, watermark or warning line still visible |
 | `end_card` | closing-card content still visible |
 | `style_drift` | the look changes between parts of the video |
 
-Each issue lists the segments it falls in (`S01:K03`). Gemini is a second pair of eyes, not the judge.
+Gemini is a second pair of eyes, not the judge: it misses things and reports things that are not there.
 
-## Your own review on stills
+## Your part: Gemini first, then you
 
-Gemini misses things. Every round, look at all stills yourself; they are lossless (PNG), the original on the left
-(top), the result on the right (bottom):
+`review/check/<id>-<Kxx>-a<n>/` holds lossless PNGs, the original row above, the restyled row below:
 
-- `review/stills/<id>-r<n>/`: the whole video every 3 s. Compare every object with the original and with the rest
-  of the video: game-like materials left (cartoon trees, flat wood), a place drawn differently when it comes back,
-  colours, counts, garbled text. Look hard at the ground: flat, smooth or uniform soil and snow is the first thing
-  that makes a result look fake.
-- `review/seams/<id>-<Kxx>.png`: each seam at -1, -0.5, 0, +0.5 and +1 s (original row above, restyled row below).
-  Inside a shot the 0 s frame is the switch (a plain cut, or the middle of a light 6-frame dissolve); judge whether the -1/-0.5 frames
-  and the +0.5/+1 frames show the same place, objects, colours, materials and realism: a step between the two
-  sides is a seam issue, also when the measure calls the seam clean. At a camera cut only the look must carry over.
+- `<nn>-<category>.png`: one sheet per issue, at its start, middle and end (a short issue at its middle and 0.3 s
+  either side). Confirm or dismiss the issue on it (below).
+- `seam-<t>.png`: the seam every 0.25 s from -0.5 to +0.5 s, five frames, **only when Gemini found nothing at the
+  seam**: review it yourself. Inside a shot the 0 s frame is the switch (a plain cut, or the middle of a light 6-frame
+  dissolve); judge whether the frames before and after it show the same place, objects, colours, materials and
+  realism: a step is a seam issue, also when the measure calls it clean. Where Gemini reported a seam issue you judge
+  that issue on its own sheet instead.
+- `handoff-<t>.png`: the full-size frame the next segment starts from, **only when no issue Gemini reported covers
+  it**: review it yourself; leftover text or logos, a changed or missing character, crowd or object, a wrong
+  material there is copied into the rest of the shot, so a segment whose handoff frame shows one is not approved.
 
-What you find there counts like a reported issue: confirm it, then redo.
+On every picture you look at, never only the reported issue: also look over the whole picture for anything else
+wrong (game-like materials left such as cartoon trees or flat wood, a place drawn differently, colours, counts,
+garbled text or logos, a changed or missing character, and the ground: flat, smooth or uniform soil and snow is the
+first thing that makes a result look fake). What you find counts like a reported issue. When you have reason to
+doubt a stretch Gemini passed (a part the user named, a fast or crowded moment), `frames --source <id> --at <t>`
+gives three frames of the delivery there.
 
-## Confirm on stills
+## Confirm on the sheets
 
-For every issue run `frames --source <id> --at <start> [<end>]` and look at the image: the top row is the original,
-the bottom row the result, at T-0.3 s, T and T+0.3 s. Decide:
+For every issue look at its sheet: the top row is the original, the bottom row the result. Decide:
 
 - **Confirmed**: the bottom row shows the flaw and the top row does not. Note what exactly is wrong.
 - **Dismissed**: the original shows the same thing (game physics, clipping, motion blur), the flaw is not visible on
-  the stills, or it is the intended material change. Note why.
+  the sheet, or it is the intended material change. Note why (it goes into `--dismiss` when all are dismissed).
+
+A `motion` issue does not show on any single still: pick one item that stands out (the first fish on a belt, a
+character's foot) and compare where it is in the three frames of each row against something fixed (a post, the belt's
+end). Evenly spaced things (belt items, fences, crowds) look the same after a step of one spacing, so also look at
+the gaps and ends, not only the pattern.
 
 ## Redo
 
 `redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective English sentence>"] [--replace] [--refs]`
 
-- Every segment goes back at most twice (`redo` refuses a third time): after that deliver it and list what is open.
-  Automatic retries after a failed generation do not count.
+- Every segment goes back at most three times (`redo` refuses a fourth): after that ask the user when the flaw
+  would carry into the rest of the shot, otherwise deliver it and list what is open. Automatic retries after a
+  failed generation do not count.
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
   confirmed flaw's look, e.g. `Keep every fish whole, with the shape and count of the original.`, `Remove the logo
   text left in the top-right corner.`, `Keep the overall colours of the reference images; the snow stays white.`.
@@ -70,8 +90,7 @@ the bottom row the result, at T-0.3 s, T and T+0.3 s. Decide:
 - A result that cut, zoomed or framed differently from the source is caught by `render` itself (it compares the
   result's edges and coarse layout with the source clip) and rendered once more automatically.
 - `--refs` when the scene map or a subject sheet already shows the flaw (wrong objects, cartoon parts, colour cast):
-  run `refs --redo S01:scene1` (or `S01:P02`) and check the sheet before rendering. A changed scene map re-renders
+  run `refs --redo S01:scene1` (or `S01:P02`) and look at its check before rendering. A changed scene map re-renders
   every segment that uses it.
-- A seam step: redo the segment on the side that looks wrong against the scene map (usually the one whose look
-  differs from the rest of the video); only that segment renders again.
-- Then `render` (only redone segments run), `assemble`, `review`. Each review round is numbered.
+- A seam flaw: redo the later segment (it was drawn to continue the earlier one); only that segment renders again.
+- Then `render` (only redone segments run) and `check` the new result.

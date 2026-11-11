@@ -490,12 +490,18 @@ def make_seam(job: Path, source_id: str, clips: list[Path], lines: list[dict], i
 
 # --- 4. join ---------------------------------------------------------------------------------------------------
 
-def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict, seams: str = "auto") -> dict:
+def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: dict, seams: str = "auto",
+                    upto: str | None = None) -> dict:
+    """Join the source's segments into its delivery. `upto` (a segment id) joins only the segments up to that one,
+    without audio, into `work/preview/` (the segment check judges the new seam on it); every clip is retimed against
+    the whole plan either way, so a preview and the delivery share their retimed clips."""
     source = next(r for r in state["sources"] if r["id"] == source_id)
     info = video_info(Path(source["path"]))
     out_fps = min(float(state["options"]["fps"]), round(row["fps"], 3))
     size = target_size(row["width"], row["height"])
-    lines = timeline(row, out_fps)
+    full = timeline(row, out_fps)
+    count = len(full) if upto is None else next(i for i, line in enumerate(full) if line["id"] == upto) + 1
+    lines = full[:count]
     def one(index: int) -> tuple[Path, dict]:
         line, seg = lines[index], row["segments"][index]
         ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
@@ -511,7 +517,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
             return work, read(stamp_path)["timing"]
         log(f"{source_id}:{line['id']}: retiming")
         # Where the clip's timing must meet the source: its start and every seam inside a shot (the switch lies there).
-        joined = lambda near: 0 < near < len(lines) and lines[near]["seam"] == "continuous"
+        joined = lambda near: 0 < near < len(full) and full[near]["seam"] == "continuous"
         anchors = [line["body"][0] - line["out"][0] if joined(index) else 0,
                    line["body"][1] - line["out"][0] if joined(index + 1) else frames - 1]
         measured = retime(ai, Path(source["path"]), seg["render_frames"], row["fps"], frames, out_fps, size, work,
@@ -552,7 +558,7 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     graph.append(f"[joined]trim=end_frame={total},setpts=PTS-STARTPTS[vout]")
     keep_start, keep_end = row["keep"]
     audio = []
-    if info["audio"]:
+    if info["audio"] and upto is None:
         index = len(pieces)
         inputs += ["-i", source["path"]]
         fade = []
@@ -563,10 +569,14 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         graph.append(f"[{index}:a]atrim=start={keep_start:.6f}:end={keep_end:.6f},asetpts=PTS-STARTPTS"
                      + "".join("," + f for f in fade) + "[aout]")
         audio = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
-    delivery = Path(state["delivery_dir"])
-    names = [r["name"] for r in state["sources"]]
-    name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
-    output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
+    if upto is None:
+        delivery = Path(state["delivery_dir"])
+        names = [r["name"] for r in state["sources"]]
+        name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
+        output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
+    else:
+        output = job / "work/preview" / f"{source_id}-upto-{upto}.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
     run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,
          "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-profile:v", "high", "-pix_fmt", "yuv420p",
@@ -602,6 +612,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "timing": timing, "problems": problems, "keep": row["keep"],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - origin) / out_fps, 3),
                             "end": round((line["body"][1] - origin) / out_fps, 3)} for line in lines]}
-    write(job / "state/assembled" / f"{source_id}.json", result)
-    log(f"{source_id}: assembled {output.name} ({made['width']}x{made['height']}, {made['duration']:.2f} s)")
+    if upto is None:
+        write(job / "state/assembled" / f"{source_id}.json", result)
+    log(f"{source_id}: {'assembled' if upto is None else 'preview up to ' + upto}: {output.name} "
+        f"({made['width']}x{made['height']}, {made['duration']:.2f} s)")
     return result
