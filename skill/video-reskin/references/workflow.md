@@ -12,12 +12,12 @@ runtime cache; the first use adds the downloads (`runtime --feature media|login 
 | `survey [--only S01] [--redo]` | Gemini watches each whole source (6 frames/s): scene views, subjects (re-boxed on stills), the end card, overlays to remove and HUD; then checks the views and crops as stills → `catalog/survey/<id>.json` (with `suggested` edits and `checks`), one marked still per removal and the end-card strip in `catalog/survey/<id>/`, all on `catalog/<id>-survey.jpg` | 1-2 min per source |
 | `plan --edits <json>` | stores the edits, cuts each kept range into segments → `config/plan.json`, `reports/plan.md` | < 1 s |
 | `refs [--only K] [--redo K]` | scene maps (GPT Image 2.6, 4K, high) and three-view sheets (1K, medium) → `refs/`; Gemini checks each new picture against its inputs → `reports/refs/<id>.md`, flagged ones side by side with their inputs in `refs/check/<key>.png`; all on `sheets/<id>-refs.png` | 2-6 min per scene map, ~1 min per sheet, 3 at a time |
-| `render [--only K] [--workers 4]` | Seedance 2.5 video edit at 1080p → `ai/`: the first segment of every shot, and each segment whose previous one in the shot is approved (it gets that result's frame where it begins, `refs/chain/`); the rest report `waiting`; shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
+| `render [--only K] [--workers 4]` | Seedance 2.5 video edit at 1080p of each segment's clip, cut from the source at 24 fps (`CLIP_FPS`: a faster source is brought down locally, not by the model) → `ai/`: the first segment of every shot, and each segment whose previous one in the shot is approved (it gets that result's frame where it begins, `refs/chain/`); the rest report `waiting`; shots side by side; results that leave the source's camera are rejected and rendered once more | minutes per segment, 4 at a time |
 | `check [--segment K ...]` | the gate of each finished segment not approved yet (or the ones named): Gemini beside its source clip and the frame the next segment starts from, then the seam to the segment before on a preview of the segments joined so far (`work/preview/`), 1 s either side beside the original, with the start frame it was given beside its own first frame (6 frames/s, near-lossless up to 256 MB) → `reports/check/<id>-<Kxx>-a<n>.md/json`; for the agent one three-frame sheet per issue, and the seam's five-frame sheet and the full-size handoff frame where Gemini found nothing there → `review/check/<id>-<Kxx>-a<n>/` | 2-3 min per segment |
 | `approve --segment S01:K02 [...] [--dismiss R]` | approves the current result of segments whose check of that result passed (a failed one only with `--dismiss`, why each issue is wrong; a source ID: all its finished segments); the next `render` continues their shots | - |
 | `assemble [--only S01] [--seams auto\|cut\|dissolve]` | retime each clip at one constant speed, colour-match, switch at seams inside shots with a plain cut or, where a cut would show, a light dissolve (`cut` / `dissolve`: always, to compare), join with the source audio → delivery folder; there is no review after it | ~1 min per video |
 | `frames --source S01 --at T [T...]` | stills of the delivery: original (top) vs restyled (bottom) at T-0.3, T, T+0.3 s → `review/frames/` | seconds |
-| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (three times per segment at most) and drops their approval; approved later segments of the shot keep their results (check them again: their seam changed); `--replace` drops the earlier corrective sentences | - |
+| `redo --segment S01:K02 --reason R [--prompt P] [--replace] [--refs]` | sends confirmed segments back (five times per segment at most) and drops their approval; approved later segments of the shot keep their results (check them again: their seam changed); `--replace` drops the earlier corrective sentences | - |
 | `status` | progress per source and the next step | - |
 
 Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subject sheet `S01:P02`.
@@ -101,6 +101,14 @@ All texts are English: they go into the model prompts.
 - `extra`: one short sentence added to the source's scene-map and video prompts (e.g. `Keep the snow white, never
   purple.`).
 - `split_at`: extra split times (seconds) when a segment boundary must hit a particular moment.
+- `sheets`: `{"K03": [8, 1]}` names the sheets a segment takes (subject numbers as in `reports/plan.md`, at most
+  two), instead of the ones that fill it most: when a subject the segment was to carry from the previous result's
+  frame was redrawn as something else (the fisherman drawn as a polar bear). Other segments keep their sheets.
+- `motion`: `{"K04": {"what": "whole tuna on the conveyor belt", "at": 53.0, "box": [x0, y0, x1, y1], "step": 0.05}}`
+  gives a segment one more reference picture: three crops of the source (`box`, fractions of the frame) `step` s
+  apart from `at`, side by side (`refs/motion/<id>-<Kxx>.png`), as a motion reference only. Choose `step` well
+  below the time the moving pattern takes to repeat (belt items one spacing on: else the crops look alike), and
+  look at the strip before rendering. A tight crop can pull the video model into a close-up: keep `box` wide.
 - `max_segment_seconds`: per-source override (4-30); `skip: true` leaves a source out.
 
 ## Plan (`config/plan.json`, `reports/plan.md`)
@@ -130,7 +138,7 @@ sheet come last; only these sheets are made). Edit the edits file, not the plan.
   to the segment before, its `verdict`, the measured `mode`/`ratio`/`same`, the `preview` it was judged on and its
   `sheet` when Gemini found nothing there, or `pending`; `handoff`: where the next segment of the shot starts from,
   `handoff_still` its full-size frame when no issue covers it). `temp/config/dismissed.json`: why a failed check was
-  approved. `temp/work/preview/<id>-upto-<Kxx>.mp4`: the segments joined up to that one.
+  approved. `temp/work/preview/<id>-upto-<Kxx>-<result>.mp4` (one per result of that segment): the segments joined up to that one.
 - `temp/state/assembled/<id>.json`: `seams` (inside a shot: the switch moment, `mode` cut/dissolve, `ratio` and
   `local_ratio`: the jump at the switch frame against the ordinary frame change, overall and in the worst region,
   `same`: how far apart both drawings are there, 0-255; a plain cut passes up to 1.15 / 1.2 / 30), `colour` (raw

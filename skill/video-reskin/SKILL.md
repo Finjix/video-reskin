@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most three redos per segment, no whole-video review.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most five redos per segment, no whole-video review.
 ---
 
 # Video reskin
@@ -56,11 +56,11 @@ batch without asking; an open question never stops production: take the default 
 | A subject that does not matter (a background crowd, a one-frame effect) | drop it from `subjects`: every sheet costs a picture and takes a reference slot |
 | Two sources are the same ad in other sizes | `style_from` the first: the second's scene map takes its look from the first's |
 | A scene map shows things that only come later (piles, built or lit objects): segments draw them from the start | move that scene's `views` to early moments, before the place fills up, then `refs --redo <key>` |
-| A scene map invents places, keeps cartoon parts, characters, UI or text; a sheet changes the subject | adjust `materials`/`extra` or the views/box, then `refs --redo <key>` (at most three times, then keep the best and note it) |
+| A scene map invents places, keeps cartoon parts, characters, UI or text; a sheet changes the subject | adjust `materials`/`extra` or the views/box, then `refs --redo <key>` (at most five times, then keep the best and note it) |
 | Gemini reports a flaw the original shows too | dismiss it (note it) |
-| A confirmed flaw | `redo` that segment with a reason and, when it helps, a short corrective `--prompt` about the look (at most three redos per segment); a sentence about where objects are can make the video model move its camera: on the next redo drop it with `--replace` |
+| A confirmed flaw | `redo` that segment with a reason (at most five redos per segment). The first two redos of a flaw go without a new sentence or with a minimal `--prompt` about the look; once two have not fixed it, inject a targeted `--prompt` that names exactly how it must look or move (the things by name, as the original shows them: `whole tuna`, not `fish`), and change the pictures too where they cause it (`sheets`, `motion`, `split_at`). A sentence about where objects are can make the video model move its camera: on the next redo drop it with `--replace` |
 | A segment fails on Lumos twice | shorter prompt (`extra` off), or split it differently with `split_at`; then render again |
-| A segment still flawed after three redos | ask the user when the flaw would carry into the rest of the shot (it would be copied on); otherwise deliver and list each remaining issue with its time |
+| A segment still flawed after five redos | ask the user when the flaw would carry into the rest of the shot (it would be copied on); otherwise deliver and list each remaining issue with its time |
 
 Stop to ask only when nothing can continue: footage missing or unreadable, no key, or the user does not scan the QR
 code. Say what you tried and the minimum you need.
@@ -129,7 +129,7 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    only the materials change, plus the removals. Never ask for added objects, text or effects.
 3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
 4. **Confirm before redoing.** Gemini can be wrong: look at the sheet of every issue before `redo`; redo only
-   confirmed segments, never the whole video for a local flaw; never more than three times per segment.
+   confirmed segments, never the whole video for a local flaw; never more than five times per segment.
 5. **Approve before continuing.** Never approve a segment whose `check` you have not gone through, nor one whose
    seam or handoff frame shows a flaw (leftover text or logo, a wrong character or material, a jump at the join): the
    next segment of the shot is drawn from that frame and keeps the flaw. Redo it instead, and if its redos are

@@ -473,7 +473,7 @@ def main() -> None:
     approve = command("approve", cmd_approve, help="approve checked segments: the segments continuing from them render")
     approve.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02, or source IDs")
     approve.add_argument("--dismiss", help="approve a result whose check failed: why each of its issues is wrong on the sheets")
-    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (three times at most)")
+    redo = command("redo", cmd_redo, help="send confirmed broken segments back for another render (five times at most)")
     redo.add_argument("--segment", nargs="+", required=True, help="keys like S01:K02")
     redo.add_argument("--reason", required=True, help="what is wrong, as confirmed on the stills")
     redo.add_argument("--prompt", help="extra instruction added to the video prompt of these segments")

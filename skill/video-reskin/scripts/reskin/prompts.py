@@ -52,7 +52,8 @@ def compose(style: dict, kind: str, row: dict, extra: str = "", span: tuple[floa
 
 def references_clause(style: dict, chosen: list[dict]) -> str:
     """What each reference picture of a video edit is for, in order (Image 1, 2, ...): the previous result's frame
-    (role "previous"), scene maps ("scene"), three-view sheets ("subject", with `what`)."""
+    (role "previous"), scene maps ("scene"), three-view sheets ("subject", with `what`), a motion strip ("motion",
+    with `what` and `step`)."""
     texts = preset_text(style, "references")
     parts = [texts["previous"].format(n=n) for n, p in enumerate(chosen, 1) if p["role"] == "previous"]
     scenes = [n for n, p in enumerate(chosen, 1) if p["role"] == "scene"]
@@ -61,8 +62,10 @@ def references_clause(style: dict, chosen: list[dict]) -> str:
                   else "Images " + ", ".join(map(str, scenes[:-1])) + f" and {scenes[-1]}")
         parts.append(texts["scene"].format(images=images))
     parts += [texts["subject"].format(n=n, what=p["what"]) for n, p in enumerate(chosen, 1) if p["role"] == "subject"]
+    parts += [texts["motion"].format(n=n, what=p["what"], step=f"{p['step']:g}") for n, p in enumerate(chosen, 1)
+              if p["role"] == "motion"]
     if parts:
-        parts.append(texts["closing"])
+        parts.append(texts["closing_motion"] if any(p["role"] == "motion" for p in chosen) else texts["closing"])
     return " ".join(parts)
 
 

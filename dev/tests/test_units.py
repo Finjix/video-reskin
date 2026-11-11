@@ -230,18 +230,19 @@ class ReviewTests(unittest.TestCase):
 
 
 class RedoTests(unittest.TestCase):
-    def test_a_segment_goes_back_three_times_at_most(self):
+    def test_a_segment_goes_back_five_times_at_most(self):
         from reskin import render
         with tempfile.TemporaryDirectory() as folder:
             job = Path(folder)
             render.bump(job, "S01:K02", "colour jump")
             render.bump(job, "S01:K02", "automatic retry", automatic=True)
-            render.bump(job, "S01:K02", "logo left")
-            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "Keep the snow white.")["redos"], 3)
+            for reason in ("logo left", "logo still left", "crowd gone"):
+                render.bump(job, "S01:K02", reason)
+            self.assertEqual(render.bump(job, "S01:K02", "still wrong", "Keep the snow white.")["redos"], 5)
             with self.assertRaises(ValueError):
-                render.bump(job, "S01:K02", "fourth time")
+                render.bump(job, "S01:K02", "sixth time")
             row = read(job / "config/redo.json")["S01:K02"]
-            self.assertEqual(row["attempt"], 5)
+            self.assertEqual(row["attempt"], 7)
             self.assertEqual(row["prompt"], "Keep the snow white.")
 
     def test_results_that_left_the_source_are_set_aside_per_round(self):
@@ -288,6 +289,20 @@ class ChainTests(unittest.TestCase):
         self.assertIn("Image 3 is a three-view sheet (front, side, back) of hunter", text)
         self.assertTrue(text.endswith("that the input video does not show."))
         self.assertNotIn("{", text)
+
+    def test_a_motion_strip_is_a_motion_reference_and_the_rest_stay_look_only(self):
+        style = read(PROMPTS)["presets"]["realistic"]
+        text = prompts.references_clause(style, [{"role": "scene"}, {"role": "subject", "what": "conveyor belt"},
+                                                 {"role": "motion", "what": "whole tuna on the conveyor belt", "step": .05}])
+        self.assertIn("Image 3 is a motion reference only, not a look: three moments of the input video, 0.05 s apart", text)
+        self.assertIn("how the whole tuna on the conveyor belt move", text)
+        self.assertIn("The other reference images are for look only", text)
+        self.assertNotIn("motion, timing and content come from the input video", text)
+        self.assertNotIn("{", text)
+
+    def test_clips_go_to_seedance_at_24_fps(self):
+        from reskin import render
+        self.assertEqual(render.CLIP_FPS, 24)
 
     def test_two_scene_maps_are_named_together(self):
         style = read(PROMPTS)["presets"]["realistic"]

@@ -140,7 +140,7 @@ def issue_moments(start: float, end: float, last: float) -> list[float]:
 
 
 def three_frames(rows: list[tuple[str, callable, str]], moments: list[float], size: tuple[int, int],
-                 output: Path) -> Path:
+                 output: Path, shown: float = 0.0) -> Path:
     """Original (top row) and restyled (bottom row) at each moment; a row is (path, moment -> seconds in that file,
     name). Lossless PNG."""
     width, height = size
@@ -152,7 +152,7 @@ def three_frames(rows: list[tuple[str, callable, str]], moments: list[float], si
     for row, (path, to_file, name) in enumerate(rows):
         for column, moment in enumerate(moments):
             canvas.paste(frame_at(path, to_file(moment), tile_w, tile_h), (column * tile_w, row * (tile_h + 26) + 26))
-            draw.text((column * tile_w + 4, row * (tile_h + 26) + 4), f"{name} {moment:.2f} s", fill="black", font=label)
+            draw.text((column * tile_w + 4, row * (tile_h + 26) + 4), f"{name} {moment + shown:.2f} s", fill="black", font=label)
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output, compress_level=1)
     return output
@@ -164,7 +164,8 @@ def issue_sheets(issues: list[dict], rows: list[tuple[str, callable, str]], to_c
     delivered-video seconds; `to_clip` turns them into the rows' moment scale."""
     for issue in issues:
         moments = issue_moments(to_clip(issue["start"]), to_clip(issue["end"]), last)
-        issue["sheet"] = str(three_frames(rows, moments, size, folder / f"{issue['n']:02d}-{issue['category']}.png"))
+        issue["sheet"] = str(three_frames(rows, moments, size, folder / f"{issue['n']:02d}-{issue['category']}.png",
+                                          shown=issue["start"] - to_clip(issue["start"])))
 
 
 def seam_sheet(job: Path, state: dict, source_id: str, assembled: dict, seam: dict, out: Path) -> Path:

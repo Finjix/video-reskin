@@ -79,9 +79,14 @@ the gaps and ends, not only the pattern.
 
 `redo --segment S01:K03 --reason "<what is wrong>" [--prompt "<one corrective English sentence>"] [--replace] [--refs]`
 
-- Every segment goes back at most three times (`redo` refuses a fourth): after that ask the user when the flaw
+- Every segment goes back at most five times (`redo` refuses a sixth): after that ask the user when the flaw
   would carry into the rest of the shot, otherwise deliver it and list what is open. Automatic retries after a
   failed generation do not count.
+- The first two redos of a flaw go without a new sentence or with a minimal one (a result often differs by chance).
+  Once two have not fixed it, inject a targeted sentence that names exactly how it must look or move, naming the
+  things as the original shows them (`whole tuna`, not `fish`: a general word lets the model draw another thing of
+  that kind from the materials), and change the pictures where they cause the flaw: `sheets` (a character redrawn
+  as another), `motion` (items that must move), `split_at` (a part that needs a clip of its own).
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
   confirmed flaw's look, e.g. `Keep every fish whole, with the shape and count of the original.`, `Remove the logo
   text left in the top-right corner.`, `Keep the overall colours of the reference images; the snow stays white.`.

@@ -30,7 +30,7 @@ GENERATION_TIMEOUT = 60 * 60
 SUBMIT_PATIENCE = 20 * 60      # how long to keep retrying a refused submission (busy queue, rate limits)
 UPLOAD_BYTES = 190_000_000     # Seedance 2.5 takes reference videos up to 200 MB
 MAX_PICTURES = 5               # reference pictures one segment gets (Seedance 2.5 takes up to 30)
-MAX_REDOS = 3                  # a segment goes back at most three times after its check (the user's rule)
+MAX_REDOS = 5                  # a segment goes back at most five times after its check (the user's rule)
 
 
 class ResultRejected(RuntimeError):
@@ -113,19 +113,26 @@ def keep_rejected(job: Path, key: str, output: Path, entry: dict) -> list[dict]:
     return [r for r in rows if r["round"] == entry["round"] and Path(r["path"]).is_file()]
 
 
+CLIP_FPS = 24                  # Seedance 2.5's own rate: a faster source is brought down here, not by the model
+
+
 def cut_clip(source: Path, frames: list[int], fps: float, width: int, height: int, output: Path) -> Path:
-    """The segment as a clean H.264 clip (no audio), at most 1080p on the short side and under UPLOAD_BYTES."""
-    scale = []
+    """The segment as a clean H.264 clip (no audio), at most 1080p on the short side, at most CLIP_FPS frames a
+    second and under UPLOAD_BYTES."""
+    filters = []
+    if fps > CLIP_FPS + .01:
+        filters.append(f"fps={CLIP_FPS}")
     if min(width, height) > 1080:
         factor = 1080 / min(width, height)
-        scale = ["-vf", f"scale={round(width * factor / 2) * 2}:{round(height * factor / 2) * 2}:flags=lanczos"]
+        filters.append(f"scale={round(width * factor / 2) * 2}:{round(height * factor / 2) * 2}:flags=lanczos")
+    scale = ["-vf", ",".join(filters)] if filters else []
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
     seconds = (frames[1] - frames[0]) / fps
     rate = []
     for _ in range(3):
         run([FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, (frames[0] - .5) / fps):.6f}", "-i", source,
-             "-frames:v", str(frames[1] - frames[0]), *scale, "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "15",
+             "-t", f"{seconds:.6f}", *scale, "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "15",
              *rate, "-pix_fmt", "yuv420p", "-movflags", "+faststart", partial])
         if partial.stat().st_size <= UPLOAD_BYTES:
             break
@@ -165,7 +172,40 @@ def chain_frame(job: Path, plan_row: dict, source_id: str, seg: dict) -> Path:
     return output
 
 
-def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True, chain: bool = True) -> list[dict]:
+MOTION_FRAMES = 3              # moments of the source a motion strip shows
+
+
+def motion_strip(job: Path, source: Path, fps: float, source_id: str, seg_id: str, spec: dict) -> Path:
+    """How something moves in the source, as one picture: MOTION_FRAMES crops of `box` (fractions of the frame)
+    `step` s apart from `at`, side by side and labelled with their offsets."""
+    from PIL import Image, ImageDraw
+    from reskin.analyze import font
+    from reskin.survey import frame
+    step = float(spec.get("step", .1))
+    folder = job / "refs/motion"
+    crops = []
+    for k in range(MOTION_FRAMES):
+        full = frame(source, float(spec["at"]) + k * step, folder / f"{source_id}-{seg_id}-{k}.png")
+        with Image.open(full) as image:
+            image = image.convert("RGB")
+            w, h = image.size
+            x0, y0, x1, y1 = spec["box"]
+            crops.append(image.crop((round(x0 * w), round(y0 * h), round(x1 * w), round(y1 * h))))
+    band = 30
+    canvas = Image.new("RGB", (sum(c.width for c in crops) + 8 * (len(crops) - 1), crops[0].height + band), "white")
+    draw = ImageDraw.Draw(canvas)
+    x = 0
+    for k, piece in enumerate(crops):
+        canvas.paste(piece, (x, band))
+        draw.text((x + 6, 4), f"+{k * step:.2f} s", fill="black", font=font(22))
+        x += piece.width + 8
+    out = folder / f"{source_id}-{seg_id}.png"
+    canvas.save(out)
+    return out
+
+
+def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool = True, chain: bool = True,
+             source: Path | None = None) -> list[dict]:
     """The segment's reference pictures in order: the previous result's frame where this segment begins (when it
     continues a shot), the scene map(s) of the location it shows, then the three-view sheets of the subjects on
     screen (as plan.assign_refs ranks them, at most MAX_SHEETS; none when `sheets` is False), at most MAX_PICTURES
@@ -188,6 +228,10 @@ def pictures(job: Path, plan_row: dict, source_id: str, seg: dict, sheets: bool 
         if not path.is_file():
             raise ValueError(f"{key}: subject sheet {path.name} is missing; run refs first")
         chosen.append({"path": path, "role": "subject", "what": plan_row["subjects"][k - 1]["what"]})
+    spec = (plan_row.get("motion") or {}).get(seg["id"])
+    if spec and source is not None and len(chosen) < MAX_PICTURES:
+        chosen.append({"path": motion_strip(job, source, plan_row["fps"], source_id, seg["id"], spec),
+                       "role": "motion", "what": spec["what"], "step": float(spec.get("step", .1))})
     chosen = chosen[:MAX_PICTURES]
     return chosen if chain else [p for p in chosen if p["role"] != "previous"]
 
@@ -201,7 +245,7 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
     # model towards close-ups of its subjects)
     path = rejected_path(job, key)
     left = path.is_file() and any(r["round"] == redo.get("redos", 0) for r in read(path))
-    chosen = pictures(job, plan_row, source_id, seg, sheets=not left, chain=chain)
+    chosen = pictures(job, plan_row, source_id, seg, sheets=not left, chain=chain, source=Path(source["path"]))
     span = (seg["render_frames"][0] / plan_row["fps"], seg["render_frames"][1] / plan_row["fps"])
     prompt = compose(style, "video", plan_row, extra=redo.get("prompt", ""), span=span, refs=references_clause(style, chosen))
     return {"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],

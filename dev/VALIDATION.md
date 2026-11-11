@@ -92,6 +92,23 @@ delivery; colour matching is solved again per shot at the end, residuals of abou
 handoff frame as a still, approval needs a passed check of the current result (or a written dismissal), and a
 segment may go back three times.
 
+**Items riding a conveyor** (GOFCN64128 抢鱼之熊 K03, Seedance 2.5, 2026-11-11, judged by the user on the videos).
+The fish lying on the running belt stood still in every result: with the conveyor sheet and a motion sentence
+("Every fish on the conveyor belt rides along with the belt at the belt's speed, exactly as the input video moves
+them."), with that sentence plus the fisherman's sheet, and with the sentence and no conveyor sheet (that attempt
+also lost the pine forests along the belt). The belt part on its own (`split_at` 51.0, a 4.6 s K04) did not move
+them either, sent at the source's 60 fps or brought down to 24 fps first (`CLIP_FPS`, kept: the model gets its own
+rate). A stronger sentence ("The conveyor belt runs fast toward the counter, and every fish on it slides quickly
+along with the belt in every frame, exactly as fast as in the input video: no fish on the belt ever stands still.")
+made the belt items move, but the model drew salmon steaks on the belt (the materials list them) and lost the crowd;
+naming them `whole tuna` brought the tuna and the crowd back (crowd sheet instead of the fisherman's) and the tuna
+stood still again, twice. A motion strip (three crops 0.05 s apart) did not move them and pulled the result into a
+close-up of the counter from 53.9 s (the follow check passed it: only the last 1.2 s left the framing). In the
+source each tuna moves one spacing every 0.15 s, so the belt looks the same every 0.15 s; a video model that steps
+through time in about that interval would see a belt standing still (a guess, not measured). Untried: the belt
+part sent slowed down and the result sped up again. Without a carried sheet the fisherman was once redrawn as a
+polar bear in his parka (polar bears are on screen in that segment): hence `sheets` in the edits.
+
 **Survey and refs checks** (GOFCN64128 抢鱼之熊, 2026-11-11). The survey's one watch (6 frames/s, 95k tokens) also
 named the end card (55.6-55.67 s against the measured 55.32 s and the transition the agent judged at about 55.3 s: the
 strip around it is still for the agent to confirm), the logo and the warning lines; it gave the logo as top-left for

@@ -24,7 +24,7 @@ OVERLAP_SECONDS = .6      # rendered by both segments around a seam inside a sho
 SEARCH_SECONDS = 7.0      # a seam inside a shot is searched in the last this-many seconds a segment can reach
 SMOOTH_SECONDS = .15      # camera speed is averaged over this much on either side of a candidate moment
 EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
-             "scenes", "subjects"}
+             "scenes", "subjects", "sheets", "motion"}
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
 MAX_SUBJECTS = 8          # subjects one source lists at most
 # The more three-view sheets a segment takes, the more the video model features its subjects (close-ups of its own,
@@ -95,7 +95,7 @@ def check_edits(value: dict, catalog: dict) -> dict:
     problems = []
     for key in set(defaults) - EDIT_KEYS:
         problems.append(f"defaults: unknown key {key}")
-    for key in ("scenes", "subjects", "keep", "split_at"):
+    for key in ("scenes", "subjects", "keep", "split_at", "sheets", "motion"):
         if key in defaults:
             problems.append(f"defaults: {key} belongs to a source")
     if "remove" in defaults and items_problem(defaults["remove"], "remove"):
@@ -132,6 +132,20 @@ def check_edits(value: dict, catalog: dict) -> dict:
         if "max_segment_seconds" in row and not (isinstance(row["max_segment_seconds"], (int, float))
                                                  and MIN_RENDER <= row["max_segment_seconds"] <= MAX_SECONDS):
             problems.append(f"{source_id}: max_segment_seconds must be {MIN_RENDER}-{MAX_SECONDS:g}")
+        sheets = row.get("sheets")
+        if sheets is not None and not (isinstance(sheets, dict) and all(
+                isinstance(k, str) and isinstance(v, list) and len(v) <= MAX_SHEETS
+                and all(isinstance(x, int) and 1 <= x <= MAX_SUBJECTS for x in v) for k, v in sheets.items())):
+            problems.append(f"{source_id}: sheets must look like {{\"K03\": [8, 1]}}: per segment at most "
+                            f"{MAX_SHEETS} subject numbers (P08, P01 as in reports/plan.md)")
+        motion = row.get("motion")
+        if motion is not None and not (isinstance(motion, dict) and all(
+                isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("what"), str)
+                and isinstance(v.get("at"), (int, float)) and isinstance(v.get("box"), list) and len(v["box"]) == 4
+                and isinstance(v.get("step", .1), (int, float)) and .02 <= v.get("step", .1) <= 1
+                for k, v in motion.items())):
+            problems.append(f"{source_id}: motion must look like {{\"K04\": {{\"what\": \"whole tuna on the "
+                            f"conveyor belt\", \"at\": 53.0, \"box\": [x0, y0, x1, y1], \"step\": 0.1}}}}")
         out["sources"][source_id] = row
     chains = {sid: row.get("style_from") for sid, row in out["sources"].items() if row.get("style_from")}
     for sid in chains:
@@ -174,7 +188,8 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict, su
             "remove": remove, "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [],
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None,
-            "scenes": scenes, "subjects": subjects[:MAX_SUBJECTS]}
+            "scenes": scenes, "subjects": subjects[:MAX_SUBJECTS], "sheets": row.get("sheets") or {},
+            "motion": row.get("motion") or {}}
 
 
 def seam_scores(motion: list[float], camera: list[list[float]], fps: float, frames: int) -> list[float]:
@@ -204,6 +219,7 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     first, last = round(keep[0] * fps), min(total, round(keep[1] * fps))
     shot_starts = {s["frames"][0] for s in catalog_row["shots"]}
     cuts = sorted(c for c in shot_starts | {round(t * fps) for t in split_at} if first < c < last)
+    forced = sorted({round(t * fps) for t in split_at if first < round(t * fps) < last})
     minimum = round(MIN_SECONDS * fps)
     half = round(OVERLAP_SECONDS * fps / 2)
     maximum = int(max_seconds * fps)
@@ -214,6 +230,13 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     spans, position, seam = [], first, "start"
     while True:
         lead = half if seam == "continuous" else 0
+        # every split_at moment in reach is a boundary, the earliest first, also when the rest would fit in one
+        must = [c for c in forced if position + minimum <= c <= last - minimum
+                and c <= position + maximum - lead - (0 if c in shot_starts else half)]
+        if must:
+            spans.append((position, must[0], seam))
+            position, seam = must[0], "cut" if must[0] in shot_starts else "continuous"
+            continue
         if last - position + lead <= maximum:
             spans.append((position, last, seam))
             break
@@ -278,7 +301,8 @@ def assign_refs(row: dict) -> None:
     it (their sheets go along). A subject without a sheet keeps the game's look, and a continuing segment copies that
     look from the previous result's frame, so the sheets go to the subjects that fill the segment most (`presence`);
     in a segment that continues a shot, subjects the previous result already drew from a sheet (on screen where this
-    segment begins, so its first frame carries their look) come last."""
+    segment begins, so its first frame carries their look) come last. `sheets` in the edits names a segment's sheets
+    instead (when a carried look did not hold: a character redrawn as another)."""
     fps = row["fps"]
     carried: set[int] = set()       # subjects the previous result of this shot drew from a sheet or a carried look
     for seg in row["segments"]:
@@ -289,7 +313,8 @@ def assign_refs(row: dict) -> None:
         here = {k: s for k, s in enumerate(row["subjects"], 1) if overlaps(s, start, end)}
         carried = {k for k in carried if k in here and here[k].get("start", 0) <= start}
         ranked = sorted(here, key=lambda k: (k in carried, -presence(here[k], start, end), k))
-        seg["subjects"] = ranked[:MAX_SHEETS]
+        named = [k for k in (row.get("sheets") or {}).get(seg["id"], []) if 1 <= k <= len(row["subjects"])]
+        seg["subjects"] = named[:MAX_SHEETS] if named else ranked[:MAX_SHEETS]
         carried |= set(seg["subjects"])
 
 

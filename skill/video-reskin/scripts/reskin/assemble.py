@@ -575,7 +575,10 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
         name = source["name"] + ("" if names.count(source["name"]) == 1 else f"_{source_id}")
         output = delivery / f"{name}_{style.get('label', 'reskin')}.mp4"
     else:
-        output = job / "work/preview" / f"{source_id}-upto-{upto}.mp4"
+        # one file per result of the last segment: an earlier preview may still be open in a player
+        record_path = job / "state/render" / f"{source_id}-{upto}.json"
+        generation = (read(record_path).get("generation_id") or "") if record_path.is_file() else ""
+        output = job / "work/preview" / f"{source_id}-upto-{upto}-{generation[:8] or 'current'}.mp4"
         output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.stem + ".partial.mp4")
     run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[vout]", *audio,

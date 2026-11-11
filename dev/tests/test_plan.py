@@ -36,6 +36,17 @@ class SegmentTests(unittest.TestCase):
         self.assertTrue(all(s["seam"] == "continuous" for s in segments[1:]))
         self.assertLessEqual(len(segments), 6)
 
+    def test_every_split_at_moment_is_a_boundary(self):
+        row = catalog_row(58.9, 60.0)
+        frames = row["info"]["frames"]
+        # 15.0 s and 51.4 s: the second lies in a stretch that would fit in one segment, the first is not the
+        # latest moment in reach; both must be boundaries
+        segments = plan.segment(row, [0, 55.3], 30.0, [1.0] * frames, [], [15.0, 51.4])
+        self.check(segments, 60.0, [0, 55.3], 30)
+        starts = [s["frames"][0] for s in segments]
+        self.assertIn(round(15.0 * 60), starts)
+        self.assertIn(round(51.4 * 60), starts)
+
     def test_seedance_segments_run_to_thirty_seconds_unpadded(self):
         row = catalog_row(63.5, 30.0)
         segments = plan.segment(row, [0, 63.5], plan.MAX_SECONDS, [1.0] * row["info"]["frames"], [], [])
@@ -85,6 +96,12 @@ class EditsTests(unittest.TestCase):
             plan.check_edits({"sources": {"S01": {"keep": [10, 12]}}}, catalog)    # shorter than the 4 s a render lasts at least
         with self.assertRaises(ValueError):
             plan.check_edits({"sources": {"S09": {}}}, catalog)
+        motion = {"what": "whole tuna on the conveyor belt", "at": 53.0, "box": [.3, .32, .72, .62], "step": .05}
+        plan.check_edits({"sources": {"S01": {"motion": {"K04": motion}, "sheets": {"K04": [8, 7]}}}}, catalog)
+        with self.assertRaisesRegex(ValueError, "motion must look like"):
+            plan.check_edits({"sources": {"S01": {"motion": {"K04": {**motion, "box": [0, 0, 1]}}}}}, catalog)
+        with self.assertRaisesRegex(ValueError, "sheets must look like"):
+            plan.check_edits({"sources": {"S01": {"sheets": {"K04": [8, 7, 1]}}}}, catalog)
         with self.assertRaisesRegex(ValueError, "unknown key anchor"):
             plan.check_edits({"sources": {"S01": {"anchor": 3}}}, catalog)
 
@@ -141,6 +158,10 @@ class RefsTests(unittest.TestCase):
         self.assertEqual(row["segments"][1]["scenes"], [2])               # scene a ends 0.3 s into K02
         self.assertEqual(row["segments"][2]["subjects"], [4, 2])          # after a cut nothing is carried
         self.assertEqual(row["segments"][2]["scenes"], [2])
+        row["sheets"] = {"K02": [1, 4]}                                    # a carried look that did not hold
+        plan.assign_refs(row)
+        self.assertEqual(row["segments"][1]["subjects"], [1, 4])
+        self.assertEqual(row["segments"][0]["subjects"], [2, 3])          # the others keep their picks
 
     def test_presence_counts_only_the_segment(self):
         subject = {"start": 10, "end": 40, "box": [.1, .1, .3, .6]}
