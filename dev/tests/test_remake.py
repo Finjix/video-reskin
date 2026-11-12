@@ -66,14 +66,28 @@ class GateTests(unittest.TestCase):
         self.assertEqual(watch.call_count,1)
         self.assertIsNone(result['segment'])
 
-    def test_transition_rechecked_before_full_segment(self):
+    def test_transition_decided_before_application_without_recheck(self):
         m.put(self.job,'catalog/S01',{'width':160,'height':90})
-        with patch.object(m,'assemble',return_value='preview'),patch.object(m,'review_clip',side_effect=[verdict(transition=6),verdict(),verdict()]) as watch:
+        self.p['segments'][1]['transition_frames']=3
+        with patch.object(m,'assemble',return_value='preview') as join,patch.object(m,'review_clip',side_effect=[verdict(transition=6),verdict()]) as watch:
             result=m.check(self.job,{},'S01',self.p,self.p['segments'][1])
-        self.assertEqual([c.args[6] for c in watch.call_args_list],['seam','seam','segment'])
+        self.assertEqual([c.args[6] for c in watch.call_args_list],['seam','segment'])
+        join.assert_called_once()
+        self.assertEqual(join.call_args.args[3]['segments'][1]['transition_frames'],0)
         self.assertEqual(result['verdict'],'pass')
         self.assertEqual(self.p['segments'][1]['transition_frames'],6)
         m.approve(self.job,'S01',self.p,self.p['segments'][1])
+
+    def test_tail_failure_is_gemini_only_without_agent_sheet(self):
+        with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
+             patch.object(m,'ask',return_value={'ok':False,'covers':[],'note':'Wrong material'}),\
+             patch.object(m.winky,'inline',return_value={}),\
+             patch('reskin.refs.upload_copy',side_effect=lambda p,*a:p),patch.object(m,'picture_issue') as sheet:
+            m.put(self.job,'survey/S01',{'inventory':[]})
+            with self.assertRaisesRegex(ValueError,'no agent image review required'):
+                m.refs(self.job,'S01',self.p,self.p['segments'][1])
+        sheet.assert_not_called()
+        self.assertFalse(m.saved(self.job,'review/S01-K02-tail')['ok'])
 
     def test_changed_predecessor_invalidates_seam_not_output(self):
         s=self.p['segments'][1]

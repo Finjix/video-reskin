@@ -41,6 +41,7 @@ SURVEY['properties']['inventory']['description'] = 'English content entries with
 FRAMES['properties']['references']['description'] = 'IDs of existing generated pictures needed by this segment; reuse rather than convert duplicates.'
 COVER['properties']['covers']['description'] = 'Inventory IDs visibly converted to realistic materials in the result, not merely present in the source.'
 REVIEW['properties']['issues']['description'] = 'Unresolved defects relative to source, in seconds from the comparison clip start; empty on pass.'
+REVIEW['properties']['transition_frames']['description'] = 'For a passing continuous seam, recommend 0-6 frames of subtle transition before it is applied; use 0 otherwise. Major differences must fail, not be hidden by a transition.'
 
 
 def prompt(kind):
@@ -219,10 +220,8 @@ def refs(job, sid, plan, seg):
         tail = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
                    [winky.inline(upload_copy(p, 1536))])
         if not tail["ok"]:
-            source_frame = still(working(job,sid),prev['frames'][1]-1,
-                                 job/'references'/f'{key}-tail-source.png')
-            sheet = picture_issue(job,key+'-tail',source_frame,p,tail)
-            raise ValueError(f"previous tail is unsuitable: {tail['note']}; inspect {sheet}, then recheck the previous segment")
+            report = put(job,f'review/{key}-tail',tail)
+            raise ValueError(f"Gemini rejected the previous tail: {report['note']}; redo the previous segment within its retry limit; no agent image review required")
         entry = {"id": key+"-tail", "path": str(p), "covers": tail["covers"], "at": a/FPS}
         chosen.append(entry)
     selection_path = f"references/{key}-frames"
@@ -408,10 +407,13 @@ def check(job,state,sid,plan,seg):
     a,b = seg["frames"]
     answer = {"token":check_token(job,sid,plan,seg),"seam":None,"segment":None,"verdict":"fail"}
     if a:
-        preview = assemble(job,state,sid,plan,seg["id"])
+        # Judge whether a transition is needed on the untreated join, including on repeated checks.
+        preview_plan = deepcopy(plan)
+        preview_plan['segments'][plan['segments'].index(seg)]['transition_frames'] = 0
+        preview = assemble(job,state,sid,preview_plan,seg["id"])
         start,end = max(0,a/FPS-1),min(b/FPS,a/FPS+1)
         seam = review_clip(job,sid,start,end,preview,start,"seam",folder,
-                           {"join":a/FPS-start,"continuous":seg["continuous"],"transition_frames":seg["transition_frames"]})
+                           {"join":a/FPS-start,"continuous":seg["continuous"],"transition_frames":0})
         answer["seam"] = seam
         if seam["verdict"] == "fail":
             return put(job,f"checks/{sid}-{seg['id']}",answer)
@@ -419,12 +421,7 @@ def check(job,state,sid,plan,seg):
         if transition != seg["transition_frames"]:
             seg["transition_frames"] = transition
             put(job,f"plans/{sid}",plan)
-            preview = assemble(job,state,sid,plan,seg["id"])
-            seam = review_clip(job,sid,start,end,preview,start,"seam",folder,
-                              {"join":a/FPS-start,"continuous":True,"transition_frames":transition,"final_transition":True})
-            answer["seam"] = seam
-            if seam["verdict"] == "fail":
-                return put(job,f"checks/{sid}-{seg['id']}",answer)
+        answer['seam']['chosen_transition_frames'] = transition
     answer["token"] = check_token(job,sid,plan,seg)
     result = job / "ai" / f"{sid}-{seg['id']}.mp4"
     answer["segment"] = review_clip(job,sid,a/FPS,b/FPS,result,0,"segment",folder,{})

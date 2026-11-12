@@ -23,7 +23,7 @@ Schema 2 data:
 - image-tasks/: persisted image generation IDs for resuming.
 - state/: video generation ID, retry count/history and version-bound approval.
 - checks/: seam and segment verdicts, issue times and current-generation/seam token.
-- review/: Gemini comparison clips and agent-facing segment issue sheets; seam and segment issue sheets, plus failed reference-image/tail comparisons.
+- review/: Gemini comparison clips and agent-facing segment issue sheets; seam and segment issue sheets, plus failed reference-image comparisons. Tail checks retain Gemini verdicts only and require no agent review.
 - raw/: original model outputs; ai/: outputs normalized to segment duration.
 - work/: temporary previews and local normalized media.
 
