@@ -256,7 +256,7 @@ def refs(job, sid, plan, seg):
             uploaded = [lumos.upload(upload_copy(p), "image-to-image") for p in [full, *looks]]
             info = saved(job, f"catalog/{sid}")
             task = lumos.submit_image_to_image(uploaded, prompt("image"), model=images.IMAGE_MODEL,
-                       aspect_ratio=images.aspect_for(info["width"], info["height"]), resolution="4K", quality="high")
+                       aspect_ratio=images.aspect_for(info["width"], info["height"]), resolution="2K", quality="medium")
             put(job, f"image-tasks/{rid}", task)
         if not out.is_file():
             net.download(lumos.result_urls(lumos.wait(task["generation_id"]))[0], out)

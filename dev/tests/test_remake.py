@@ -141,7 +141,7 @@ class MediaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)/'temp'
             source=Path(td)/'source.mp4'
-            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=24:duration=3','-c:v','libx264','-pix_fmt','yuv420p'],source)
+            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=30:duration=3','-c:v','libx264','-pix_fmt','yuv420p'],source)
             state={'delivery_dir':td,'sources':[{'id':'S01','path':str(source),'name':'sample'}]}
             info=m.analyze(job,state,'S01')
             survey={'non_game':[],'end_card_start':3,'cuts':[],
@@ -155,11 +155,15 @@ class MediaTests(unittest.TestCase):
             video_calls=[]
             reviews=[]
             def image_submit(refs,text,**kw):
+                self.assertEqual(kw['resolution'],'2K')
+                self.assertEqual(kw['quality'],'medium')
                 key=f'image{len(image_calls)}'
                 image_calls.append(refs)
                 generations[key]=refs[0]['path']
                 return {'generation_id':key}
             def video_submit(video,refs,text,**kw):
+                self.assertNotEqual(Path(video['path']),source)
+                self.assertEqual(video_info(Path(video['path']))['fps'],24)
                 key=f'video{len(video_calls)}'
                 video_calls.append((video,refs,text))
                 generations[key]=video['path']
