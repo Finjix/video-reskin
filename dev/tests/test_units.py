@@ -452,6 +452,21 @@ class GateTests(unittest.TestCase):
         self.assertTrue(result["reused"])
         self.assertEqual(self.submitted, [])
 
+    def test_an_approved_segment_survives_new_reference_pictures(self):
+        self.finish("K01", "gen-k01")
+        self.render.approve(self.job, "S01:K01")
+        saved = self.render.inputs_for
+
+        def remade(*args, **kwargs):                     # the scene map was made again, a sheet renumbered
+            return {**saved(*args, **kwargs), "pictures": ["scene-sha-new", "sheet-sha"]}
+        self.render.inputs_for = remade
+        try:
+            result = self.render.render_segment(self.job, {}, self.ROW, "S01", self.segment("K01"), {})
+        finally:
+            self.render.inputs_for = saved
+        self.assertTrue(result["reused"])
+        self.assertEqual(self.submitted, [])
+
     def test_an_unapproved_segment_after_a_changed_one_waits(self):
         self.finish("K01", "gen-k01")
         self.render.approve(self.job, "S01:K01")

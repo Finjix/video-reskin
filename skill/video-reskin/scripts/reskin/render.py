@@ -258,11 +258,26 @@ def inputs_for(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict
 def core(inputs: dict, pinned: bool = False) -> str:
     """What makes a finished segment current: its pictures, frames, model and attempt. A prompt change alone applies
     to new and redone segments (a re-render costs minutes and money; `redo` asks for one explicitly). `pinned` leaves
-    out the previous segment's frame: what keeps an approved segment current when the segment before it changes."""
+    out the reference pictures: an approved result stays current while its clip (source, frames, model, attempt) is
+    the same, whatever happens to the scene maps, sheets or the segment before it."""
     kept = {k: v for k, v in inputs.items() if k not in ("prompt", "references")}
     if pinned:
-        kept["pictures"] = [h for h, p in zip(inputs["pictures"], inputs["references"]) if p["role"] != "previous"]
+        kept.pop("pictures")
     return digest(kept)
+
+
+def clip_digest(job: Path, state: dict, plan_row: dict, source_id: str, seg: dict, style: dict) -> str:
+    """core(..., pinned=True) of a segment, also when one of its pictures is gone (a sheet dropped or renumbered)."""
+    try:
+        return core(inputs_for(job, state, plan_row, source_id, seg, style, chain=False), pinned=True)
+    except ValueError:
+        pass
+    source = next(r for r in state["sources"] if r["id"] == source_id)
+    return core({"source": source["sha256"], "frames": seg["render_frames"], "fps": plan_row["fps"],
+                 "duration": seg["render_seconds"], "pictures": [],
+                 "model": lumos.VIDEO_MODEL,
+                 "resolution": state["options"].get("render_resolution", lumos.VIDEO_RESOLUTION),
+                 "attempt": redo_log(job).get(f"{source_id}:{seg['id']}", {}).get("attempt", 1)}, pinned=True)
 
 
 class Waiting(Exception):
@@ -277,8 +292,8 @@ def render_segment(job: Path, state: dict, plan_row: dict, source_id: str, seg: 
     record = read(record_path) if record_path.is_file() else {}
     output = job / "ai" / f"{source_id}-{seg['id']}.mp4"
     finished = record.get("status") == "done" and output.is_file()
-    if finished and approved(job, key) and record.get("pinned") and \
-            record["pinned"] == core(inputs_for(job, state, plan_row, source_id, seg, style, chain=False), pinned=True):
+    if finished and approved(job, key) and record.get("pinned") and record["pinned"] == clip_digest(job, state, plan_row,
+                                                                                                   source_id, seg, style):
         return {**record, "key": key, "reused": True, "prompt_changed": False}
     previous = previous_of(plan_row, seg)
     gated = bool(previous) and not approved(job, f"{source_id}:{previous['id']}")
