@@ -2,7 +2,7 @@
 the location the camera travels across (they go into one big scene map, refs) and (2) the characters, animals,
 vehicles, objects and props that come into view during the video, each with a moment it is seen clearly and its box
 then (each gets a three-view sheet, refs), (3) where the closing card starts, (4) every logo, watermark, caption
-and warning line drawn over the picture (to remove) and the HUD (to keep) and (5) the stretches that are not gameplay
+and warning line drawn over the picture (kept, as is the HUD) and (5) the stretches that are not gameplay
 (live action, real people, filmed hands or phones, non-game animation: `passthrough`, kept as the original and put
 back after the gameplay is restyled). The frames and crops are cut here, and
 Gemini checks them once more on the stills (sharp, uncovered, early enough, the whole subject). The agent reads the
@@ -25,7 +25,7 @@ PROXY_FPS = 24
 CROP_MARGIN = .12          # share of the box added on each side of a subject crop
 MIN_CROP = 512             # crops are scaled up to at least this on the short side for GPT Image
 OVERLAY_KINDS = ("logo", "warning", "watermark", "caption", "hud")
-REMOVED_KINDS = {"logo", "warning", "watermark", "caption"}     # the user's standing request; the HUD stays
+REMOVED_KINDS = {"watermark", "caption"}     # original logos, warning lines and HUD stay
 OVERLAY_PLACES = ("top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right")
 CHECK_SIZE = 1024          # long side of the stills Gemini checks
 
@@ -213,7 +213,7 @@ def suggested_edits(result: dict, duration: float) -> dict:
     passthrough = [[x["start"], min(x["end"], keep_end)] for x in result.get("non_game") or [] if x["start"] < keep_end]
     covered = lambda o: any(a <= o["start"] and min(o["end"], keep_end) <= b for a, b in passthrough)
     remove = [{"what": o["what"], "start": o["start"], "end": min(o["end"], keep_end)}
-              for o in result.get("overlays") or [] if o["remove"] and o["what"] and o["start"] < keep_end
+              for o in result.get("overlays") or [] if o["remove"] and o.get("kind") not in {"logo", "warning"} and o["what"] and o["start"] < keep_end
               and not covered(o)]
     return {"keep": [0, keep_end], **({"passthrough": passthrough} if passthrough else {}), "remove": remove}
 

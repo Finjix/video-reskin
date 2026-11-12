@@ -48,7 +48,7 @@ Keys: a source is `S01`; a segment `S01:K02`; a scene map `S01:scene1`; a subjec
 
 `catalog/catalog.md` per source: size, frame rate, duration, shots (`#2 59.58-63.58`), the end-card candidate
 (`cut` or `transition`, or none) and still overlays (`O1 top-right box [x0, y0, x1, y1] 0.0-17.8 s`, fractions of
-the frame). Still overlays are candidates only: logos and warning lines (remove) and HUD counters (keep) both show
+the frame). Still overlays are candidates only: logos, warning lines and HUD counters (all kept) show
 up, scene objects that stand still too. `catalog/<id>.jpg` shows a frame every 1-2 s with cuts marked and overlay
 boxes in red; `catalog/<id>-end.jpg` the last 12 s every 0.5 s. `catalog/motion/<id>-camera.json` holds the
 camera's screen speed per frame (frame widths/heights per second), used to place seams.
@@ -60,7 +60,7 @@ whole location, each area as early as it is clearly in view) and `subjects` (`wh
 from_start/later, `start`, `end`, `at`: a moment it is clearly in view, `box`: [x0, y0, x1, y1] fractions of that
 frame, found again by Gemini on the still), `end_card` (`start`: the last frame before its transition, `how`; null
 when there is none), `overlays` (`id`, `kind` logo/warning/watermark/caption/hud, `text` as on screen, `what`: the
-English phrase for the prompt, `where`, `start`, `end`, `at`, `box`, `remove`: true for all but the HUD),
+English phrase for the prompt, `where`, `start`, `end`, `at`, `box`, `remove`: true only for watermark/caption candidates; false for logo/warning/hud),
 `non_game` (`start`, `end`, `what`: live action, real people, filmed hands or phones, non-game animation; a
 small picture-in-picture over gameplay does not count), `non_game_stills` (per stretch: just before, at its start,
 at its end and just after), `overlay_stills` (one marked frame per removal), `end_strip` (0.5 s before, at and after the end-card start),
@@ -78,7 +78,7 @@ already full, or a crop that misses its subject).
           "materials": ["clear river water with floating ice", "packed snow ground", "plank dock and log fence",
                         "whole tuna", "people in winter clothing",
                         {"what": "stacks of green banknotes", "start": 12.5, "end": 59.08}],
-          "remove": [{"what": "the game logo \"WHITEOUT SURVIVAL\" in the top-right corner", "start": 0, "end": 36}],
+          "remove": [],
           "subjects": [{"what": "hunter in a blue coat", "kind": "character", "start": 0, "end": 59.2, "at": 7.75,
                         "box": [0.42, 0.38, 0.58, 0.52]}]},
   "S02": {"keep": [0, 61.0], "style_from": "S01"}}}
@@ -100,9 +100,7 @@ All texts are English: they go into the model prompts.
   or a list whose items are texts or `{"what": text, "start": s, "end": s}` for objects on screen only part of the
   time. Each prompt names only the items on screen during its segment. Never list a material the video does not
   show or one another object could turn into (`salmon` turned stacks of whole tuna and of cash into salmon steaks).
-- `remove`: on-screen elements to delete, each naming what it shows (`the game logo "…"`, `the small white warning
-  text along the bottom`); merged with `defaults.remove`; text or a timed item. List only what you confirmed on the survey's removal strips.
-  Never list HUD counters, prices, labels or buttons.
+- `remove`: on-screen elements to delete; merged with `defaults.remove`; text or a timed item. List only confirmed removal candidates. Never list original logos, warning lines, HUD counters, prices, labels or buttons. Clear legacy logo/warning removals from both defaults and sources when reusing edits. Generation prompts must not mention logos or warning lines, even to say to keep them.
 - `scenes`: replaces the survey's scenes: `[{"name": text, "start": s, "end": s, "views": [seconds, ...]}]` (1-12
   views). `subjects`: replaces the survey's subjects (at most 8): `[{"what", "kind", "start", "end", "at", "box"}]`
   with `kind` one of character, animal, vehicle, object, prop, building. Only views and subjects inside `keep` are

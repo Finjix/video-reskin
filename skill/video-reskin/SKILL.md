@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), non-game stretches (live action) kept as is, reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most five redos per segment.
+description: "Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged (\"写实版材质，风格不变\"), into 1080p deliverables keeping game logos and warning lines, cutting end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), non-game stretches (live action) kept as is, reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most five redos per segment."
 ---
 
 # Video reskin
@@ -41,16 +41,14 @@ Run `auth`. It shows the stored Winky key and whether the Lumos login works.
 ## Talking to the user
 
 Confirm once, at the start, in one message, and only what you cannot work out: the footage (files or folders), and
-the style if it is not the default realistic material look. By default every video loses its end card, game logos and
-bottom warning text (the user's standing request); keep HUD numbers, icons and buttons. Then work to the delivered
+the style if it is not the default realistic material look. By default cut off the end card; retain the original game logos, bottom warning text and HUD numbers, icons and buttons. Do not mention logos or warning text in generation prompts, including negative instructions or explicit preservation instructions. Do not put them in `remove`, `materials`, `extra` or redo prompts; clear any such legacy deletion requests when reusing an edits file. Then work to the delivered
 batch without asking; an open question never stops production: take the default below and report it at the end.
 
 | Situation | Default |
 | --- | --- |
 | End card start unclear | the last frame before the transition into it (wipe, flash, blur, logo zoom); judge from the survey's end-card strip (`catalog/<id>-end.jpg` when it leaves a doubt) |
 | Live action or other non-game footage (a presenter, filmed hands on a phone, a non-game cartoon) at the start or in between | a `passthrough` range from its first frame to the first gameplay frame after it (the survey's non-game strip shows both); a bit of gameplay shorter than 4 s next to it joins the range; a small picture-in-picture over gameplay is not one |
-| A logo that moves between corners | one timed `remove` item per corner (the survey's removal strip shows the move, and its measured still-box span differs from Gemini's), e.g. `the game logo "WHITEOUT SURVIVAL" in the top-left corner`, 0-15 s |
-| A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
+| An explicitly requested removal shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
 | Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`whole tuna`, `stacks of green banknotes`) and leave out materials that are not on screen |
 | A survey view is blurred or covered, or a subject crop misses the subject | correct `scenes` / `subjects` for that source in the edits (copy them from `catalog/survey/<id>.json`, change the time or box) |
 | An object that comes into view stays cartoon in a result (cash stacks, food, goods) | it had no sheet in that segment (`reports/plan.md` lists each segment's sheets): add it to `subjects` if the survey missed it, or drop a subject that matters less there, then `plan` again |
@@ -75,7 +73,7 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    `catalog/catalog.md`, the contact sheets are there for a doubt the survey leaves).
 3. `survey` has Gemini watch each whole source once (6 frames/s): the moments that together show the whole location
    (views), the characters, objects and props that come into view (subjects, each re-boxed on its still), where the
-   closing card starts, every logo, watermark, caption and warning line over the picture (to remove, each timed),
+   closing card starts, the overlays over the picture (logos and warning lines retained; only other removal candidates timed),
    the HUD (kept), and the stretches that are not gameplay (live action, real people, non-game animation: they go
    to `passthrough`). Gemini then checks the view frames and crops as stills (blurred, covered, late, wrong or cut-off
    subject). The command prints all of it as text with the `suggested` edits (`keep` and timed `remove`). Look at
@@ -132,11 +130,11 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    that you watched a video, or that a fix worked without the sheets or a new check to show it.
 2. **Same video, new materials.** Composition, motion, timing, characters, counts and HUD stay as in the original;
    only the materials change, plus the removals. Never ask for added objects, text or effects.
-3. **No logos, warning lines or end cards** in deliveries unless the user asks to keep them.
+3. **Keep original logos and warning lines; cut off end cards.** Generation prompts never mention logos or warning lines. Their presence in the source is not a defect; check only unintended changes against the source.
 4. **Confirm before redoing.** Gemini can be wrong: look at the sheet of every issue before `redo`; redo only
    confirmed segments, never the whole video for a local flaw; never more than five times per segment.
 5. **Approve before continuing.** Never approve a segment whose `check` you have not gone through, nor one whose
-   seam or handoff frame shows a flaw (leftover text or logo, a wrong character or material, a jump at the join): the
+   seam or handoff frame shows a flaw (unrequested changes to source overlays, a wrong character or material, a jump at the join): the
    next segment of the shot is drawn from that frame and keeps the flaw. Redo it instead, and if its redos are
    spent, ask the user, saying the flaw will carry into the rest of the shot.
 6. **Delivery folder.** It holds only the finished `.mp4` files and `temp/`. Everything else (edits drafts, stills,
@@ -145,5 +143,5 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    issue, judge that issue on its own sheet (not on the seam sheet or handoff frame). Where it found nothing at a
    seam or a handoff frame, review that sheet or frame yourself. On every picture you look at (an issue sheet, a
    survey or refs flag, a removal strip, a seam sheet, a handoff frame), confirm or dismiss what it was made for and
-   also look over the whole picture for anything else wrong (cartoon material left, text or logos, a changed or
+   also look over the whole picture for anything else wrong (cartoon material left, added or altered overlays, a changed or
    missing character, object or crowd, colours, the ground); what you find counts like a reported issue.

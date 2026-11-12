@@ -14,7 +14,7 @@ from reskin.common import read, PROMPTS
 class PromptTests(unittest.TestCase):
     def test_compose_fills_every_placeholder(self):
         style = read(PROMPTS)["presets"]["realistic"]
-        row = {"materials": "clear ice blocks", "remove": ["game logo", "warning line at the bottom"],
+        row = {"materials": "clear ice blocks", "remove": ["temporary popup", "floating arrow"],
                "extra": "Keep the snow white."}
         texts = {"scene": prompts.compose(style, "scene", row, views=3, look_image=4),
                  "subject": prompts.compose(style, "subject", row, what="hunter", description="blue winter coat"),
@@ -25,7 +25,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Image 4", texts["scene"])
         self.assertIn("clear ice blocks", texts["scene"])
         self.assertIn("hunter", texts["subject"])
-        self.assertIn("game logo; warning line at the bottom", texts["video"])
+        self.assertIn("temporary popup; floating arrow", texts["video"])
         self.assertIn("Keep the fish whole.", texts["video"])
         self.assertIn("Image 1 is the map.", texts["video"])
         self.assertTrue(texts["video"].startswith("Edit the video: replace the materials of the input video frame for frame"))
@@ -495,14 +495,14 @@ class SurveyHandoverTests(unittest.TestCase):
         from reskin import survey
         result = survey.normalise(self.answer, 58.9)
         self.assertEqual(result["end_card"], {"start": 55.3, "how": "white flash"})
-        self.assertEqual([o["remove"] for o in result["overlays"]], [True, True, False])
+        self.assertEqual([o["remove"] for o in result["overlays"]], [False, False, False])
         self.assertEqual(result["overlays"][0]["box"], [0.0, 0.0, 0.287, 0.063])
 
-    def test_suggested_edits_keep_up_to_the_end_card_and_time_each_removal(self):
+    def test_suggested_edits_keep_logos_and_cut_the_end_card(self):
         from reskin import survey
         suggested = survey.suggested_edits(survey.normalise(self.answer, 58.9), 58.9)
         self.assertEqual(suggested["keep"], [0, 55.3])
-        self.assertEqual([(r["start"], r["end"]) for r in suggested["remove"]], [(0.0, 15.0), (15.0, 55.3)])
+        self.assertEqual(suggested["remove"], [])
         self.assertTrue(all("cash counter" not in r["what"] for r in suggested["remove"]))
 
     def test_a_measured_still_box_at_the_same_place_is_set_beside_the_span(self):
@@ -510,9 +510,18 @@ class SurveyHandoverTests(unittest.TestCase):
         result = survey.normalise(self.answer, 58.9)
         survey.measured_spans(result, [{"box": [0.0, 0.0, 0.287, 0.063], "start": 0.0, "end": 15.0},
                                        {"box": [0.8, 0.0, 0.919, 0.053], "start": 49.5, "end": 55.5}])
-        self.assertEqual(result["overlays"][0]["measured"], "0-15 s")
+        self.assertNotIn("measured", result["overlays"][0])  # retained overlays need no removal measurement
         self.assertNotIn("measured", result["overlays"][1])       # nothing measured in that corner
         self.assertNotIn("measured", result["overlays"][2])       # the HUD is not a removal
+
+    def test_warning_is_retained_and_cached_deletion_flags_are_ignored(self):
+        from reskin import survey
+        answer = {**self.answer, "overlays": [
+            {**self.answer["overlays"][0], "kind": "warning", "what": "small legal text"}]}
+        result = survey.normalise(answer, 58.9)
+        self.assertFalse(result["overlays"][0]["remove"])
+        result["overlays"][0]["remove"] = True  # older survey cache
+        self.assertEqual(survey.suggested_edits(result, 58.9)["remove"], [])
 
     def test_no_end_card_keeps_the_whole_video(self):
         from reskin import survey

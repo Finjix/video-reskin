@@ -34,7 +34,7 @@ CATEGORIES = {
                   "anywhere (look along the bottom and top edges in particular)",
     "seam_color": "a sudden jump in colour, brightness, contrast, texture or realism between consecutive moments, "
                   "especially at the listed seam times",
-    "leftover_overlay": "a logo, watermark or warning/disclaimer text that should have been removed is still visible",
+    "leftover_overlay": "an element explicitly named in the removal list is still visible; source overlays not named there are allowed",
     "end_card": "closing-card content (big logo, store badges, call to action) is visible",
     "style_drift": "the realism level or overall look changes from one part of the video to another",
 }
@@ -204,7 +204,7 @@ def prompt(state: dict, plan_row: dict, assembled: dict, layout: str) -> str:
         f"The video shows the ORIGINAL on the {layout} and the RESTYLED version on the {other}, frame-synchronised "
         f"(same timestamps). The restyle goal: {describe(plan_row['materials'])} — game-rendered cartoon materials replaced by "
         f"realistic real-world materials (style preset: {style.get('label', 'custom')}) while composition, camera motion, characters, object "
-        "positions, counts and timing stay exactly as in the original. HUD numbers, icons and buttons must stay.",
+        "positions, counts and timing stay exactly as in the original. Original overlays and HUD numbers, icons and buttons must stay unless explicitly listed for removal.",
         *([f"Restyled side, target {look[0].lower()}{look[1:]}"] if look else []),
         f"Removed on purpose (must NOT appear on the restyled side): {removal}. The closing card was cut off on purpose.",
         *([f"The restyled video was rendered in segments and joined at: {seams}. Inside a shot each join is a short "

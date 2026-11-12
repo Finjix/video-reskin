@@ -34,7 +34,7 @@ Issue categories (segment and seam alike):
 | `artifact` | bug: morphing, melting, flicker, jitter, frozen frames, garbled HUD text or numbers, strong noise or a fragmented look |
 | `added_text` | captions, warning lines, watermarks or garbled characters the original does not have (the model draws them when a prompt names text that is not on screen) |
 | `seam_color` | 拼接色差: a jump in colour, brightness, texture or realism at the join |
-| `leftover_overlay` | a logo, watermark or warning line still visible |
+| `leftover_overlay` | an explicitly requested removal still visible; original logos and warning lines are allowed |
 | `end_card` | closing-card content still visible |
 | `style_drift` | the look changes between parts of the video |
 
@@ -52,7 +52,7 @@ Gemini is a second pair of eyes, not the judge: it misses things and reports thi
   realism: a step is a seam issue, also when the measure calls it clean. Where Gemini reported a seam issue you judge
   that issue on its own sheet instead.
 - `handoff-<t>.png`: the full-size frame the next segment starts from, **only when no issue Gemini reported covers
-  it**: review it yourself; leftover text or logos, a changed or missing character, crowd or object, a wrong
+  it**: review it yourself; unrequested changes to source overlays, a changed or missing character, crowd or object, a wrong
   material there is copied into the rest of the shot, so a segment whose handoff frame shows one is not approved.
 
 On every picture you look at, never only the reported issue: also look over the whole picture for anything else
@@ -88,8 +88,7 @@ the gaps and ends, not only the pattern.
   that kind from the materials), and change the pictures where they cause the flaw: `sheets` (a character redrawn
   as another), `motion` (items that must move), `split_at` (a part that needs a clip of its own).
 - `--prompt` is added to that segment's video prompt for every later attempt; keep it to one sentence about the
-  confirmed flaw's look, e.g. `Keep every fish whole, with the shape and count of the original.`, `Remove the logo
-  text left in the top-right corner.`, `Keep the overall colours of the reference images; the snow stays white.`.
+  confirmed flaw's look, e.g. `Keep every fish whole, with the shape and count of the original.`, `Keep the overall colours of the reference images; the snow stays white.`.
   A sentence about where something is or when it appears (`Keep the collection box empty.`) can make the video
   model move its camera: prefer none, and `--replace` drops the earlier sentences of a segment.
 - A result that cut, zoomed or framed differently from the source is caught by `render` itself (it compares the
