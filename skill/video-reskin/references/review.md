@@ -14,3 +14,5 @@ Gemini samples every video at 6 frames/s. Reviews compare ORIGINAL with RESULT o
 - Final assembly uses the transition parameters explicitly chosen by the main agent; no post-transition review is required.
 
 The review schema carries English verdict/summary, clip-relative issue start/end/description only; transition_frames belongs to the main agent decision, not Gemini output. User-facing summaries may be Chinese.
+
+Tail suitability compares the previous generated last frame with the next source first frame ONLY for same-shot continuity, never material realism or rendering quality. It is not a video quality verdict. An unsuitable tail selects a converted first frame for the next segment; it cannot invalidate an approved segment or trigger/count a video quality retry. Both suitable and unsuitable decisions are saved. No agent issue-sheet review is required for this reference-selection decision.

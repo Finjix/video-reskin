@@ -215,14 +215,17 @@ def refs(job, sid, plan, seg):
         p = job / "references" / f"{key}-tail.png"
         previous = job / "ai" / f"{sid}-{prev['id']}.mp4"
         still(previous, video_info(previous)["frames"]-1, p)
-        # Do not guess coverage: inspect the tail alongside the inventory.
-        tail = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
-                   [winky.inline(upload_copy(p, 1536))])
-        if not tail["ok"]:
-            report = put(job,f'review/{key}-tail',tail)
-            raise ValueError(f"Gemini rejected the previous tail: {report['note']}; redo the previous segment within its retry limit; no agent image review required")
-        entry = {"id": key+"-tail", "path": str(p), "covers": tail["covers"], "at": a/FPS}
-        chosen.append(entry)
+        first = still(working(job, sid), a, job / "references" / f"{key}-first-source.png")
+        # Only shot continuity decides tail use; material quality is reviewed elsewhere.
+        tail_schema = obj(ok=BOOL, covers=arr(STR), note=STR)
+        tail_schema['properties']['ok']['description'] = 'True only when Image 1 and Image 2 are consecutive views of the same continuous shot.'
+        tail_schema['properties']['covers']['description'] = 'Inventory IDs visible in Image 1, regardless of their material style.'
+        tail = ask("tail", tail_schema, {"operation": "same_shot_continuity", "inventory": inventory},
+                   [winky.inline(upload_copy(p, 1536)), winky.inline(upload_copy(first, 1536))])
+        put(job,f'review/{key}-tail',tail)
+        if tail["ok"]:
+            entry = {"id": key+"-tail", "path": str(p), "covers": [], "visible": tail["covers"], "at": a/FPS}
+            chosen.append(entry)
     selection_path = f"references/{key}-frames"
     frame_selection = saved(job,selection_path)
     if not frame_selection:
@@ -231,7 +234,7 @@ def refs(job, sid, plan, seg):
                  "covered_by_tail": chosen[0]["covers"] if chosen else []})
         put(job,selection_path,frame_selection)
     frames = list(frame_selection['frames'])
-    if not seg["continuous"]:
+    if not chosen:
         frames.insert(0, {"at": a/FPS, "covers": []})
     seen = set()
     for spec in frames:
@@ -249,13 +252,16 @@ def refs(job, sid, plan, seg):
         needed = {x['id'] for x in inventory}
         available = [r for r in available if needed.intersection(r['covers'])] or available[-1:]
         if available:
-            selection = ask("frames", SELECT, {"operation": "select_references", "at": at/FPS,
+            select_schema = deepcopy(SELECT)
+            select_schema['properties']['references'].update(minItems=1, maxItems=min(15, len(available)))
+            select_schema['properties']['references']['items']['enum'] = [r['id'] for r in available]
+            selection = ask("frames", select_schema, {"operation": "select_references", "at": at/FPS,
                             "available": [{k:v for k,v in r.items() if k != "path"} for r in available]},
                             [winky.inline(upload_copy(full, 1536)),
                              *[winky.inline(upload_copy(Path(r["path"]), 512)) for r in available]])
             ids = selection["references"]
             if not ids or len(ids) > 15 or len(set(ids)) != len(ids) or any(x not in {r["id"] for r in available} for x in ids):
-                raise ValueError("invalid image reference selection (1-15 existing IDs required)")
+                raise ValueError(f"invalid image reference selection (1-15 existing IDs required): {ids!r}; available: {[r['id'] for r in available]!r}")
             dependencies = [next(r for r in available if r["id"] == x) for x in ids]
             looks = [Path(r["path"]) for r in dependencies]
         else:
@@ -313,7 +319,8 @@ def render(job, sid, plan, seg):
     if clip.stat().st_size > 190_000_000:
         raise ValueError("reference clip exceeds upload limit")
     if not r.get("generation_id"):
-        text = prompt("video") + (" " + prompt("continuation") if seg["continuous"] else "")
+        uses_tail = references[0]["id"] == f"{sid}-{seg['id']}-tail"
+        text = prompt("video") + (" " + prompt("continuation") if uses_tail else "")
         started = lumos.submit_video_edit(lumos.upload(clip, "video-to-video"),
                    [lumos.upload(upload_copy(Path(x["path"])), "video-to-video") for x in references], text)
         r.update(generation_id=started["generation_id"], status="submitted", prompt=text, frames=seg['frames'])

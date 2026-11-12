@@ -36,3 +36,5 @@ Old schema 1 jobs are rejected, not migrated.
 Prompts are solely in assets/remake-prompts.json. The old internal modules remain as tested media/account helpers; their schema-1 orchestration is not used by the entry point.
 
 For later segments, check stops after producing Gemini seam findings and sheets. The agent chooses cut/transition with seam --segment S01:K02 --transition-frames 0 --reason "Clean join in the sheets" (0-6 frames), or uses redo for major differences. Then check reviews only the segment; adding a transition never triggers another seam model call.
+
+Tail suitability checks ONLY whether the previous generated last frame and next source first frame depict the same continuous shot, ignoring material realism and rendering quality. It is reference selection only: save the Gemini verdict, use the approved predecessor's exact tail when suitable, otherwise convert the next segment's first frame. Never reject or redo the predecessor, revoke its approval, or consume retries because of this decision. Source continuity and seam review remain unchanged; the continuation prompt is used only with an actual tail reference.

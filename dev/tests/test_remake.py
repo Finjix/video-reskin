@@ -83,13 +83,22 @@ class GateTests(unittest.TestCase):
         m.approve(self.job,'S01',self.p,self.p['segments'][1])
 
     def test_tail_failure_is_gemini_only_without_agent_sheet(self):
+        predecessor=m.record(self.job,'S01',self.p['segments'][0]).copy()
+        converted=self.job/'converted.png'
+        converted.touch()
+        m.put(self.job,'references/S01-registry',[
+            {'id':'S01-K02-f48','path':str(converted),'covers':[],'at':2.0}])
         with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
-             patch.object(m,'ask',return_value={'ok':False,'covers':[],'note':'Wrong material'}),\
+             patch.object(m,'ask',side_effect=[{'ok':False,'covers':[],'note':'Unsuitable tail'},
+                                             {'frames':[],'references':[]}]),\
              patch.object(m.winky,'inline',return_value={}),\
              patch('reskin.refs.upload_copy',side_effect=lambda p,*a:p),patch.object(m,'picture_issue') as sheet:
             m.put(self.job,'survey/S01',{'inventory':[]})
-            with self.assertRaisesRegex(ValueError,'no agent image review required'):
-                m.refs(self.job,'S01',self.p,self.p['segments'][1])
+            result=m.refs(self.job,'S01',self.p,self.p['segments'][1])
+        self.assertEqual([r['id'] for r in result],['S01-K02-f48'])
+        self.assertEqual(m.record(self.job,'S01',self.p['segments'][0]),predecessor)
+        self.assertTrue(m.approved(self.job,'S01',self.p,self.p['segments'][0]))
+        self.assertTrue(self.p['segments'][1]['continuous'])
         sheet.assert_not_called()
         self.assertFalse(m.saved(self.job,'review/S01-K02-tail')['ok'])
 
@@ -145,7 +154,7 @@ class GateTests(unittest.TestCase):
         picture.write_bytes(b'cached')
         m.put(self.job,'references/S01-registry',[{'id':'old-prop','path':str(picture),'covers':['prop']}])
         def answer(kind,schema,context,media=()):
-            if schema==m.COVER:
+            if schema==m.COVER or kind=='tail':
                 return {'ok':True,'covers':[],'note':'No prop in tail'}
             return {'frames':[],'references':['old-prop']}
         with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
@@ -159,7 +168,7 @@ class GateTests(unittest.TestCase):
         s=self.p['segments'][1]
         m.put(self.job,'survey/S01',{'inventory':[{'id':'new-prop','start':2,'end':4}]})
         def answer(kind,schema,context,media=()):
-            return ({'ok':True,'covers':[],'note':'Prop absent'} if schema==m.COVER
+            return ({'ok':True,'covers':[],'note':'Prop absent'} if schema==m.COVER or kind=='tail'
                     else {'frames':[],'references':[]})
         with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
              patch.object(m,'ask',side_effect=answer),patch.object(m.winky,'inline',return_value={}),\
@@ -190,6 +199,12 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(m.saved(job,'review/reference-check')['sheet'],str(sheet))
 
     def test_mocked_two_segment_production_and_submission_resume(self):
+        self.run_two_segment_production(True)
+
+    def test_unsuitable_tail_uses_converted_first_frame_through_delivery(self):
+        self.run_two_segment_production(False)
+
+    def run_two_segment_production(self, suitable_tail):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)/'temp'
             source=Path(td)/'source.mp4'
@@ -223,8 +238,14 @@ class MediaTests(unittest.TestCase):
             def answer(kind,schema,context,media=()):
                 if schema==m.FRAMES:
                     return {'frames':[{'at':context['segment'][0],'covers':['ground']}] if not context['covered_by_tail'] else []}
-                if schema==m.COVER:
-                    return {'ok':True,'covers':['ground'],'note':'Realistic ground'}
+                if schema==m.COVER or kind=='tail':
+                    if kind=='tail':
+                        self.assertEqual(context['operation'],'same_shot_continuity')
+                        self.assertEqual(len(media),2)
+                    ok = suitable_tail or kind != 'tail'
+                    return {'ok':ok,'covers':['ground'] if ok else [],'note':'Tail suitability checked'}
+                if context.get('operation')=='select_references':
+                    return {'references':[context['available'][0]['id']]}
                 if kind in ('seam','segment'):
                     reviews.append(kind)
                     return verdict()
@@ -253,14 +274,15 @@ class MediaTests(unittest.TestCase):
                         m.check(job,state,'S01',p,s)
                     m.approve(job,'S01',p,s)
                 self.assertEqual(reviews,['segment','seam','segment'])
-                self.assertEqual(len(image_calls),1)
+                self.assertEqual(len(image_calls),2)
                 self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],48)
-                self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png'))
-                self.assertIn('Start from Image 1.',video_calls[1][2])
+                self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png' if suitable_tail else '-f48.png'))
+                self.assertEqual('Start from Image 1.' in video_calls[1][2],suitable_tail)
                 from PIL import Image,ImageChops
                 expected=m.still(job/'ai/S01-K01.mp4',47,job/'expected-tail.png')
-                with Image.open(expected) as a,Image.open(video_calls[1][1][0]['path']) as b:
-                    self.assertIsNone(ImageChops.difference(a,b).getbbox())
+                if suitable_tail:
+                    with Image.open(expected) as a,Image.open(video_calls[1][1][0]['path']) as b:
+                        self.assertIsNone(ImageChops.difference(a,b).getbbox())
                 self.assertEqual(video_info(m.assemble(job,state,'S01',p))['frames'],72)
 
     def test_two_generated_segments_original_insert_tail_audio_and_transition(self):
