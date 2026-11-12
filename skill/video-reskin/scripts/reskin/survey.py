@@ -1,8 +1,10 @@
 """Survey: Gemini watches each whole source once and names (1) the moments whose frames together show every part of
 the location the camera travels across (they go into one big scene map, refs) and (2) the characters, animals,
 vehicles, objects and props that come into view during the video, each with a moment it is seen clearly and its box
-then (each gets a three-view sheet, refs), (3) where the closing card starts and (4) every logo, watermark, caption
-and warning line drawn over the picture (to remove) and the HUD (to keep). The frames and crops are cut here, and
+then (each gets a three-view sheet, refs), (3) where the closing card starts, (4) every logo, watermark, caption
+and warning line drawn over the picture (to remove) and the HUD (to keep) and (5) the stretches that are not gameplay
+(live action, real people, filmed hands or phones, non-game animation: `passthrough`, kept as the original and put
+back after the gameplay is restyled). The frames and crops are cut here, and
 Gemini checks them once more on the stills (sharp, uncovered, early enough, the whole subject). The agent reads the
 result as text and looks only at the stills Gemini flagged, the end-card strip and one still per removal.
 """
@@ -51,8 +53,11 @@ SCHEMA = {
             "what": {"type": "STRING"}, "where": {"type": "STRING", "enum": list(OVERLAY_PLACES)},
             "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}, "at": {"type": "NUMBER"},
             "box_2d": {"type": "ARRAY", "items": {"type": "NUMBER"}}},
-            "required": ["kind", "text", "what", "where", "start", "end", "at", "box_2d"]}}},
-    "required": ["scenes", "subjects", "end_card", "overlays"]}
+            "required": ["kind", "text", "what", "where", "start", "end", "at", "box_2d"]}},
+        "non_game": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"}, "what": {"type": "STRING"}},
+            "required": ["start", "end", "what"]}}},
+    "required": ["scenes", "subjects", "end_card", "overlays", "non_game"]}
 CHECK_SCHEMA = {"type": "OBJECT", "properties": {"pictures": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
     "picture": {"type": "STRING"}, "ok": {"type": "BOOLEAN"},
     "problem": {"type": "STRING", "enum": ["none", "blurred", "covered", "late", "wrong_subject", "partial", "other"]},
@@ -69,7 +74,8 @@ def prompt(duration: float, end_card: float | None, overlays: list[dict] | None 
     return " ".join(f"""
 This {duration:.1f}-second video is a mobile game ad rendered in 2.5D (a top-down / isometric camera that travels
 over the game world). It will be restyled in segments that share reference pictures: one map of each location and
-one sheet of each subject. Watch the whole video and answer two things.{end} Write every text in English.
+one sheet of each subject. Watch the whole video and answer the five parts below.{end} Ignore the non-game
+stretches (part 5) for parts 1 and 2. Write every text in English.
 
 1. scenes: the distinct locations the camera shows (usually one; a new one only after a camera cut to a different
 place). For each: a short `name`, its time span, a one-sentence `description`, and 3 to 8 `views`: moments whose
@@ -104,6 +110,13 @@ warning text along the bottom`, `where`, the span it is on screen (`start`, `end
 4. end_card: `present` = whether the video ends on a closing card, `start` = the time of the last frame before its
 transition (wipe, flash, blur, logo zoom) begins, or the video's length when there is none, and `how` = how the game
 picture gives way to it.
+
+5. non_game: every stretch before the closing card that is not the game's own rendered picture: live-action footage
+(real people, a presenter or player talking to the camera, filmed hands holding a phone, real places), filmed or
+screen-recorded footage of something else, or animation that is not the game's world. A real person's face or hands
+in a small picture-in-picture over gameplay does not count; the gameplay stays. For each: `start` = its first frame,
+`end` = the first frame of gameplay after it, and `what` = a short phrase of what it shows. An empty list when the
+whole video is gameplay.
 
 All times are seconds from the start of the video.""".split())
 
@@ -183,16 +196,26 @@ def normalise(answer: dict, duration: float) -> dict:
     card = answer.get("end_card") or {}
     end_card = ({"start": clamp(card.get("start", duration)), "how": card.get("how", "")}
                 if card.get("present") and float(card.get("start", duration)) < duration - .1 else None)
-    return {"scenes": scenes, "subjects": subjects[:MAX_SUBJECTS], "end_card": end_card, "overlays": overlays}
+    non_game = []
+    for item in answer.get("non_game") or []:
+        start, end = clamp(item.get("start", 0)), round(min(float(item.get("end", duration)), duration), 2)
+        if end - start >= .1:
+            non_game.append({"start": start, "end": end, "what": item.get("what", "")})
+    return {"scenes": scenes, "subjects": subjects[:MAX_SUBJECTS], "end_card": end_card, "overlays": overlays,
+            "non_game": sorted(non_game, key=lambda x: x["start"])}
 
 
 def suggested_edits(result: dict, duration: float) -> dict:
-    """The edits entry the survey points to: kept up to the end card, the overlays to remove as timed items (a timed
-    item stops the video model from drawing text where it is not on screen)."""
+    """The edits entry the survey points to: kept up to the end card, the non-game stretches as passthrough (kept as
+    the original), the overlays to remove as timed items (a timed item stops the video model from drawing text where
+    it is not on screen; one only over passthrough footage is left out, that footage is not restyled)."""
     keep_end = result["end_card"]["start"] if result.get("end_card") else round(duration, 2)
+    passthrough = [[x["start"], min(x["end"], keep_end)] for x in result.get("non_game") or [] if x["start"] < keep_end]
+    covered = lambda o: any(a <= o["start"] and min(o["end"], keep_end) <= b for a, b in passthrough)
     remove = [{"what": o["what"], "start": o["start"], "end": min(o["end"], keep_end)}
-              for o in result.get("overlays") or [] if o["remove"] and o["what"] and o["start"] < keep_end]
-    return {"keep": [0, keep_end], "remove": remove}
+              for o in result.get("overlays") or [] if o["remove"] and o["what"] and o["start"] < keep_end
+              and not covered(o)]
+    return {"keep": [0, keep_end], **({"passthrough": passthrough} if passthrough else {}), "remove": remove}
 
 
 BOX_SCHEMA = {"type": "OBJECT", "properties": {"found": {"type": "BOOLEAN"},
@@ -244,6 +267,9 @@ def survey_source(job: Path, row: dict, catalog_row: dict) -> dict:
     result["checks"] = check_pictures(result, views, crops)
     measured_spans(result, catalog_row.get("overlays"))
     result["overlay_stills"] = overlay_stills(job, row["id"], source, result)
+    result["non_game_stills"] = [str(boundary_strip(source, x, folder / f"non-game-{x['start']:07.2f}.png",
+                                                    catalog_row["duration"]))
+                                 for x in result["non_game"]]
     if result["end_card"]:
         result["end_strip"] = str(end_strip(source, result["end_card"]["start"],
                                             folder / f"end-{result['end_card']['start']:07.2f}.png"))
@@ -364,6 +390,19 @@ def end_strip(source: Path, t: float, output: Path, width: int = 360) -> Path:
         full = frame(source, moment, output.with_name(f"{output.stem}-{k}.png"))
         tiles.append(marked(full, None, f"{moment:.2f} s{' (kept up to here)' if k == 1 else ''}",
                             output.with_name(f"{output.stem}-{k}m.png"), width))
+    return join_tiles(tiles, output)
+
+
+def boundary_strip(source: Path, item: dict, output: Path, duration: float, width: int = 300) -> Path:
+    """A non-game stretch's two boundaries, each with a frame just outside and just inside: the agent confirms what it
+    shows and where it begins and ends."""
+    a, b = item["start"], item["end"]
+    moments = [(a - .3, "before"), (a + .05, "starts"), (b - .1, "ends"), (b + .1, "after")]
+    tiles = []
+    for k, (moment, label) in enumerate(moments):
+        moment = min(max(0.0, moment), max(0.0, duration - .05))
+        full = frame(source, moment, output.with_name(f"{output.stem}-{k}.png"))
+        tiles.append(marked(full, None, f"{moment:.2f} s {label}", output.with_name(f"{output.stem}-{k}m.png"), width))
     return join_tiles(tiles, output)
 
 

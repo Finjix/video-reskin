@@ -120,6 +120,9 @@ def cmd_survey(args) -> int:
                 lines.append(f"  remove {o['id']} {o['kind']} {o['where']} {o['start']:g}-{o['end']:g} s: {o['what']}"
                              + (f" (a still box was measured there {o['measured']})" if o.get("measured") else "")
                              + f"\n     confirm on {(r.get('overlay_stills') or {}).get(o['id'], '-')}")
+        for x, strip in zip(r.get("non_game") or [], r.get("non_game_stills") or []):
+            lines.append(f"  non-game footage {x['start']:g}-{x['end']:g} s (passthrough: kept as the original, not "
+                         f"restyled): {x['what']}\n     confirm on {strip}")
         kept = [o for o in r.get("overlays") or [] if not o["remove"]]
         if kept:
             lines.append(f"  HUD kept: " + "; ".join(f"{o['where']} {o['text'] or o['what']}" for o in kept))
@@ -130,7 +133,7 @@ def cmd_survey(args) -> int:
         if r.get("suggested"):
             lines.append(f"  suggested edits: {json.dumps(r['suggested'], ensure_ascii=False)}")
     show(lines + [f"survey: {job / 'catalog/survey'} (<id>.json); all views and crops on {job / 'catalog'}/<id>-survey.jpg",
-                  "next: look at the end-card strip, each removal strip and each flagged picture (not the whole "
+                  "next: look at the end-card strip, each non-game strip, each removal strip and each flagged picture (not the whole "
                   "sheets; on each also look for anything else wrong, never only what it was made for), write the edits file from the suggested edits plus the materials (correct scenes or "
                   "subjects where a flag holds), then plan --edits <edits.json>"])
     return RULE_FAILURE if failed else 0
@@ -160,6 +163,8 @@ def cmd_plan(args) -> int:
         lines.append(f"{source_id}: keep {row['keep'][0]:.2f}-{row['keep'][1]:.2f} s, {len(row['segments'])} segments "
                      f"({cuts} seams at cuts, {inner} inside shots), {len(row['scenes'])} scene map(s), "
                      f"{len({k for s in row['segments'] for k in s['subjects']})} subject sheet(s), remove: {describe(row['remove']) or 'nothing'}"
+                     + (f", passthrough (original footage, not restyled): "
+                        + ", ".join(f"{o['start']:.2f}-{o['end']:.2f} s" for o in row["originals"]) if row.get("originals") else "")
                      + ("" if row["surveyed"] or row.get("scenes") else " (not surveyed)"))
     if missing:
         lines.append(f"note: no edits for {', '.join(missing)} (defaults used: keep up to the end-card candidate)")

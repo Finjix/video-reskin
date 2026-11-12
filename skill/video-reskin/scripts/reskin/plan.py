@@ -8,6 +8,12 @@ where a cut would show). Every segment takes the scene map of its location and a
 
 Around a seam inside a shot both neighbours render OVERLAP_SECONDS more (half on either side); a render shorter than
 MIN_RENDER is padded to it; `assemble` trims the padding.
+
+The workflow restyles gameplay only. Live-action or other non-game footage inside the kept range (a real person
+talking to the camera, filmed hands on a phone, a non-game cartoon) is listed as `passthrough` ranges: they are cut
+out of the segments (`originals` of the plan, never rendered or checked), the gameplay between them is segmented on
+its own (a cut seam at every boundary, padding never reaching into them), and `assemble` puts the original footage
+back in its place.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ MIN_SECONDS = 2.0         # delivered pieces shorter than this are merged into a
 OVERLAP_SECONDS = .6      # rendered by both segments around a seam inside a shot (half before, half after)
 SEARCH_SECONDS = 7.0      # a seam inside a shot is searched in the last this-many seconds a segment can reach
 SMOOTH_SECONDS = .15      # camera speed is averaged over this much on either side of a candidate moment
-EDIT_KEYS = {"keep", "materials", "remove", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
+EDIT_KEYS = {"keep", "passthrough", "materials", "remove", "extra", "skip", "style_from", "split_at", "max_segment_seconds",
              "scenes", "subjects", "sheets", "motion"}
 SUBJECT_KINDS = ("character", "animal", "vehicle", "object", "prop", "building")
 MAX_SUBJECTS = 8          # subjects one source lists at most
@@ -86,6 +92,32 @@ def subjects_problem(subjects, duration: float) -> str | None:
     return None
 
 
+def passthrough_problem(ranges, duration: float) -> str | None:
+    """`passthrough`: [[start, end], ...] seconds of live-action / non-game footage, kept as the original."""
+    if not isinstance(ranges, list) or not all(
+            isinstance(r, list) and len(r) == 2 and all(isinstance(x, (int, float)) for x in r)
+            and 0 <= r[0] < r[1] <= duration + .05 for r in ranges):
+        return f"passthrough must be a list of [start, end] seconds inside 0-{duration:.2f}"
+    return None
+
+
+def merged_ranges(ranges: list, keep: list[float]) -> list[list[float]]:
+    """Passthrough ranges clipped to the kept range, sorted, overlapping ones merged."""
+    out: list[list[float]] = []
+    for a, b in sorted([max(keep[0], float(a)), min(keep[1], float(b))] for a, b in ranges):
+        if b <= a:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def inside_any(t: float, ranges: list[list[float]]) -> bool:
+    return any(a <= t <= b for a, b in ranges)
+
+
 def check_edits(value: dict, catalog: dict) -> dict:
     """Validate the edits file against the catalog; returns it normalised."""
     if not isinstance(value, dict) or not isinstance(value.get("sources", {}), dict):
@@ -95,7 +127,7 @@ def check_edits(value: dict, catalog: dict) -> dict:
     problems = []
     for key in set(defaults) - EDIT_KEYS:
         problems.append(f"defaults: unknown key {key}")
-    for key in ("scenes", "subjects", "keep", "split_at", "sheets", "motion"):
+    for key in ("scenes", "subjects", "keep", "passthrough", "split_at", "sheets", "motion"):
         if key in defaults:
             problems.append(f"defaults: {key} belongs to a source")
     if "remove" in defaults and items_problem(defaults["remove"], "remove"):
@@ -115,6 +147,8 @@ def check_edits(value: dict, catalog: dict) -> dict:
                 problems.append(f"{source_id}: keep must be [start, end] seconds inside 0-{duration:.2f}")
             elif keep[1] - keep[0] < MIN_RENDER:
                 problems.append(f"{source_id}: keep must be at least {MIN_RENDER} s (the shortest render)")
+        if "passthrough" in row and passthrough_problem(row["passthrough"], duration):
+            problems.append(f"{source_id}: {passthrough_problem(row['passthrough'], duration)}")
         if "extra" in row and not isinstance(row["extra"], str):
             problems.append(f"{source_id}: extra must be text")
         if "materials" in row and not isinstance(row["materials"], str) and items_problem(row["materials"], "materials"):
@@ -168,6 +202,7 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict, su
     row = {**{k: v for k, v in defaults.items() if k not in ("keep", "split_at")}, **own}
     card = catalog_row.get("end_card")
     keep = row.get("keep") or [0.0, card["start"] if card else catalog_row["duration"]]
+    passthrough = merged_ranges(row.get("passthrough") or [], keep)
     remove = []
     for item in [*(defaults.get("remove") or []), *(own.get("remove") or [])]:
         if item not in remove:
@@ -177,14 +212,16 @@ def source_edits(edits: dict, source_id: str, catalog_row: dict, style: dict, su
         {"name": "scene", "start": 0.0, "end": catalog_row["duration"], "views": [round((keep[0] + keep[1]) / 2, 2)]}]
     subjects = row.get("subjects") if "subjects" in row else (survey.get("subjects") or [])
     # only what the kept range shows: views and sheets of the rest cost money and add places nobody sees
+    # (and no frame of passthrough footage: a view or crop of a real person would go into a game picture)
     inside = lambda item: overlaps(item, keep[0], keep[1])
     trimmed = []
     for scene in filter(inside, scenes):
-        views = [t for t in scene["views"] if keep[0] <= t <= keep[1]] or scene["views"]
+        views = ([t for t in scene["views"] if keep[0] <= t <= keep[1] and not inside_any(t, passthrough)]
+                 or [t for t in scene["views"] if not inside_any(t, passthrough)] or scene["views"])
         trimmed.append({**scene, "views": views})
     scenes = trimmed or scenes[:1]
-    subjects = [s for s in subjects if inside(s)]
-    return {"keep": [float(keep[0]), float(keep[1])], "materials": row.get("materials") or style["default_materials"],
+    subjects = [s for s in subjects if inside(s) and not inside_any(s["at"], passthrough)]
+    return {"keep": [float(keep[0]), float(keep[1])], "passthrough": passthrough, "materials": row.get("materials") or style["default_materials"],
             "remove": remove, "extra": row.get("extra", ""), "skip": bool(row.get("skip")),
             "style_from": row.get("style_from"), "split_at": row.get("split_at") or [],
             "max_segment_seconds": float(row.get("max_segment_seconds") or 0) or None,
@@ -212,11 +249,58 @@ def seam_scores(motion: list[float], camera: list[list[float]], fps: float, fram
             for i in range(frames)]
 
 
-def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: list[float],
-            camera: list[list[float]], split_at: list[float]) -> list[dict]:
+def gameplay_runs(catalog_row: dict, keep: list[float], passthrough: list[list[float]]) -> tuple[list, list]:
+    """The kept range in frames split around the passthrough ranges: (gameplay runs, originals), each [a, b]."""
     fps = catalog_row["info"]["fps"]
     total = catalog_row["info"]["frames"]
     first, last = round(keep[0] * fps), min(total, round(keep[1] * fps))
+    originals = [[max(first, round(a * fps)), min(last, round(b * fps))] for a, b in passthrough]
+    originals = [r for r in originals if r[1] > r[0]]
+    runs, position = [], first
+    for a, b in originals:
+        if a > position:
+            runs.append([position, a])
+        position = b
+    if last > position:
+        runs.append([position, last])
+    return runs, originals
+
+
+def runs_problem(catalog_row: dict, keep: list[float], passthrough: list[list[float]]) -> str | None:
+    """A gameplay run too short to render, or none at all."""
+    fps = catalog_row["info"]["fps"]
+    runs, _ = gameplay_runs(catalog_row, keep, passthrough)
+    if not runs:
+        return "the whole kept range is passthrough: nothing to restyle (skip the source instead)"
+    for a, b in runs:
+        if (b - a) / fps < MIN_RENDER:
+            return (f"the gameplay at {a / fps:.2f}-{b / fps:.2f} s next to passthrough footage is shorter than "
+                    f"{MIN_RENDER} s (the shortest render): add it to the passthrough range or move a boundary")
+    return None
+
+
+def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: list[float],
+            camera: list[list[float]], split_at: list[float], passthrough: list[list[float]] | None = None) -> list[dict]:
+    """Segments of the gameplay in the kept range (passthrough ranges left out), numbered K01... in order. A run
+    after passthrough footage opens with a cut seam; renders pad only inside their run there."""
+    total = catalog_row["info"]["frames"]
+    runs, originals = gameplay_runs(catalog_row, keep, passthrough or [])
+    starts, ends = {b for _, b in originals}, {a for a, _ in originals}
+    segments = []
+    for first, last in runs:
+        segments += segment_run(catalog_row, first, last, max_seconds, motion, camera, split_at,
+                                "cut" if first in starts else "start" if not segments else "cut",
+                                first if first in starts else 0, last if last in ends else total)
+    for number, row in enumerate(segments):
+        row["id"] = f"K{number + 1:02d}"
+    return segments
+
+
+def segment_run(catalog_row: dict, first: int, last: int, max_seconds: float, motion: list[float],
+                camera: list[list[float]], split_at: list[float], opening: str, low: int, high: int) -> list[dict]:
+    """Segments of the frames first-last; renders padded only inside low-high."""
+    fps = catalog_row["info"]["fps"]
+    total = catalog_row["info"]["frames"]
     shot_starts = {s["frames"][0] for s in catalog_row["shots"]}
     cuts = sorted(c for c in shot_starts | {round(t * fps) for t in split_at} if first < c < last)
     forced = sorted({round(t * fps) for t in split_at if first < round(t * fps) < last})
@@ -227,7 +311,7 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     scores = seam_scores(motion, camera, fps, total)
     # Walk forward: end each segment at the latest camera cut that fits, else at the moment the camera moves
     # fastest in the last SEARCH_SECONDS the segment can reach (leaving room for the overlap on both sides).
-    spans, position, seam = [], first, "start"
+    spans, position, seam = [], first, opening
     while True:
         lead = half if seam == "continuous" else 0
         # every split_at moment in reach is a boundary, the earliest first, also when the rest would fit in one
@@ -258,14 +342,13 @@ def segment(catalog_row: dict, keep: list[float], max_seconds: float, motion: li
     segments = [{"frames": [a, b], "seam": kind, "inner_cuts": [c for c in cuts if a < c < b and c in shot_starts]}
                 for a, b, kind in spans]
     for number, row in enumerate(segments):
-        row["id"] = f"K{number + 1:02d}"
         after = segments[number + 1]["seam"] if number + 1 < len(segments) else None
         a = row["frames"][0] - (half if row["seam"] == "continuous" else 0)
         b = row["frames"][1] + (half if after == "continuous" else 0)
         # at least MIN_RENDER seconds: pad a short clip, later first, earlier where the source ends
         want = min(maximum, max(round(MIN_RENDER * fps), b - a))
-        b = min(total, a + want)
-        a = max(0, b - want)
+        b = min(high, a + want)
+        a = max(low, b - want)
         row["render_frames"] = [a, b]
         row["render_seconds"] = round((b - a) / fps, 3)
         row["start"], row["end"] = round(row["frames"][0] / fps, 3), round(row["frames"][1] / fps, 3)
@@ -319,23 +402,32 @@ def assign_refs(row: dict) -> None:
 
 
 def build(job: Path, edits: dict, catalog: dict, style: dict, max_seconds: float) -> dict:
-    plan = {"sources": {}}
+    plan, problems = {"sources": {}}, []
     for row in catalog["sources"]:
         survey_path = job / "catalog/survey" / f"{row['id']}.json"
         survey = read(survey_path) if survey_path.is_file() else None
         settings = source_edits(edits, row["id"], row, style, survey)
         if settings["skip"]:
             continue
+        problem = runs_problem(row, settings["keep"], settings["passthrough"])
+        if problem:
+            problems.append(f"{row['id']}: {problem}")
+            continue
         motion_path = job / "catalog/motion" / f"{row['id']}.json"
         camera_path = job / "catalog/motion" / f"{row['id']}-camera.json"
         motion = read(motion_path) if motion_path.is_file() else []
         camera = read(camera_path) if camera_path.is_file() else []
         limit = min(MAX_SECONDS, settings["max_segment_seconds"] or max_seconds)
-        segments = segment(row, settings["keep"], limit, motion, camera, settings["split_at"])
-        plan["sources"][row["id"]] = {**settings, "fps": row["info"]["fps"], "surveyed": survey is not None,
+        segments = segment(row, settings["keep"], limit, motion, camera, settings["split_at"], settings["passthrough"])
+        fps = row["info"]["fps"]
+        originals = [{"id": f"N{k:02d}", "frames": r, "start": round(r[0] / fps, 3), "end": round(r[1] / fps, 3)}
+                     for k, r in enumerate(gameplay_runs(row, settings["keep"], settings["passthrough"])[1], 1)]
+        plan["sources"][row["id"]] = {**settings, "fps": fps, "surveyed": survey is not None,
                                       "width": row["info"]["width"], "height": row["info"]["height"],
-                                      "segments": segments}
+                                      "segments": segments, "originals": originals}
         assign_refs(plan["sources"][row["id"]])
+    if problems:
+        raise ValueError("edits problems:\n  " + "\n  ".join(problems))
     write(job / "config/plan.json", plan)
     write_text(job / "reports/plan.md", markdown(plan, catalog))
     return plan
@@ -351,6 +443,9 @@ def markdown(plan: dict, catalog: dict) -> str:
                      + ("" if row["surveyed"] or row.get("scenes") else " (no survey: run survey)"))
         lines.append(f"materials: {describe(row['materials'])}")
         lines.append(f"remove: {describe(row['remove']) or 'nothing'}")
+        for original in row.get("originals") or []:
+            lines.append(f"passthrough {original['id']} {original['start']:.2f}-{original['end']:.2f} s: "
+                         "non-game footage, not restyled, the original goes back in at assemble")
         if row["extra"]:
             lines.append(f"extra: {row['extra']}")
         for k, scene in enumerate(row["scenes"], 1):

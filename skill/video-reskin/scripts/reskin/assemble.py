@@ -9,7 +9,8 @@
    smallest. When that jump is no larger than the picture's ordinary change from frame to frame there, and the two
    drawings are close, it is a plain cut; otherwise a very light dissolve over DISSOLVE_SECONDS, nothing more (the
    user's rule: no effects at seams unless needed, then only a slight dissolve).
-4. Join with the source's own audio of the kept range.
+4. Join with the source's own audio of the kept range. Passthrough footage (live action, non-game: plan) goes back in
+   as the original picture at its place, joined to the restyled clips with plain cuts.
 """
 from __future__ import annotations
 
@@ -59,7 +60,23 @@ def timeline(row: dict, out_fps: float) -> list[dict]:
         rows.append({"id": seg["id"], "seam": seg["seam"], "out": [position(a), position(b)],
                      "body": [position(seg["frames"][0]), position(seg["frames"][1])],
                      "camera": seg.get("seam_camera") or [0.0, 0.0]})
-    return rows
+    for original in row.get("originals") or []:
+        span = [position(original["frames"][0]), position(original["frames"][1])]
+        rows.append({"id": original["id"], "seam": "cut", "out": span, "body": list(span), "camera": [0.0, 0.0],
+                     "original": True})
+    return sorted(rows, key=lambda line: line["body"][0])
+
+
+def original_clip(source: Path, start: float, frames: int, out_fps: float, size: tuple[int, int], output: Path) -> Path:
+    """`frames` frames of the source from `start` at the delivery size and rate (passthrough footage)."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    partial = output.with_name(output.stem + ".partial.mp4")
+    run([FFMPEG, "-v", "error", "-y", "-ss", f"{max(0.0, start):.6f}", "-i", source, "-vf",
+         f"fps={out_fps},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1,tpad=stop_mode=clone:stop_duration=1",
+         "-frames:v", str(frames), "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "12", "-pix_fmt", "yuv420p",
+         partial])
+    partial.replace(output)
+    return output
 
 
 # --- 1. retime -------------------------------------------------------------------------------------------------
@@ -502,8 +519,22 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
     full = timeline(row, out_fps)
     count = len(full) if upto is None else next(i for i, line in enumerate(full) if line["id"] == upto) + 1
     lines = full[:count]
+    segments = {seg["id"]: seg for seg in row["segments"]}
+
     def one(index: int) -> tuple[Path, dict]:
-        line, seg = lines[index], row["segments"][index]
+        line = lines[index]
+        if line.get("original"):
+            frames = line["out"][1] - line["out"][0]
+            work = job / "work" / f"{source_id}-{line['id']}.mp4"
+            start = row["keep"][0] + line["out"][0] / out_fps
+            stamp = {"original": round(start, 4), "frames": frames, "fps": out_fps, "size": list(size)}
+            stamp_path = work.with_suffix(".json")
+            if not (work.is_file() and stamp_path.is_file() and read(stamp_path).get("stamp") == stamp):
+                log(f"{source_id}:{line['id']}: original footage (passthrough)")
+                original_clip(Path(source["path"]), start, frames, out_fps, size, work)
+                write(stamp_path, {"stamp": stamp, "timing": {"frames": frames, "original": True}})
+            return work, read(stamp_path)["timing"]
+        seg = segments[line["id"]]
         ai = job / "ai" / f"{source_id}-{line['id']}.mp4"
         record_path = job / "state/render" / f"{source_id}-{line['id']}.json"
         record = read(record_path) if record_path.is_file() else {}
@@ -614,7 +645,8 @@ def assemble_source(job: Path, state: dict, source_id: str, row: dict, style: di
               "size": [made["width"], made["height"]], "fps": out_fps, "seams": seam_times, "colour": colour,
               "timing": timing, "problems": problems, "keep": row["keep"],
               "segments": [{"id": line["id"], "start": round((line["body"][0] - origin) / out_fps, 3),
-                            "end": round((line["body"][1] - origin) / out_fps, 3)} for line in lines]}
+                            "end": round((line["body"][1] - origin) / out_fps, 3),
+                            **({"original": True} if line.get("original") else {})} for line in lines]}
     if upto is None:
         write(job / "state/assembled" / f"{source_id}.json", result)
     log(f"{source_id}: {'assembled' if upto is None else 'preview up to ' + upto}: {output.name} "

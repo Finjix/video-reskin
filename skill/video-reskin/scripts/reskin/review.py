@@ -287,10 +287,11 @@ def seam_check(job: Path, state: dict, source_id: str, plan_row: dict, seg: dict
     no approved result."""
     from reskin import assemble as ASSEMBLE, render as RENDER
     index = next(i for i, s in enumerate(plan_row["segments"]) if s["id"] == seg["id"])
-    if index == 0:
+    after_original = any(o["frames"][1] == seg["frames"][0] for o in plan_row.get("originals") or [])
+    if index == 0 and not after_original:
         return [], None
-    previous = plan_row["segments"][index - 1]
-    if not RENDER.approved(job, f"{source_id}:{previous['id']}"):
+    previous = plan_row["segments"][index - 1] if index else None
+    if previous and not RENDER.approved(job, f"{source_id}:{previous['id']}"):
         return [], {"pending": f"{source_id}:{previous['id']} has no approved result yet: check this segment again "
                                "once it is approved"}
     preview = ASSEMBLE.assemble_source(job, state, source_id, plan_row, job_style(state), upto=seg["id"])

@@ -64,6 +64,29 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("Remove these", text)
 
 
+class PassthroughTimelineTests(unittest.TestCase):
+    def test_originals_fill_the_gaps_on_the_clock(self):
+        row = {"fps": 30.0, "keep": [0.0, 20.0],
+               "segments": [{"id": "K01", "seam": "cut", "frames": [90, 300], "render_frames": [90, 300]},
+                            {"id": "K02", "seam": "cut", "frames": [360, 600], "render_frames": [360, 600]}],
+               "originals": [{"id": "N01", "frames": [0, 90]}, {"id": "N02", "frames": [300, 360]}]}
+        lines = assemble.timeline(row, 24.0)
+        self.assertEqual([l["id"] for l in lines], ["N01", "K01", "N02", "K02"])
+        for a, b in zip(lines, lines[1:]):
+            self.assertEqual(a["body"][1], b["body"][0])
+        self.assertTrue(lines[0]["original"] and lines[2]["original"])
+        self.assertEqual(assemble.runs_of(lines), [[0], [1], [2], [3]])
+
+    def test_survey_suggests_passthrough(self):
+        from reskin import survey
+        result = {"end_card": {"start": 30.0}, "non_game": [{"start": 0, "end": 3.2, "what": "presenter"}],
+                  "overlays": [{"what": "logo A", "start": 0, "end": 3, "remove": True},
+                               {"what": "logo B", "start": 0, "end": 30, "remove": True}]}
+        suggested = survey.suggested_edits(result, 35.0)
+        self.assertEqual(suggested["passthrough"], [[0, 3.2]])
+        self.assertEqual([r["what"] for r in suggested["remove"]], ["logo B"])
+
+
 class SizeTests(unittest.TestCase):
     def test_target_sizes(self):
         self.assertEqual(assemble.target_size(1080, 1920), (1080, 1920))

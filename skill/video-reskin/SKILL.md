@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most five redos per segment, no whole-video review.
+description: Batch-restyle 2.5D (top-down) game videos, by default into realistic materials with the style unchanged ("写实版材质，风格不变"), into 1080p deliverables without game logos, warning lines or end cards: a Gemini survey of each whole video, one GPT Image scene map per location and three-view sheets of the subjects that come into view, Seedance 2.5 video editing on Lumos in segments of up to 30 s, each segment that continues a shot chained to the previous result and rendered only after that result is checked and approved, seams placed in fast camera moves and joined with plain cuts (a very light dissolve only where a cut would show), non-game stretches (live action) kept as is, reassembly on the source clock with the original audio, and a gate per segment: Gemini checks each segment, its seam to the one before (on a preview of the segments joined so far) and its handoff frame, the agent confirms the findings and looks for anything else, the next segment renders only after approval, at most five redos per segment.
 ---
 
 # Video reskin
@@ -48,6 +48,7 @@ batch without asking; an open question never stops production: take the default 
 | Situation | Default |
 | --- | --- |
 | End card start unclear | the last frame before the transition into it (wipe, flash, blur, logo zoom); judge from the survey's end-card strip (`catalog/<id>-end.jpg` when it leaves a doubt) |
+| Live action or other non-game footage (a presenter, filmed hands on a phone, a non-game cartoon) at the start or in between | a `passthrough` range from its first frame to the first gameplay frame after it (the survey's non-game strip shows both); a bit of gameplay shorter than 4 s next to it joins the range; a small picture-in-picture over gameplay is not one |
 | A logo that moves between corners | one timed `remove` item per corner (the survey's removal strip shows the move, and its measured still-box span differs from Gemini's), e.g. `the game logo "WHITEOUT SURVIVAL" in the top-left corner`, 0-15 s |
 | A logo or warning line shows only part of the time | a timed item `{"what": "...", "start": s, "end": s}`: naming text that is not on screen makes the model draw garbled text there |
 | Objects that could be mistaken for each other (whole fish vs fish steaks, cash vs food) | name each as itself in `materials` (`whole tuna`, `stacks of green banknotes`) and leave out materials that are not on screen |
@@ -74,11 +75,15 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    `catalog/catalog.md`, the contact sheets are there for a doubt the survey leaves).
 3. `survey` has Gemini watch each whole source once (6 frames/s): the moments that together show the whole location
    (views), the characters, objects and props that come into view (subjects, each re-boxed on its still), where the
-   closing card starts, and every logo, watermark, caption and warning line over the picture (to remove, each timed)
-   and the HUD (kept). Gemini then checks the view frames and crops as stills (blurred, covered, late, wrong or cut-off
+   closing card starts, every logo, watermark, caption and warning line over the picture (to remove, each timed),
+   the HUD (kept), and the stretches that are not gameplay (live action, real people, non-game animation: they go
+   to `passthrough`). Gemini then checks the view frames and crops as stills (blurred, covered, late, wrong or cut-off
    subject). The command prints all of it as text with the `suggested` edits (`keep` and timed `remove`). Look at
-   the end-card strip, the one marked still per removal and each flagged picture; not the whole sheets.
-4. Write the edits file: per source the kept range (`keep`, ending before the end card), the real-world `materials`
+   the end-card strip, each non-game strip, the one marked still per removal and each flagged picture; not the
+   whole sheets.
+4. Write the edits file: per source the kept range (`keep`, ending before the end card), the non-game stretches
+   inside it (`passthrough`: this workflow restyles gameplay only; those stretches are cut out, never rendered, and
+   the original footage goes back in at assembly), the real-world `materials`
    of what is on screen, what to `remove` (the suggested items you confirmed on their stills, timed when they come
    and go; HUD stays), and corrected `scenes`/`subjects` where a flag holds. `plan --edits <file>` cuts every
    kept range into segments of at most 30 s: at camera cuts where possible, otherwise where the camera moves
@@ -110,7 +115,7 @@ Commands and file formats: [workflow](references/workflow.md). Gate and checks: 
    confirmed broken one (a seam flaw: the later segment), then `render` again; the next segment of a shot renders
    only after the one before it is approved, so a flaw never travels on. An approved segment keeps its result when
    the segment before it is redone later; check it again then (its seam changed).
-8. `assemble` puts every result on the source clock at one constant speed per clip, its seams pinned to the
+8. `assemble` puts every result on the source clock (and the original footage at each `passthrough` range) at one constant speed per clip, its seams pinned to the
    source's moments (the few holds or skips this needs go where the picture stands still), matches colours
    across seams inside a shot, switches at each such seam at the least visible frame of the overlap with a plain
    cut, or with a very light 6-frame dissolve where a cut would show (no other effects at seams: the user's rule),

@@ -87,7 +87,50 @@ class SegmentTests(unittest.TestCase):
         self.assertLessEqual(segments[-1]["render_frames"][1], row["info"]["frames"])
 
 
+    def test_passthrough_is_left_out_and_padding_stays_out_of_it(self):
+        fps = 30.0
+        row = catalog_row(60.0, fps)
+        keep, passthrough = [0, 58.0], [[0, 3.5], [20.0, 23.0], [54.0, 58.0]]
+        segments = plan.segment(row, keep, 15.0, [1.0] * row["info"]["frames"], [], [], passthrough)
+        runs, originals = plan.gameplay_runs(row, keep, passthrough)
+        self.assertEqual(runs, [[105, 600], [690, 1620]])
+        self.assertEqual(originals, [[0, 105], [600, 690], [1620, 1740]])
+        self.assertEqual([s["id"] for s in segments], [f"K{k:02d}" for k in range(1, len(segments) + 1)])
+        for a, b in passthrough:
+            for seg in segments:
+                lo, hi = seg["render_frames"]
+                self.assertTrue(hi <= round(a * fps) or lo >= round(b * fps), (seg, a, b))
+        first_of_run = [s for s in segments if s["frames"][0] in (105, 690)]
+        self.assertEqual([s["seam"] for s in first_of_run], ["cut", "cut"])
+        self.assertEqual(segments[-1]["frames"][1], 1620)
+        covered = sum(s["frames"][1] - s["frames"][0] for s in segments) + sum(b - a for a, b in originals)
+        self.assertEqual(covered, round(58.0 * fps))
+
+    def test_short_gameplay_between_passthrough_is_refused(self):
+        row = catalog_row(30.0, 30.0)
+        self.assertIsNone(plan.runs_problem(row, [0, 30.0], [[0, 5.0]]))
+        self.assertIn("shorter than", plan.runs_problem(row, [0, 30.0], [[0, 5.0], [7.0, 30.0]]))
+        self.assertIn("whole kept range", plan.runs_problem(row, [0, 30.0], [[0, 30.0]]))
+
+
 class EditsTests(unittest.TestCase):
+    def test_passthrough_edits(self):
+        catalog = {"sources": [catalog_row()]}
+        plan.check_edits({"sources": {"S01": {"passthrough": [[0, 3.4], [20, 22]]}}}, catalog)
+        with self.assertRaisesRegex(ValueError, "passthrough must be"):
+            plan.check_edits({"sources": {"S01": {"passthrough": [[5, 3]]}}}, catalog)
+        with self.assertRaisesRegex(ValueError, "belongs to a source"):
+            plan.check_edits({"defaults": {"passthrough": [[0, 3]]}, "sources": {}}, catalog)
+        self.assertEqual(plan.merged_ranges([[10, 14], [0, 3], [12, 20], [55, 70]], [1, 60]), [[1, 3], [10, 20], [55, 60]])
+        style = {"default_materials": "x"}
+        survey = {"scenes": [{"name": "a", "start": 0, "end": 60, "views": [1.0, 10.0, 30.0]}],
+                  "subjects": [{"what": "presenter", "start": 0, "end": 3, "at": 1.5, "box": [0, 0, 1, 1]},
+                               {"what": "hero", "start": 5, "end": 50, "at": 10.0, "box": [0, 0, .2, .2]}]}
+        edits = plan.check_edits({"sources": {"S01": {"passthrough": [[0, 3.4]]}}}, catalog)
+        row = plan.source_edits(edits, "S01", catalog_row(), style, survey)
+        self.assertEqual(row["scenes"][0]["views"], [10.0, 30.0])
+        self.assertEqual([s["what"] for s in row["subjects"]], ["hero"])
+
     def test_rejects_bad_keep_and_unknown_sources(self):
         catalog = {"sources": [catalog_row()]}
         with self.assertRaises(ValueError):
