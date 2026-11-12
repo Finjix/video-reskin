@@ -35,13 +35,12 @@ FRAMES = obj(frames=arr(obj(at=NUM, covers=arr(STR))), references=arr(STR))
 SELECT = obj(references=arr(STR))
 COVER = obj(ok=BOOL, covers=arr(STR), note=STR)
 REVIEW = obj(verdict={"type": "STRING", "enum": ["pass", "fail"]}, summary=STR,
-             transition_frames=NUM, issues=arr(obj(start=NUM, end=NUM, description=STR)))
+             issues=arr(obj(start=NUM, end=NUM, description=STR)))
 SURVEY['properties']['end_card_start']['description'] = 'Seconds; use the full video duration if there is no end card.'
 SURVEY['properties']['inventory']['description'] = 'English content entries with unique IDs; all times are source seconds.'
 FRAMES['properties']['references']['description'] = 'IDs of existing generated pictures needed by this segment; reuse rather than convert duplicates.'
 COVER['properties']['covers']['description'] = 'Inventory IDs visibly converted to realistic materials in the result, not merely present in the source.'
 REVIEW['properties']['issues']['description'] = 'Unresolved defects relative to source, in seconds from the comparison clip start; empty on pass.'
-REVIEW['properties']['transition_frames']['description'] = 'For a passing continuous seam, recommend 0-6 frames of subtle transition before it is applied; use 0 otherwise. Major differences must fail, not be hidden by a transition.'
 
 
 def prompt(kind):
@@ -407,26 +406,47 @@ def check(job,state,sid,plan,seg):
     a,b = seg["frames"]
     answer = {"token":check_token(job,sid,plan,seg),"seam":None,"segment":None,"verdict":"fail"}
     if a:
-        # Judge whether a transition is needed on the untreated join, including on repeated checks.
-        preview_plan = deepcopy(plan)
-        preview_plan['segments'][plan['segments'].index(seg)]['transition_frames'] = 0
-        preview = assemble(job,state,sid,preview_plan,seg["id"])
-        start,end = max(0,a/FPS-1),min(b/FPS,a/FPS+1)
-        seam = review_clip(job,sid,start,end,preview,start,"seam",folder,
-                           {"join":a/FPS-start,"continuous":seg["continuous"],"transition_frames":0})
-        answer["seam"] = seam
-        if seam["verdict"] == "fail":
+        cached = saved(job,f"checks/{sid}-{seg['id']}")
+        if cached.get('token') == answer['token'] and cached.get('seam'):
+            answer = cached
+            if not answer.get('decision'):
+                return answer
+        else:
+            answer = check_seam(job,state,sid,plan,seg,folder,answer)
             return put(job,f"checks/{sid}-{seg['id']}",answer)
-        transition = min(6,max(0,int(seam["transition_frames"]))) if seg["continuous"] else 0
-        if transition != seg["transition_frames"]:
-            seg["transition_frames"] = transition
-            put(job,f"plans/{sid}",plan)
-        answer['seam']['chosen_transition_frames'] = transition
     answer["token"] = check_token(job,sid,plan,seg)
     result = job / "ai" / f"{sid}-{seg['id']}.mp4"
     answer["segment"] = review_clip(job,sid,a/FPS,b/FPS,result,0,"segment",folder,{})
     answer["verdict"] = answer["segment"]["verdict"]
+    answer['status'] = 'complete'
     return put(job,f"checks/{sid}-{seg['id']}",answer)
+
+
+def check_seam(job,state,sid,plan,seg,folder,answer):
+    a,b = seg['frames']
+    # Judge whether a transition is needed on the untreated join, including on repeated checks.
+    preview_plan = deepcopy(plan)
+    preview_plan['segments'][plan['segments'].index(seg)]['transition_frames'] = 0
+    preview = assemble(job,state,sid,preview_plan,seg["id"])
+    start,end = max(0,a/FPS-1),min(b/FPS,a/FPS+1)
+    seam = review_clip(job,sid,start,end,preview,start,"seam",folder,
+                       {"join":a/FPS-start,"continuous":seg["continuous"],"transition_frames":0})
+    answer["seam"] = seam
+    answer['status'] = 'awaiting_agent_seam_decision'
+    return answer
+
+def choose_seam(job,sid,plan,seg,frames,reason):
+    ready(job,sid,plan,seg)
+    c = saved(job,f"checks/{sid}-{seg['id']}")
+    if c.get('token') != check_token(job,sid,plan,seg) or not c.get('seam'):
+        raise ValueError('check the current seam first')
+    if not 0 <= frames <= 6 or (frames and not seg['continuous']) or not reason.strip():
+        raise ValueError('use 0-6 frames for continuous seams, 0 for cuts; explain the visual inspection')
+    seg['transition_frames'] = frames
+    put(job,f'plans/{sid}',plan)
+    c.update(token=check_token(job,sid,plan,seg),segment=None,verdict='fail',status='awaiting_segment_review',
+             decision={'transition_frames':frames,'reason':reason})
+    return put(job,f"checks/{sid}-{seg['id']}",c)
 
 
 def approve(job,sid,plan,seg):
@@ -472,12 +492,13 @@ def main():
     for stream in (sys.stdout,sys.stderr):
         stream.reconfigure(encoding="utf-8",errors="replace")
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","approve","redo","assemble","status"])
+    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","seam","approve","redo","assemble","status"])
     p.add_argument("--job-dir",type=Path)
     p.add_argument("--work-order",type=Path)
     p.add_argument("--segment")
     p.add_argument("--only",nargs="*")
     p.add_argument("--reason",default="quality review failed")
+    p.add_argument('--transition-frames',type=int,default=0)
     p.add_argument("--redo",action="store_true",help="explicitly remake this segment's reference images")
     args,extra = p.parse_known_args()
     if args.command in ("auth","login","runtime"):
@@ -498,7 +519,7 @@ def main():
             write(job / "job.json",state)
             print(f"job_dir: {job}")
             return
-        if args.command in ('approve','redo') and not args.segment:
+        if args.command in ('approve','redo','seam') and not args.segment:
             raise ValueError('--segment is required for approve and redo')
         if not args.job_dir:
             raise ValueError("--job-dir is required")
@@ -543,8 +564,11 @@ def main():
                                     raise ValueError('--redo is only for refs')
                                 ready(job,sid,plan,seg)
                                 reset_refs(job,sid,seg)
-                            function = {"refs":refs,"render":render,"check":check,"approve":approve,"redo":redo}[args.command]
-                            result = function(job,state,sid,plan,seg) if args.command=="check" else function(job,sid,plan,seg,args.reason) if args.command=="redo" else function(job,sid,plan,seg)
+                            if args.command == 'seam':
+                                result = choose_seam(job,sid,plan,seg,args.transition_frames,args.reason)
+                            else:
+                                function = {"refs":refs,"render":render,"check":check,"approve":approve,"redo":redo}[args.command]
+                                result = function(job,state,sid,plan,seg) if args.command=="check" else function(job,sid,plan,seg,args.reason) if args.command=="redo" else function(job,sid,plan,seg)
                 print(json.dumps({"source":sid,"result":result},ensure_ascii=False))
             except (ValueError,RuntimeError,OSError,KeyError) as e:
                 errors.append(f"{sid}: {e}")

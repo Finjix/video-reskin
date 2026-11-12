@@ -8,7 +8,7 @@ Entry: `scripts/video_reskin.cmd`. Job creation:
 
 `init --work-order order.json` prints job_dir. Subsequent commands require `--job-dir <job_dir>`.
 
-Sequence: analyze → survey → plan → refs → render → check → approve, then repeat refs/render/check/approve for the next segment, finally assemble.
+Sequence: analyze → survey → plan → refs → render → check → seam (agent decision for later segments) → check (full segment) → approve, then repeat refs/render/check/approve for the next segment, finally assemble.
 Default refs/render/check choose the first unapproved segment of each selected source.
 Use `--only S01` to select sources and `--segment S01:K02` for a segment.
 approve and redo should specify a segment explicitly. redo needs an English reason.
@@ -34,3 +34,5 @@ References can be explicitly replaced with refs --redo; previous generated image
 Old schema 1 jobs are rejected, not migrated.
 
 Prompts are solely in assets/remake-prompts.json. The old internal modules remain as tested media/account helpers; their schema-1 orchestration is not used by the entry point.
+
+For later segments, check stops after producing Gemini seam findings and sheets. The agent chooses cut/transition with seam --segment S01:K02 --transition-frames 0 --reason "Clean join in the sheets" (0-6 frames), or uses redo for major differences. Then check reviews only the segment; adding a transition never triggers another seam model call.
