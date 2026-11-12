@@ -4,7 +4,6 @@
   "image": "Convert Image 1 to realistic materials, matching the references' style, color, brightness, shadows and texture.",
   "video": "Edit the video: replace its materials to match the reference images.",
   "continuation": "Start from Image 1.",
-  "seam": "Compare the join with the source, one second before and after. Report visible jumps or drifts in style, scene, characters, objects or motion that the source does not have.",
   "segment": "Compare the result with the source. Report missed realistic materials, content changes, motion changes or artifacts. Ignore issues already present in the source.",
   "tail": "Compare Image 1 (the previous generated segment last frame) with Image 2 (the next source segment first frame). Decide only whether these are consecutive views of the same continuous shot. Ignore differences in material realism, texture quality, lighting style and rendering style. Return ok=true for the same continuous shot, otherwise false. List inventory IDs visible in Image 1 without judging materials."
 }

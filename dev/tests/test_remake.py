@@ -60,26 +60,14 @@ class GateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'waiting'):
             m.ready(self.job,'S01',self.p,self.p['segments'][1])
 
-    def test_seam_failure_skips_full_review(self):
-        with patch.object(m,'assemble',return_value='preview'),patch.object(m,'review_clip',return_value=verdict('fail')) as watch:
+    def test_check_goes_directly_to_full_segment_with_fixed_transition(self):
+        with patch.object(m,'assemble') as join, patch.object(m,'review_clip',return_value=verdict()) as watch:
             result=m.check(self.job,{},'S01',self.p,self.p['segments'][1])
+        join.assert_not_called()
         self.assertEqual(watch.call_count,1)
-        self.assertIsNone(result['segment'])
-
-    def test_transition_decided_before_application_without_recheck(self):
-        m.put(self.job,'catalog/S01',{'width':160,'height':90})
-        self.p['segments'][1]['transition_frames']=3
-        with patch.object(m,'assemble',return_value='preview') as join,patch.object(m,'review_clip',side_effect=[verdict(transition=6),verdict()]) as watch:
-            result=m.check(self.job,{},'S01',self.p,self.p['segments'][1])
-            self.assertIsNone(result['segment'])
-            self.assertEqual(self.p['segments'][1]['transition_frames'],3)
-            m.choose_seam(self.job,'S01',self.p,self.p['segments'][1],4,'Only a slight brightness step in the sheet')
-            result=m.check(self.job,{},'S01',self.p,self.p['segments'][1])
-        self.assertEqual([c.args[6] for c in watch.call_args_list],['seam','segment'])
-        join.assert_called_once()
-        self.assertEqual(join.call_args.args[3]['segments'][1]['transition_frames'],0)
-        self.assertEqual(result['verdict'],'pass')
-        self.assertEqual(self.p['segments'][1]['transition_frames'],4)
+        self.assertEqual(watch.call_args.args[6],'segment')
+        self.assertIsNone(result['seam'])
+        self.assertEqual(result['decision']['transition_frames'],5)
         m.approve(self.job,'S01',self.p,self.p['segments'][1])
 
     def test_tail_failure_is_gemini_only_without_agent_sheet(self):
@@ -101,20 +89,6 @@ class GateTests(unittest.TestCase):
         self.assertTrue(self.p['segments'][1]['continuous'])
         sheet.assert_not_called()
         self.assertFalse(m.saved(self.job,'review/S01-K02-tail')['ok'])
-
-    def test_failed_seam_can_only_proceed_after_explicit_agent_decision(self):
-        s=self.p['segments'][1]
-        with patch.object(m,'assemble',return_value='preview'),patch.object(m,'review_clip',return_value=verdict('fail')) as watch:
-            m.check(self.job,{},'S01',self.p,s)
-            m.check(self.job,{},'S01',self.p,s)
-        self.assertEqual(watch.call_count,1)
-        with self.assertRaises(ValueError):
-            m.approve(self.job,'S01',self.p,s)
-        m.choose_seam(self.job,'S01',self.p,s,6,'Verified sheets: minor shading mismatch only')
-        with patch.object(m,'review_clip',return_value=verdict()) as watch:
-            m.check(self.job,{},'S01',self.p,s)
-        self.assertEqual(watch.call_args.args[6],'segment')
-        m.approve(self.job,'S01',self.p,s)
 
     def test_changed_predecessor_invalidates_seam_not_output(self):
         s=self.p['segments'][1]
@@ -289,11 +263,8 @@ class MediaTests(unittest.TestCase):
                     m.render(job,'S01',p,s)
                     self.assertEqual(submit.call_count,i+1)
                     m.check(job,state,'S01',p,s)
-                    if i:
-                        m.choose_seam(job,'S01',p,s,0,'Images show a clean join')
-                        m.check(job,state,'S01',p,s)
                     m.approve(job,'S01',p,s)
-                self.assertEqual(reviews,['segment','seam','segment'])
+                self.assertEqual(reviews,['segment','segment'])
                 self.assertEqual(len(image_calls),2)
                 self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],48)
                 self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png' if suitable_tail else '-f48.png'))

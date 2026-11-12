@@ -15,6 +15,7 @@ from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, writ
 FPS = 24
 MAX_FRAMES = 720
 MAX_RETRIES = 4
+TRANSITION_FRAMES = 5  # 0.2083 s at 24 fps, nearest whole-frame duration to 0.2 s.
 
 
 def obj(**fields):
@@ -356,7 +357,7 @@ def assemble(job, state, sid, plan, upto=None):
         a,b = row["frames"]
         source = working(job,sid) if row["original"] else job / "ai" / f"{sid}-{row['id']}.mp4"
         out = job / "work/join" / f"{sid}-{a}.mp4"
-        transition = int(row.get("transition_frames",0))
+        transition = TRANSITION_FRAMES if clips else 0
         if transition and clips:
             tail = still(clips[-1], video_info(clips[-1])["frames"]-1, out.with_suffix(".png"))
             graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
@@ -413,15 +414,8 @@ def check(job,state,sid,plan,seg):
     folder.mkdir(parents=True,exist_ok=True)
     a,b = seg["frames"]
     answer = {"token":check_token(job,sid,plan,seg),"seam":None,"segment":None,"verdict":"fail"}
-    if a:
-        cached = saved(job,f"checks/{sid}-{seg['id']}")
-        if cached.get('token') == answer['token'] and cached.get('seam'):
-            answer = cached
-            if not answer.get('decision'):
-                return answer
-        else:
-            answer = check_seam(job,state,sid,plan,seg,folder,answer)
-            return put(job,f"checks/{sid}-{seg['id']}",answer)
+    answer['decision'] = {'transition_frames':TRANSITION_FRAMES if a else 0,
+                          'reason':'Automatic fixed 0.2-second transition; no seam review.'}
     answer["token"] = check_token(job,sid,plan,seg)
     result = job / "ai" / f"{sid}-{seg['id']}.mp4"
     answer["segment"] = review_clip(job,sid,a/FPS,b/FPS,result,0,"segment",folder,{})
@@ -430,39 +424,12 @@ def check(job,state,sid,plan,seg):
     return put(job,f"checks/{sid}-{seg['id']}",answer)
 
 
-def check_seam(job,state,sid,plan,seg,folder,answer):
-    a,b = seg['frames']
-    # Judge whether a transition is needed on the untreated join, including on repeated checks.
-    preview_plan = deepcopy(plan)
-    preview_plan['segments'][plan['segments'].index(seg)]['transition_frames'] = 0
-    preview = assemble(job,state,sid,preview_plan,seg["id"])
-    start,end = max(0,a/FPS-1),min(b/FPS,a/FPS+1)
-    seam = review_clip(job,sid,start,end,preview,start,"seam",folder,
-                       {"join":a/FPS-start,"continuous":seg["continuous"],"transition_frames":0})
-    answer["seam"] = seam
-    answer['status'] = 'awaiting_agent_seam_decision'
-    return answer
-
-def choose_seam(job,sid,plan,seg,frames,reason):
-    ready(job,sid,plan,seg)
-    c = saved(job,f"checks/{sid}-{seg['id']}")
-    if c.get('token') != check_token(job,sid,plan,seg) or not c.get('seam'):
-        raise ValueError('check the current seam first')
-    if not 0 <= frames <= 6 or (frames and not seg['continuous']) or not reason.strip():
-        raise ValueError('use 0-6 frames for continuous seams, 0 for cuts; explain the visual inspection')
-    seg['transition_frames'] = frames
-    put(job,f'plans/{sid}',plan)
-    c.update(token=check_token(job,sid,plan,seg),segment=None,verdict='fail',status='awaiting_segment_review',
-             decision={'transition_frames':frames,'reason':reason})
-    return put(job,f"checks/{sid}-{seg['id']}",c)
-
-
 def approve(job,sid,plan,seg):
     ready(job,sid,plan,seg)
     c = saved(job,f"checks/{sid}-{seg['id']}")
     token = check_token(job,sid,plan,seg)
     if c.get("token") != token or c.get("verdict") != "pass":
-        raise ValueError("approval requires a passed check of the current generation and seam")
+        raise ValueError("approval requires a passed check of the current generation")
     r = record(job,sid,seg)
     r["approved"] = token
     return put(job,f"state/{sid}-{seg['id']}",r)
@@ -525,14 +492,13 @@ def main():
     for stream in (sys.stdout,sys.stderr):
         stream.reconfigure(encoding="utf-8",errors="replace")
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","seam","approve","redo","select-best","assemble","status"])
+    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","approve","redo","select-best","assemble","status"])
     p.add_argument("--job-dir",type=Path)
     p.add_argument("--work-order",type=Path)
     p.add_argument("--segment")
     p.add_argument("--generation-id")
     p.add_argument("--only",nargs="*")
     p.add_argument("--reason",default="quality review failed")
-    p.add_argument('--transition-frames',type=int,default=0)
     p.add_argument("--redo",action="store_true",help="explicitly remake this segment's reference images")
     args,extra = p.parse_known_args()
     if args.command in ("auth","login","runtime"):
@@ -553,7 +519,7 @@ def main():
             write(job / "job.json",state)
             print(f"job_dir: {job}")
             return
-        if args.command in ('approve','redo','seam','select-best') and not args.segment:
+        if args.command in ('approve','redo','select-best') and not args.segment:
             raise ValueError('--segment is required for approve and redo')
         if not args.job_dir:
             raise ValueError("--job-dir is required")
@@ -602,8 +568,6 @@ def main():
                                 if not args.generation_id or args.reason == 'quality review failed':
                                     raise ValueError('select-best requires --generation-id and --reason')
                                 result = select_best(job,sid,plan,seg,args.generation_id,args.reason)
-                            elif args.command == 'seam':
-                                result = choose_seam(job,sid,plan,seg,args.transition_frames,args.reason)
                             else:
                                 function = {"refs":refs,"render":render,"check":check,"approve":approve,"redo":redo}[args.command]
                                 result = function(job,state,sid,plan,seg) if args.command=="check" else function(job,sid,plan,seg,args.reason) if args.command=="redo" else function(job,sid,plan,seg)
