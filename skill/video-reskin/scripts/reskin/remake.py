@@ -186,6 +186,16 @@ def ready(job, sid, plan, seg):
             raise ValueError(f"waiting for {sid}:{prev['id']}: check and approve first")
 
 
+def picture_issue(job, key, original, result, report):
+    """Persist image-review evidence before stopping, so the agent can inspect the whole comparison."""
+    from reskin.refs import strip
+    sheet = job / 'review' / f'{key}-issue.png'
+    sheet.parent.mkdir(parents=True,exist_ok=True)
+    strip(report['note'],[Path(original)],Path(result)).save(sheet)
+    put(job,f'review/{key}',{**report,'sheet':str(sheet)})
+    return sheet
+
+
 def refs(job, sid, plan, seg):
     ready(job, sid, plan, seg)
     key = f"{sid}-{seg['id']}"
@@ -209,7 +219,10 @@ def refs(job, sid, plan, seg):
         tail = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
                    [winky.inline(upload_copy(p, 1536))])
         if not tail["ok"]:
-            raise ValueError("previous tail is unsuitable: recheck the previous segment")
+            source_frame = still(working(job,sid),prev['frames'][1]-1,
+                                 job/'references'/f'{key}-tail-source.png')
+            sheet = picture_issue(job,key+'-tail',source_frame,p,tail)
+            raise ValueError(f"previous tail is unsuitable: {tail['note']}; inspect {sheet}, then recheck the previous segment")
         entry = {"id": key+"-tail", "path": str(p), "covers": tail["covers"], "at": a/FPS}
         chosen.append(entry)
     selection_path = f"references/{key}-frames"
@@ -263,7 +276,8 @@ def refs(job, sid, plan, seg):
         coverage = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
                        [winky.inline(upload_copy(full, 1536)), winky.inline(upload_copy(out, 1536))])
         if not coverage["ok"]:
-            raise ValueError(f"reference {rid} failed: {coverage['note']}; run refs --redo --segment {sid}:{seg['id']}")
+            sheet = picture_issue(job,rid,full,out,coverage)
+            raise ValueError(f"reference {rid} failed: {coverage['note']}; inspect {sheet}; run refs --redo --segment {sid}:{seg['id']}")
         entry = {"id": rid, "path": str(out), "at": at/FPS, "covers": coverage["covers"],
                  "dependencies": [r["id"] for r in dependencies], "generation_id": task["generation_id"]}
         chosen.append(entry)
@@ -373,6 +387,14 @@ def review_clip(job, sid, start, end, result, result_start, kind, folder, contex
         raise ValueError("review issue outside the clip")
     if answer["verdict"] == "pass" and answer["issues"]:
         raise ValueError("inconsistent review: pass with issues")
+    from reskin.review import issue_moments, three_frames
+    for index, issue in enumerate(answer['issues'],1):
+        sheet = folder / f'{kind}-issue-{index}.png'
+        three_frames([(str(working(job,sid)),lambda t:t+start,'ORIGINAL'),
+                      (str(result),lambda t:t+result_start,'RESULT')],
+                     issue_moments(issue['start'],issue['end'],max(0,end-start-1/FPS)),
+                     (info['width'],info['height']),sheet)
+        issue['sheet'] = str(sheet)
     return answer
 
 
@@ -407,15 +429,6 @@ def check(job,state,sid,plan,seg):
     result = job / "ai" / f"{sid}-{seg['id']}.mp4"
     answer["segment"] = review_clip(job,sid,a/FPS,b/FPS,result,0,"segment",folder,{})
     answer["verdict"] = answer["segment"]["verdict"]
-    # Only segment issues get stills. Never create an agent-facing seam sheet.
-    from reskin.review import issue_moments, three_frames
-    info = saved(job,f"catalog/{sid}")
-    for i,issue in enumerate(answer["segment"]["issues"]):
-        out = folder / f"issue-{i+1}.png"
-        three_frames([(str(working(job,sid)),lambda t:t+a/FPS,"ORIGINAL"),(str(result),lambda t:t,"RESULT")],
-                     issue_moments(issue["start"],issue["end"],(b-a-1)/FPS),
-                     (info["width"],info["height"]),out)
-        issue["sheet"] = str(out)
     return put(job,f"checks/{sid}-{seg['id']}",answer)
 
 

@@ -137,6 +137,26 @@ class GateTests(unittest.TestCase):
 
 
 class MediaTests(unittest.TestCase):
+    def test_failed_seam_and_image_reviews_include_visual_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            job=Path(td)
+            source=m.working(job,'S01')
+            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=24:duration=2',
+                  '-c:v','libx264','-pix_fmt','yuv420p'],source)
+            m.put(job,'catalog/S01',video_info(source))
+            issue={'start':0.5,'end':0.6,'description':'Object changes at join'}
+            response={**verdict('fail'),'issues':[issue]}
+            folder=job/'review'
+            folder.mkdir()
+            with patch.object(m,'ask',return_value=response):
+                result=m.review_clip(job,'S01',0,2,source,0,'seam',folder,{})
+            self.assertTrue(Path(result['issues'][0]['sheet']).is_file())
+            self.assertIn('seam-issue',result['issues'][0]['sheet'])
+            frame=m.still(source,0,job/'frame.png')
+            sheet=m.picture_issue(job,'reference-check',frame,frame,{'ok':False,'note':'Wrong material'})
+            self.assertTrue(sheet.is_file())
+            self.assertEqual(m.saved(job,'review/reference-check')['sheet'],str(sheet))
+
     def test_mocked_two_segment_production_and_submission_resume(self):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)/'temp'
