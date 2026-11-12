@@ -132,14 +132,34 @@ class GateTests(unittest.TestCase):
         submit.assert_not_called()
         self.assertTrue(m.approved(self.job,'S01',self.p,first))
 
-    def test_exactly_five_redos_shared_across_quality_causes(self):
+    def test_exactly_four_redos_shared_across_quality_causes(self):
         s=self.p['segments'][1]
-        for i in range(5):
+        for i in range(4):
             r=m.redo(self.job,'S01',self.p,s,'seam' if i%2 else 'segment')
             r.update(status='done',generation_id=f'try{i}')
             m.put(self.job,'state/S01-K02',r)
-        with self.assertRaisesRegex(ValueError,'five retries'):
+        with self.assertRaisesRegex(ValueError,'four retries'):
             m.redo(self.job,'S01',self.p,s,'again')
+
+    def test_best_available_preserves_failed_review_and_all_attempts(self):
+        s=self.p['segments'][1]
+        with self.assertRaisesRegex(ValueError,'four completed'):
+            m.select_best(self.job,'S01',self.p,s,'K02','Too early')
+        for i in range(4):
+            r=m.redo(self.job,'S01',self.p,s,'Confirmed defect')
+            r.update(status='done',generation_id=f'try{i}')
+            m.put(self.job,'state/S01-K02',r)
+        raw=self.job/'raw/S01-K02-try1.mp4'
+        raw.parent.mkdir()
+        raw.touch()
+        m.put(self.job,'checks/S01-K02',{'verdict':'fail','issues':['Known residual defect']})
+        with patch.object(m,'video_info',return_value={'duration':2}),patch.object(m,'ff'):
+            chosen=m.select_best(self.job,'S01',self.p,s,'try1','Compared all five; least content drift, minor residual glow')
+        self.assertEqual(chosen['retries'],4)
+        self.assertEqual(chosen['acceptance']['mode'],'best_available')
+        self.assertTrue(m.approved(self.job,'S01',self.p,s))
+        self.assertEqual(m.saved(self.job,'checks/S01-K02')['verdict'],'fail')
+        self.assertEqual(len(chosen['history']),4)
 
     def test_stale_check_cannot_approve(self):
         m.put(self.job,'checks/S01-K02',{'verdict':'pass','token':'old'})

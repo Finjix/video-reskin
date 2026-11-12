@@ -14,6 +14,7 @@ from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, writ
 
 FPS = 24
 MAX_FRAMES = 720
+MAX_RETRIES = 4
 
 
 def obj(**fields):
@@ -471,12 +472,37 @@ def redo(job,sid,plan,seg,reason):
     r = record(job,sid,seg)
     if not r.get("generation_id"):
         raise ValueError("no generation to redo")
-    if r.get("retries",0) >= 5:
-        raise ValueError("five retries exhausted: this video is stopped")
+    if r.get("retries",0) >= MAX_RETRIES:
+        raise ValueError("four retries exhausted: compare the five versions and use select-best")
     history = r.get("history",[]) + [{k:v for k,v in r.items() if k != "history"}]
     seg['transition_frames'] = 0
     put(job,f'plans/{sid}',plan)
     return put(job,f"state/{sid}-{seg['id']}",{"retries":r.get("retries",0)+1,"history":history,"reason":reason})
+
+
+def select_best(job,sid,plan,seg,generation_id,reason):
+    ready(job,sid,plan,seg)
+    r = record(job,sid,seg)
+    attempts = [*r.get('history',[]), {k:v for k,v in r.items() if k != 'history'}]
+    finished = {x.get('generation_id'):x for x in attempts if x.get('status') == 'done'}
+    if r.get('retries',0) < MAX_RETRIES or len(finished) < MAX_RETRIES+1:
+        raise ValueError('select-best requires the initial result and four completed quality retries')
+    if not generation_id or generation_id not in finished or not reason.strip():
+        raise ValueError('select a completed generation and explain comparison findings and known defects')
+    raw = job/'raw'/f"{sid}-{seg['id']}-{generation_id}.mp4"
+    if not raw.is_file():
+        raise ValueError('selected raw result is missing')
+    info = video_info(raw)
+    a,b = seg['frames']
+    ff(['-i',raw,*encode(f"setpts=PTS*{max(48,b-a)/FPS/info['duration']:.10f},fps=24,tpad=stop_mode=clone:stop_duration=1"),
+        '-frames:v',str(b-a)],job/'ai'/f"{sid}-{seg['id']}.mp4")
+    put(job,f"review/{sid}-{seg['id']}-best-selection",{'generation_id':generation_id,'reason':reason,
+        'attempts':attempts,'check_at_selection':saved(job,f"checks/{sid}-{seg['id']}")})
+    r.update(generation_id=generation_id,status='done',history=[x for x in attempts if x.get('generation_id') != generation_id],
+             acceptance={'mode':'best_available','reason':reason})
+    put(job,f"state/{sid}-{seg['id']}",r)
+    r['approved'] = check_token(job,sid,plan,seg)
+    return put(job,f"state/{sid}-{seg['id']}",r)
 
 
 def reset_refs(job,sid,seg):
@@ -499,10 +525,11 @@ def main():
     for stream in (sys.stdout,sys.stderr):
         stream.reconfigure(encoding="utf-8",errors="replace")
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","seam","approve","redo","assemble","status"])
+    p.add_argument("command",choices=["auth","login","runtime","init","analyze","survey","plan","refs","render","check","seam","approve","redo","select-best","assemble","status"])
     p.add_argument("--job-dir",type=Path)
     p.add_argument("--work-order",type=Path)
     p.add_argument("--segment")
+    p.add_argument("--generation-id")
     p.add_argument("--only",nargs="*")
     p.add_argument("--reason",default="quality review failed")
     p.add_argument('--transition-frames',type=int,default=0)
@@ -526,7 +553,7 @@ def main():
             write(job / "job.json",state)
             print(f"job_dir: {job}")
             return
-        if args.command in ('approve','redo','seam') and not args.segment:
+        if args.command in ('approve','redo','seam','select-best') and not args.segment:
             raise ValueError('--segment is required for approve and redo')
         if not args.job_dir:
             raise ValueError("--job-dir is required")
@@ -571,7 +598,11 @@ def main():
                                     raise ValueError('--redo is only for refs')
                                 ready(job,sid,plan,seg)
                                 reset_refs(job,sid,seg)
-                            if args.command == 'seam':
+                            if args.command == 'select-best':
+                                if not args.generation_id or args.reason == 'quality review failed':
+                                    raise ValueError('select-best requires --generation-id and --reason')
+                                result = select_best(job,sid,plan,seg,args.generation_id,args.reason)
+                            elif args.command == 'seam':
                                 result = choose_seam(job,sid,plan,seg,args.transition_frames,args.reason)
                             else:
                                 function = {"refs":refs,"render":render,"check":check,"approve":approve,"redo":redo}[args.command]

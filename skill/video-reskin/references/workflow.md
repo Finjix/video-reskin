@@ -29,7 +29,7 @@ Schema 2 data:
 
 An explicitly redone predecessor preserves existing later outputs but invalidates their seam approval.
 Approved results remain pinned when references change.
-Every quality retry is explicit and counted; five retries after the initial generation is the limit.
+Every quality retry is explicit and counted; four retries after the initial generation is the limit (five versions total). At exhaustion, compare the five outputs and select the best with select-best --segment S01:K02 --generation-id <id> --reason "<comparison findings and known defects>". Continue the workflow; retain the failed check and label acceptance as best_available.
 References can be explicitly replaced with refs --redo; previous generated images are archived.
 Old schema 1 jobs are rejected, not migrated.
 
