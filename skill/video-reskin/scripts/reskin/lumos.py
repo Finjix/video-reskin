@@ -105,7 +105,7 @@ def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolutio
     up to 30 reference images; the result is as long as the input (no duration), 480p/720p/1080p."""
     body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
             "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": "adaptive",
-            "output_format": "mp4", "sample_count": 1, "model": model}
+            "output_format": "mp4", "sample_count": 1, "model": model, "frame_count": -1}
     return call("POST", "/generations/video-to-video", body, timeout=120)
 
 

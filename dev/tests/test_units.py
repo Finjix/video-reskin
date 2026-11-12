@@ -3,12 +3,24 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from pathlib import Path
 
 from reskin import assemble, images, net, prompts, review
 from reskin.common import read, PROMPTS
+
+
+class VideoEditRequestTests(unittest.TestCase):
+    def test_edit_uses_input_video_length(self):
+        from reskin import lumos
+        with patch.object(lumos, 'call', return_value={}) as submit:
+            lumos.submit_video_edit({'path': 'clip.mp4'}, [], 'Edit materials')
+        body = submit.call_args.args[2]
+        self.assertEqual(body['generation_mode'], 'video_edit')
+        self.assertEqual(body['frame_count'], -1)
+        self.assertNotIn('duration', body)
 
 
 class PromptTests(unittest.TestCase):
