@@ -14,7 +14,7 @@ from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, writ
 
 FPS = 24
 MAX_FRAMES = 720
-MAX_RETRIES = 4
+MAX_RETRIES = 2
 TRANSITION_FRAMES = 4  # Gameplay joins only; original/non-game/end-card boundaries are cuts.
 
 
@@ -459,7 +459,7 @@ def redo(job,sid,plan,seg,reason):
     if not r.get("generation_id"):
         raise ValueError("no generation to redo")
     if r.get("retries",0) >= MAX_RETRIES:
-        raise ValueError("four retries exhausted: compare the five versions and use select-best")
+        raise ValueError("two retries exhausted: compare the three versions and use select-best")
     history = r.get("history",[]) + [{k:v for k,v in r.items() if k != "history"}]
     seg['transition_frames'] = 0
     put(job,f'plans/{sid}',plan)
@@ -472,7 +472,7 @@ def select_best(job,sid,plan,seg,generation_id,reason):
     attempts = [*r.get('history',[]), {k:v for k,v in r.items() if k != 'history'}]
     finished = {x.get('generation_id'):x for x in attempts if x.get('status') == 'done'}
     if r.get('retries',0) < MAX_RETRIES or len(finished) < MAX_RETRIES+1:
-        raise ValueError('select-best requires the initial result and four completed quality retries')
+        raise ValueError('select-best requires the initial result and two completed quality retries')
     if not generation_id or generation_id not in finished or not reason.strip():
         raise ValueError('select a completed generation and explain comparison findings and known defects')
     raw = job/'raw'/f"{sid}-{seg['id']}-{generation_id}.mp4"
