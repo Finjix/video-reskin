@@ -37,7 +37,7 @@ Commands accept `--job-dir <temp>`; refs/render/check/approve/redo accept `--seg
 New references do not rerender approved videos. Explicitly redoing a predecessor invalidates the following segment check, preserving its existing video for rechecking.
 A segment shorter than two seconds is padded with its boundary frame and trimmed back at assembly.
 
-All model prompts and dynamic context are English, centrally maintained in `assets/remake-prompts.json`.
+All model prompts and dynamic context are English, centrally maintained in `assets/prompts.json`.
 Do not add material lists, overlay instructions or accumulated correction sentences. Only reference-image generation and reference-image review require unchanged source logos and text. Preserve source-existing blur, occlusion and overlap; do not reposition them or invent hidden content. Do not inject this image-only restriction into video generation, continuation, tail checks or segment review. Video prompts and segment acceptance keep their relaxed rules. Replace noncompliant reference images before further rendering.
 
 Final reply in the user's language: delivery folder, segment/check/retry outcomes and any unresolved issues.

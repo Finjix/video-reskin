@@ -32,7 +32,7 @@ Approved results stay pinned when references change.
 Every quality retry is explicit and counted; two retries after the initial generation is the limit (three versions total). At exhaustion, compare the three outputs and select the best with select-best --segment S01:K02 --generation-id <id> --reason "<comparison findings and known defects>". Continue the workflow; retain the failed check and label acceptance as best_available.
 References can be explicitly replaced with refs --redo; previous generated images are archived. Replace noncompliant reference images before rendering. Unchanged logos/text is a reference-image generation and reference-image review requirement only; preserve source-existing blur, overlap and occlusion. Video generation and segment review keep their own prompts and relaxed acceptance rules.
 
-Prompts are solely in assets/remake-prompts.json.
+Prompts are solely in assets/prompts.json.
 
 Gameplay joins use a fixed 4-frame transition (1/6 second at 24 fps), spanning the outgoing last two frames and incoming first two frames. Outgoing weights are 3/4, 1/2, 1/2, 1/4; incoming weights are 1/4, 1/2, 1/2, 3/4. For the outgoing frames, overlay the frozen incoming first frame; for the incoming frames, overlay the frozen outgoing last frame. The incoming third frame is fully incoming. Boundaries into or out of original/non-game footage and end cards are hard cuts. Preserve total frame count and audio alignment. There is no seam or post-transition review.
 

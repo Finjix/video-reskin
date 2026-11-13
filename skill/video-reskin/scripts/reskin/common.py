@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[2]
 from reskin import runtime
 FFMPEG = runtime.Executable("ffmpeg")
 FFPROBE = runtime.Executable("ffprobe")
-PROMPTS = ROOT / "assets/prompts.json"
 _DIGESTS: dict[tuple, str] = {}
 
 
@@ -48,15 +47,6 @@ def write(path: Path, value) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.partial")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
-    return path
-
-
-def write_text(path: Path, text: str) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.partial")
-    temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, path)
     return path
 
@@ -125,7 +115,3 @@ def log(message: str) -> None:
     """One progress line for the agent on stderr; results go to stdout."""
     print(f"[{time.monotonic() - _STARTED:6.1f}s] {message}", file=sys.stderr, flush=True)
 
-
-def timestamp(seconds: float) -> str:
-    minutes, rest = divmod(max(0.0, seconds), 60)
-    return f"{int(minutes)}:{rest:05.2f}"

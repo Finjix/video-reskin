@@ -34,7 +34,7 @@ UI、HUD 和文字采用宽松审核：变化或运动中的轻微模糊、重�
 
 ## 全部默认提示词
 
-全部集中在 [remake-prompts.json](skill/video-reskin/assets/remake-prompts.json)，动态上下文使用英文。
+全部集中在 [prompts.json](skill/video-reskin/assets/prompts.json)，动态上下文使用英文。
 
 | 用途 | 提示词 |
 | --- | --- |

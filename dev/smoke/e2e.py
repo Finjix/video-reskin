@@ -1,7 +1,8 @@
 """End-to-end run on the local `.素材` footage through the real launcher (needs `auth --key` and `login` first).
 
-Uses the default edits (kept range up to the end-card candidate, the survey's scenes and subjects, the logo removed)
-and writes the results to dev/smoke/latest.json; the job itself lives in a temporary folder outside the repository.
+Walks every segment through refs -> render -> check, approves passed checks unseen, redoes failed ones up to the
+retry limit and then takes the latest result with select-best; writes the results to dev/smoke/latest.json. The job
+itself lives in a temporary folder outside the repository.
 """
 import argparse
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skill/video-reskin"
 FOOTAGE = ROOT / ".素材"
+MAX_RETRIES = 2
 
 
 def launcher(args, text=None, timeout=7200):
@@ -29,6 +31,40 @@ def launcher(args, text=None, timeout=7200):
     return result.stdout
 
 
+def results(output):
+    """The `result` of every JSON line the launcher printed."""
+    return [json.loads(line)["result"] for line in output.splitlines() if line.startswith("{")]
+
+
+def run_source(job, sid):
+    """Segment by segment until every one is approved; returns the check verdicts."""
+    base = ["--job-dir", str(job), "--only", sid]
+    checks = []
+    while True:
+        if results(launcher(["refs", *base])) == ["all segments approved"]:
+            return checks
+        for attempt in range(MAX_RETRIES + 1):
+            launcher(["render", *base])
+            check = results(launcher(["check", *base]))[0]
+            checks.append({"source": sid, "attempt": attempt, "verdict": check["verdict"]})
+            if check["verdict"] == "pass":
+                launcher(["approve", *base, "--segment", segment_of(job, sid)])
+                break
+            if attempt < MAX_RETRIES:
+                launcher(["redo", *base, "--segment", segment_of(job, sid), "--reason", "Smoke test: check failed"])
+        else:
+            key = segment_of(job, sid)
+            state = next(row for row in results(launcher(["status", *base]))[0] if f"{sid}:{row['segment']}" == key)
+            launcher(["select-best", *base, "--segment", key, "--generation-id", state["generation_id"],
+                      "--reason", "Smoke test: latest result taken unseen after the retries"])
+
+
+def segment_of(job, sid):
+    """The first unapproved segment of a source, as S01:K02."""
+    rows = results(launcher(["status", "--job-dir", str(job), "--only", sid]))[0]
+    return f"{sid}:{next(row['segment'] for row in rows if not row['approved'])}"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=1, help="number of .素材 videos to run")
@@ -40,29 +76,14 @@ def main():
     folder = Path(tempfile.mkdtemp(prefix="vr-e2e-"))
     order = {"sources": [str(p) for p in sources], "output_root": str(folder), "request": "smoke test"}
     job = Path(launcher(["init", "--work-order", "-"], json.dumps(order, ensure_ascii=False)).splitlines()[0].split(": ", 1)[1])
-    launcher(["analyze", "--job-dir", str(job)])
-    launcher(["survey", "--job-dir", str(job)])
-    edits = {"defaults": {"remove": ['the game logo "WHITEOUT SURVIVAL"']}, "sources": {}}
-    edits_path = job / "config" / "edits-smoke.json"
-    edits_path.parent.mkdir(parents=True, exist_ok=True)
-    edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
-    launcher(["plan", "--job-dir", str(job), "--edits", str(edits_path)])
-    launcher(["refs", "--job-dir", str(job)])
-    # render, check and approve until every shot is through (the smoke test approves unseen, failed checks included;
-    # real runs look first)
+    for command in ("analyze", "survey", "plan"):
+        launcher([command, "--job-dir", str(job)])
     checks = []
-    while True:
-        rendered = launcher(["render", "--job-dir", str(job)])
-        checked = launcher(["check", "--job-dir", str(job)])
-        checks += [line for line in checked.splitlines() if " attempt " in line]
-        launcher(["approve", "--job-dir", str(job), "--segment", *[f"S{k:02d}" for k in range(1, len(sources) + 1)],
-                  "--dismiss", "smoke test: approved unseen"])
-        if " 0 waiting" in rendered.splitlines()[0]:
-            break
+    for number in range(1, len(sources) + 1):
+        checks += run_source(job, f"S{number:02d}")
     launcher(["assemble", "--job-dir", str(job)])
     delivered = sorted(str(p) for p in job.parent.glob("*.mp4"))
-    report = {"job": str(job), "sources": [p.name for p in sources], "delivered": delivered,
-              "checks": checks}
+    report = {"job": str(job), "sources": [p.name for p in sources], "delivered": delivered, "checks": checks}
     (ROOT / "dev/smoke/latest.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=1))
 

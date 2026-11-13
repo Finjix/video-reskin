@@ -1,4 +1,4 @@
-"""Schema-2 behavior, with all model calls mocked; media integration uses real FFmpeg."""
+"""Pipeline behavior, with all model calls mocked; media integration uses real FFmpeg."""
 import math
 import shutil
 import tempfile
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from reskin import remake as m
+from reskin import pipeline as m
 from reskin.common import video_info
 
 
@@ -89,7 +89,7 @@ class GateTests(unittest.TestCase):
              patch.object(m,'ask',side_effect=[{'ok':False,'covers':[],'note':'Unsuitable tail'},
                                              {'frames':[],'references':[]}]),\
              patch.object(m.winky,'inline',return_value={}),\
-             patch('reskin.refs.upload_copy',side_effect=lambda p,*a:p),patch.object(m,'picture_issue') as sheet:
+             patch.object(m,'upload_copy',side_effect=lambda p,*a:p),patch.object(m,'picture_issue') as sheet:
             m.put(self.job,'survey/S01',{'inventory':[]})
             result=m.refs(self.job,'S01',self.p,self.p['segments'][1])
         self.assertEqual([r['id'] for r in result],['S01-K02-f48'])
@@ -162,7 +162,7 @@ class GateTests(unittest.TestCase):
             return {'frames':[],'references':['old-prop']}
         with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
              patch.object(m,'ask',side_effect=answer),patch.object(m.winky,'inline',return_value={}),\
-             patch('reskin.refs.upload_copy',side_effect=lambda p,*a:p),patch.object(m.lumos,'submit_image_to_image') as submit:
+             patch.object(m,'upload_copy',side_effect=lambda p,*a:p),patch.object(m.lumos,'submit_image_to_image') as submit:
             refs=m.refs(self.job,'S01',p,s)
         self.assertEqual([r['id'] for r in refs],['S01-K02-tail','old-prop'])
         submit.assert_not_called()
@@ -175,7 +175,7 @@ class GateTests(unittest.TestCase):
                     else {'frames':[],'references':[]})
         with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
              patch.object(m,'ask',side_effect=answer),patch.object(m.winky,'inline',return_value={}),\
-             patch('reskin.refs.upload_copy',side_effect=lambda p,*a:p):
+             patch.object(m,'upload_copy',side_effect=lambda p,*a:p):
             with self.assertRaisesRegex(ValueError,'new-prop'):
                 m.refs(self.job,'S01',self.p,s)
 
@@ -207,7 +207,7 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(m.saved(job,'review/reference-check')['images'],
                              {'original':str(frame.resolve()),'result':str(frame.resolve())})
 
-    def test_survey_sends_working_copy_without_proxy(self):
+    def test_survey_sends_the_working_copy(self):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)
             source=m.working(job,'S01')
@@ -215,11 +215,9 @@ class MediaTests(unittest.TestCase):
             source.touch()
             m.put(job,'catalog/S01',{'frames':48})
             with patch.object(m.winky,'inline',return_value={}) as inline, \
-                 patch.object(m,'ask',return_value={'inventory':[]}), \
-                 patch('reskin.survey.proxy') as proxy:
+                 patch.object(m,'ask',return_value={'inventory':[]}):
                 m.survey(job,{},'S01')
             inline.assert_called_once_with(source,fps=6)
-            proxy.assert_not_called()
 
     def test_working_copy_keeps_size_and_24fps_but_removes_source_audio(self):
         with tempfile.TemporaryDirectory() as td:
@@ -333,7 +331,7 @@ class MediaTests(unittest.TestCase):
             state={'delivery_dir':td,'sources':[{'id':'S01','name':'sample','path':str(source)}]}
             plan={'total':96,'originals':[],'segments':[
                 {'id':'K01','frames':[0,48]},{'id':'K02','frames':[48,96]}]}
-            with patch('reskin.assemble.target_size',return_value=(160,90)):
+            with patch.object(m,'target_size',return_value=(160,90)):
                 result=m.assemble(job,state,'S01',plan)
             self.assertEqual(video_info(result)['frames'],96)
             for frame,expected in [(45,0),(46,64),(47,128),(48,128),(49,191),(50,255)]:

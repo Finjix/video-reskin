@@ -1,21 +1,32 @@
-"""A small, sequential frame-reference workflow: the skill entry point and its job commands."""
+"""The skill entry point: a small, sequential frame-reference workflow and its job commands."""
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
 import shutil
 import sys
 from copy import deepcopy
 from pathlib import Path
 
-from reskin import images, job as JOB, lumos, net, runtime, winky
+from reskin import job as JOB, lumos, net, runtime, winky
 from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, write
 
 FPS = 24
 MAX_FRAMES = 720
 MAX_RETRIES = 2
 TRANSITION_FRAMES = 4  # Gameplay joins only; original/non-game/end-card boundaries are cuts.
+SHORT_SIDE = 1080      # deliveries: 1080 on the short side (Seedance 2.5's largest render size)
+IMAGE_MODEL = "gpt-image-2.6-sunburst"     # on Lumos
+ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
+           "4:5": 4 / 5, "5:4": 5 / 4}
+UPLOAD_LIMIT = 8_000_000       # bytes: a larger PNG is uploaded as a JPEG
+INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured)
+PROXY_CRF = 4                  # review clips are near-lossless: Gemini judges the delivered detail
+BUDGET = .93                   # share of INLINE_LIMIT the video bitrate is capped to (container and VBV headroom)
+ISSUE_SPAN = .3                # an issue shorter than two spans gets frames at its middle and that far either side
+LABEL_FONT = Path(os.environ.get("SystemRoot", "C:/Windows")) / "Fonts/arial.ttf"
 
 
 def obj(**fields):
@@ -46,7 +57,78 @@ REVIEW['properties']['issues']['description'] = 'Unresolved defects relative to 
 
 
 def prompt(kind):
-    return read(ROOT / "assets/remake-prompts.json")[kind]
+    return read(ROOT / "assets/prompts.json")[kind]
+
+
+def target_size(width, height):
+    """The delivery size: SHORT_SIDE on the short side, the source's aspect, even dimensions."""
+    if width >= height:
+        return round(SHORT_SIDE * width / height / 2) * 2, SHORT_SIDE
+    return SHORT_SIDE, round(SHORT_SIDE * height / width / 2) * 2
+
+
+def aspect_for(width, height):
+    """The nearest aspect preset (4K needs one: Lumos offers no 4K for "adaptive")."""
+    ratio = width / height
+    return min(ASPECTS, key=lambda name: abs(ASPECTS[name] / ratio - 1))
+
+
+def upload_copy(path):
+    """The picture as uploaded: the PNG itself, or a JPEG (quality 95) when the PNG is too large."""
+    if path.stat().st_size <= UPLOAD_LIMIT:
+        return path
+    out = path.with_name(path.stem + ".jpg")
+    if not out.is_file() or out.stat().st_mtime < path.stat().st_mtime:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.convert("RGB").save(out, quality=95, subsampling=0)
+    return out
+
+
+def drawtext(text):
+    if not LABEL_FONT.is_file():
+        return ""
+    path = str(LABEL_FONT).replace("\\", "/").replace(":", "\\:")
+    return (f",drawtext=fontfile='{path}':text='{text}':x=12:y=12:fontsize=28:fontcolor=white:"
+            "box=1:boxcolor=black@0.55:boxborderw=6")
+
+
+def grid_clip(panels, size, output, crf=PROXY_CRF, preset="medium"):
+    """Two labelled panels on one clip at `size` each, side by side for portrait, stacked for landscape. A panel is
+    {"path", "start", "end", "label"}; both share one clock from their starts. Encoded at `crf` with the bitrate
+    capped so the clip fits INLINE_LIMIT; a clip that still overshoots is encoded again with a lower cap."""
+    width, height = round(size[0] / 2) * 2, round(size[1] / 2) * 2
+    portrait = height >= width
+    inputs, chains, lengths = [], [], []
+    for panel in panels:
+        start, end = max(0.0, float(panel["start"])), float(panel["end"])
+        inputs += ["-ss", f"{start:.6f}", "-t", f"{max(1 / FPS, end - start):.6f}", "-i", str(panel["path"])]
+        lengths.append(max(1 / FPS, end - start))
+    longest = max(lengths)
+    for index, (panel, length) in enumerate(zip(panels, lengths)):
+        chains.append(f"[{index}:v]setpts=PTS-STARTPTS,fps={FPS},scale={width}:{height}:flags=lanczos,setsar=1,"
+                      f"tpad=stop_mode=clone:stop_duration={longest - length + .2:.3f},trim=duration={longest:.6f}"
+                      f"{drawtext(panel['label'])}[p{index}]")
+    graph = ";".join(chains) + f";[p0][p1]{'hstack' if portrait else 'vstack'}=inputs=2,format=yuv420p[v]"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cap = INLINE_LIMIT * BUDGET * 8 / longest          # bits per second
+    while True:
+        run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", "-an",
+             "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p", "-maxrate", f"{cap:.0f}",
+             "-bufsize", f"{cap:.0f}", "-r", str(FPS), output])
+        size = output.stat().st_size
+        if size <= INLINE_LIMIT or cap < 2e6:
+            return output
+        cap *= INLINE_LIMIT * BUDGET / size
+
+
+def issue_moments(start, end, last):
+    """Three moments that show an issue: its start, middle and end, or for a short one its middle and ISSUE_SPAN
+    either side; inside [0, last]."""
+    a, b = min(start, end), max(start, end)
+    middle = (a + b) / 2
+    moments = [a, middle, b] if b - a >= 2 * ISSUE_SPAN else [middle - ISSUE_SPAN, middle, middle + ISSUE_SPAN]
+    return [round(min(max(0.0, m), last), 3) for m in moments]
 
 
 def ask(kind, schema, context, media=()):
@@ -81,7 +163,7 @@ def still(source, frame, out):
 
 def load(job):
     state = JOB.load(job)
-    if state.get("schema") != 2:
+    if state.get("schema") != JOB.SCHEMA:
         raise ValueError("unsupported job schema: init a new job")
     return state
 
@@ -202,7 +284,6 @@ def refs(job, sid, plan, seg):
                    if seg['continuous'] else None)
     if existing and saved(job,f"references/{key}-dependency",None).get('previous') == predecessor:
         return existing
-    from reskin.refs import upload_copy
     survey = saved(job, f"survey/{sid}")
     a, b = seg["frames"]
     inventory = [x for x in survey["inventory"] if x["start"] < b/FPS and x["end"] > a/FPS]
@@ -270,8 +351,8 @@ def refs(job, sid, plan, seg):
         if not task:
             uploaded = [lumos.upload(upload_copy(p), "image-to-image") for p in [full, *looks]]
             info = saved(job, f"catalog/{sid}")
-            task = lumos.submit_image_to_image(uploaded, prompt("image"), model=images.IMAGE_MODEL,
-                       aspect_ratio=images.aspect_for(info["width"], info["height"]), resolution="2K", quality="medium")
+            task = lumos.submit_image_to_image(uploaded, prompt("image"), model=IMAGE_MODEL,
+                       aspect_ratio=aspect_for(info["width"], info["height"]), resolution="2K", quality="medium")
             put(job, f"image-tasks/{rid}", task)
         if not out.is_file():
             net.download(lumos.result_urls(lumos.wait(task["generation_id"]))[0], out)
@@ -307,7 +388,6 @@ def render(job, sid, plan, seg):
     references = saved(job, f"references/{sid}-{seg['id']}", [])
     if not references:
         raise ValueError("run refs first")
-    from reskin.refs import upload_copy
     a,b = seg["frames"]
     clip = job / "segments" / f"{sid}-{seg['id']}.mp4"
     if not clip.is_file():
@@ -351,7 +431,6 @@ def join_transition_frames(previous, current):
 
 
 def assemble(job, state, sid, plan, upto=None):
-    from reskin.assemble import target_size
     info = saved(job, f"catalog/{sid}")
     w,h = target_size(info["width"], info["height"])
     clips = []
@@ -397,7 +476,6 @@ def assemble(job, state, sid, plan, upto=None):
 
 
 def review_clip(job, sid, start, end, result, result_start, kind, folder, context):
-    from reskin.review import grid_clip
     info = saved(job, f"catalog/{sid}")
     compare = grid_clip([{"path":working(job,sid),"start":start,"end":end,"label":"ORIGINAL"},
                          {"path":result,"start":result_start,"end":result_start+end-start,"label":"RESULT"}],
@@ -407,7 +485,6 @@ def review_clip(job, sid, start, end, result, result_start, kind, folder, contex
         raise ValueError("review issue outside the clip")
     if answer["verdict"] == "pass" and answer["issues"]:
         raise ValueError("inconsistent review: pass with issues")
-    from reskin.review import issue_moments
     for index, issue in enumerate(answer['issues'],1):
         issue['frames'] = []
         for number, moment in enumerate(issue_moments(issue['start'],issue['end'],max(0,end-start-1/FPS)),1):
@@ -519,7 +596,7 @@ def main():
     p.add_argument("--redo",action="store_true",help="explicitly redo this segment's reference images")
     args,extra = p.parse_known_args()
     if args.command in ("auth","login","runtime"):
-        from reskin.cli import main as account_main
+        from reskin.account import main as account_main
         return account_main()
     try:
         if extra:
@@ -528,12 +605,7 @@ def main():
             if not args.work_order:
                 raise ValueError("--work-order is required")
             order = json.loads(sys.stdin.buffer.read().decode("utf-8-sig")) if str(args.work_order)=="-" else read(args.work_order)
-            if order.get("style","realistic") != "realistic":
-                raise ValueError("only the realistic preset is supported")
-            order["options"] = {**order.get("options",{}),"fps":24,"max_segment_seconds":30}
             job,state = JOB.init(order,args.job_dir)
-            state["schema"] = 2
-            write(job / "job.json",state)
             print(f"job_dir: {job}")
             return
         if args.command in ('approve','redo','select-best') and not args.segment:
