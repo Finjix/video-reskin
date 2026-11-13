@@ -19,7 +19,7 @@ Schema 2 data:
 - catalog/: normalized media information.
 - survey/: non-game intervals, end-card boundary, semantic cut candidates and English content inventory.
 - plans/: half-open source-frame ranges, passthrough ranges, continuity and fixed transition policy.
-- references/: full-frame images, actual coverage IDs, generated-image dependencies, segment reference lists and predecessor generation identity.
+- references/: full-frame images with original logos and all text unchanged, actual coverage IDs, generated-image dependencies, segment reference lists and predecessor generation identity.
 - image-tasks/: persisted image generation IDs for resuming.
 - state/: video generation ID, retry count/history and version-bound approval.
 - checks/: segment verdicts, issue times and current-generation token.
@@ -30,7 +30,7 @@ Schema 2 data:
 An explicitly redone predecessor preserves existing later outputs but invalidates their dependent approval.
 Approved results remain pinned when references change.
 Every quality retry is explicit and counted; four retries after the initial generation is the limit (five versions total). At exhaustion, compare the five outputs and select the best with select-best --segment S01:K02 --generation-id <id> --reason "<comparison findings and known defects>". Continue the workflow; retain the failed check and label acceptance as best_available.
-References can be explicitly replaced with refs --redo; previous generated images are archived.
+References can be explicitly replaced with refs --redo; previous generated images are archived. Replace references generated under weaker logo/text rules before rendering, and recheck existing videos under the current strict preservation rules. Source logos and all text are immutable in image generation, video generation and both reviews.
 Old schema 1 jobs are rejected, not migrated.
 
 Prompts are solely in assets/remake-prompts.json. The old internal modules remain as tested media/account helpers; their schema-1 orchestration is not used by the entry point.
