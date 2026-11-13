@@ -367,8 +367,17 @@ def assemble(job, state, sid, plan, upto=None):
         transition = join_transition_frames(previous_row, row)
         if transition and clips:
             tail = still(clips[-1], video_info(clips[-1])["frames"]-1, out.with_suffix(".png"))
+            head = still(source, 0, out.with_name(out.stem + '-head.png'))
+            previous_count = video_info(clips[-1])["frames"]
+            outgoing = out.with_name(out.stem + '-outgoing.mp4')
+            outgoing_graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
+                f"[v][t]blend=all_expr='if(eq(N,{previous_count}),A*(1-1/{transition})+B/{transition},A)'[o]")
+            ff(["-i", clips[-1], "-loop", "1", "-i", head, "-filter_complex", outgoing_graph,
+                "-map", "[o]", "-an", "-frames:v", str(previous_count), "-r", "24",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p"], outgoing)
+            clips[-1] = outgoing
             graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
-                     f"[v][t]blend=all_expr='A*min(1,N/{transition})+B*(1-min(1,N/{transition}))'[o]")
+                     f"[v][t]blend=all_expr='A*min(1,(N+1)/{transition})+B*(1-min(1,(N+1)/{transition}))'[o]")
             ff(["-i", source, "-loop", "1", "-i", tail, "-filter_complex", graph, "-map", "[o]",
                 "-an", "-frames:v", str(b-a), "-r", "24", "-c:v", "libx264", "-pix_fmt", "yuv420p"], out)
         else:

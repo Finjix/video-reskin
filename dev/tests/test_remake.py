@@ -285,6 +285,26 @@ class MediaTests(unittest.TestCase):
                         self.assertIsNone(ImageChops.difference(a,b).getbbox())
                 self.assertEqual(video_info(m.assemble(job,state,'S01',p))['frames'],72)
 
+    def test_transition_starts_on_outgoing_last_frame(self):
+        from PIL import Image, ImageStat
+        with tempfile.TemporaryDirectory() as td:
+            job=Path(td)
+            for key,color in [('K01','black'),('K02','white')]:
+                m.ff(['-f','lavfi','-i',f'color={color}:s=160x90:r=24:d=2',
+                      '-c:v','libx264','-pix_fmt','yuv420p'],job/f'ai/S01-{key}.mp4')
+            source=job/'ai/S01-K01.mp4'
+            m.put(job,'catalog/S01',video_info(source))
+            state={'delivery_dir':td,'sources':[{'id':'S01','name':'sample','path':str(source)}]}
+            plan={'total':96,'originals':[],'segments':[
+                {'id':'K01','frames':[0,48]},{'id':'K02','frames':[48,96]}]}
+            with patch('reskin.assemble.target_size',return_value=(160,90)):
+                result=m.assemble(job,state,'S01',plan)
+            self.assertEqual(video_info(result)['frames'],96)
+            for frame,expected in [(46,0),(47,85),(48,170),(49,255),(50,255)]:
+                image=m.still(result,frame,job/f'frame-{frame}.png')
+                with Image.open(image) as im:
+                    self.assertAlmostEqual(ImageStat.Stat(im.convert('L')).mean[0],expected,delta=5)
+
     def test_two_generated_segments_original_insert_tail_audio_and_transition(self):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)/'temp'

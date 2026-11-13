@@ -35,6 +35,6 @@ Old schema 1 jobs are rejected, not migrated.
 
 Prompts are solely in assets/remake-prompts.json. The old internal modules remain as tested media/account helpers; their schema-1 orchestration is not used by the entry point.
 
-Gameplay-to-gameplay joins use 3-frame transitions (0.125 seconds at 24 fps). Boundaries into or out of original/non-game footage and end cards are hard cuts. Preserve total frame count and audio alignment. There is no seam command, seam comparison or transition audit.
+Gameplay-to-gameplay joins use 3-frame transitions (0.125 seconds at 24 fps). Boundaries into or out of original/non-game footage and end cards are hard cuts. Start on the outgoing last frame (1/3 incoming first frame), then use 2/3 incoming on the incoming first frame and fully incoming on its second frame. Freeze the outgoing tail. Preserve total frame count and audio alignment. There is no seam command, seam comparison or transition audit.
 
 Tail suitability checks ONLY whether the previous generated last frame and next source first frame depict the same continuous shot, ignoring material realism and rendering quality. It is reference selection only: save the Gemini verdict, use the approved predecessor's exact tail when suitable, otherwise convert the next segment's first frame. Never reject or redo the predecessor, revoke its approval, or consume retries because of this decision. Source continuity remains on the original clock; the continuation prompt is used only with an actual tail reference.
