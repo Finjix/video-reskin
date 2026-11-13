@@ -1,4 +1,4 @@
-"""Schema 2: a small, sequential frame-reference workflow. No schema-1 orchestration is used."""
+"""A small, sequential frame-reference workflow: the skill entry point and its job commands."""
 from __future__ import annotations
 
 import argparse
@@ -82,7 +82,7 @@ def still(source, frame, out):
 def load(job):
     state = JOB.load(job)
     if state.get("schema") != 2:
-        raise ValueError("schema 1 job: continue with the old branch or init a new remake job")
+        raise ValueError("unsupported job schema: init a new job")
     return state
 
 
@@ -516,20 +516,20 @@ def main():
     p.add_argument("--generation-id")
     p.add_argument("--only",nargs="*")
     p.add_argument("--reason",default="quality review failed")
-    p.add_argument("--redo",action="store_true",help="explicitly remake this segment's reference images")
+    p.add_argument("--redo",action="store_true",help="explicitly redo this segment's reference images")
     args,extra = p.parse_known_args()
     if args.command in ("auth","login","runtime"):
-        from reskin.cli import main as legacy
-        return legacy()
+        from reskin.cli import main as account_main
+        return account_main()
     try:
         if extra:
-            raise ValueError(f"unsupported remake arguments: {extra}")
+            raise ValueError(f"unsupported arguments: {extra}")
         if args.command == "init":
             if not args.work_order:
                 raise ValueError("--work-order is required")
             order = json.loads(sys.stdin.buffer.read().decode("utf-8-sig")) if str(args.work_order)=="-" else read(args.work_order)
             if order.get("style","realistic") != "realistic":
-                raise ValueError("remake uses the realistic preset")
+                raise ValueError("only the realistic preset is supported")
             order["options"] = {**order.get("options",{}),"fps":24,"max_segment_seconds":30}
             job,state = JOB.init(order,args.job_dir)
             state["schema"] = 2
