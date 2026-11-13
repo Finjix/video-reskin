@@ -4,12 +4,12 @@
 
 ## 工作流程
 
-1. 本地生成 24 fps 工作副本，Gemini 以每秒 6 帧分析全片。
-2. 标记非游戏区间、尾板及内容清单，按不超过 30 秒、少切原则选切点。
+1. 本地生成 24 fps 工作副本（短边超过 1080 时缩到 1080，全部编码 CRF 16），Gemini 以每秒 6 帧分析全片。
+2. 标记非游戏区间、尾板及内容清单，按不超过 30 秒、少切原则选切点；需要多段时每段不短于 2 秒，非游戏区间之间不足 0.5 秒的游戏画面保留原片。
 3. Gemini 逐段选出覆盖场景、人物、物品、地面的完整帧，重点补齐新道具。首张只用源帧转换，之后参考已有生成图；参考图 2K/medium。
 4. 同一镜头的后续段以上段生成尾帧为起点，前提是 Gemini 判断尾帧与下段源首帧为连续画面；否则以及硬切后转换下段首帧。这一判断只用于选参考，不影响上段。
 5. Seedance 生成后，Gemini 对照原片整段审核，主 agent 核实报告后批准。
-6. 每段最多 2 次质量重试；三版都不合格时用 select-best 选最好的一版并记录已知问题。
+6. 每段最多 2 次质量重试；三版都不合格时用 select-best 选最好的一版并记录已知问题。生成服务失败会记录并重新提交，不计重试。
 7. 游戏片段之间做 4 帧过渡，与非游戏画面、尾板之间硬接，原声对齐。
 
 审核规则见 [review.md](skill/video-reskin/references/review.md)：整段按正常播放观感验收，UI/HUD/文字宽松；参考图严格要求 Logo 和文字保持原样。
@@ -23,7 +23,7 @@
 `analyze → survey → plan → refs → render → check → approve --segment S01:K01`，重复逐段循环后 assemble。
 `status` 查进度；`redo --segment S01:K02 --reason "Visible material jump"` 回炉视频；
 `refs --redo --segment S01:K02` 重做本段图片。
-服务中断后复用已记录的任务 ID。新参考图不自动重生成已批准片段；前段重做后，后段保留结果并重查。
+服务中断后复用已记录的任务 ID，生成失败则重新提交。新参考图不自动重生成已批准片段；前段变化后，后段需重新 refs 和 render。
 
 命令、任务目录、过渡权重和媒体参数见 [workflow.md](skill/video-reskin/references/workflow.md)。全部提示词在 [prompts.json](skill/video-reskin/assets/prompts.json)。
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "assets/runtime.json"
-FEATURES = {"media": {"numpy": "2.5.3", "Pillow": "12.3.0"},
+FEATURES = {"media": {"Pillow": "12.3.0"},
             "login": {"playwright": "1.64.1"}}
 
 

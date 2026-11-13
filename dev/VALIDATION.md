@@ -43,6 +43,9 @@ whole shot from a flawed redo and re-rendered two clean segments (2026-11-10).
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
 by the video model and may show other digits for a few frames.
 
+**Encoding** (user rule, 2026-11-13). Working copies are at most 1080 on the short side, the delivery size, and every
+encode uses CRF 16.
+
 ## Offline checks
 
 `dev/test_bootstrap.py` (cold start in a Unicode temp path, JSON stdin, offline reuse) and `dev/run_tests.py` pass.

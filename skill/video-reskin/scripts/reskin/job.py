@@ -36,6 +36,8 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
         raise ValueError("work order options are not supported: delivery is fixed at 1080p, 24 fps")
     if job_dir:
         job = Path(job_dir).resolve()
+        if job.name != "temp":
+            raise ValueError("--job-dir for init must be a folder named temp inside the delivery folder")
         delivery = job.parent
     else:
         root = Path(order.get("output_root") or desktop()).expanduser().resolve()
