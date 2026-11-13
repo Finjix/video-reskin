@@ -268,7 +268,7 @@ def refs(job, sid, plan, seg):
             looks = [Path(r["path"]) for r in dependencies]
         else:
             dependencies = []
-            looks = [ROOT / "assets/styles/realistic.jpg"]
+            looks = []
         out = job / "references" / f"{rid}.png"
         task = saved(job, f"image-tasks/{rid}")
         if not task:

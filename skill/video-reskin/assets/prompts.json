@@ -15,8 +15,7 @@
    },
    "default_materials": "realistic ground, water, ice and snow, wood, stone, metal, plants, cloth and character clothing",
    "look": "Overall look: real-world surface textures that stand out clearly (wood grain, bark, packed snow, ice, stone, rope fibres, fabric weave, fish scales), real light with natural shadows and contact shadows, crisp fine detail, clean; never pastel, glossy or cartoonish.",
-   "ground": "The ground matters most for realism: every ground surface (soil, packed and loose snow, ice, gravel, planks) has a complex, deep and finely detailed texture with uneven relief, grain, small stones, cracks, drifts and trodden marks, crisp into the distance; never a smooth, flat or uniform fill.",
-   "reference": "styles/realistic.jpg"
+   "ground": "The ground matters most for realism: every ground surface (soil, packed and loose snow, ice, gravel, planks) has a complex, deep and finely detailed texture with uneven relief, grain, small stones, cracks, drifts and trodden marks, crisp into the distance; never a smooth, flat or uniform fill."
   }
  },
  "remove": "Remove these on-screen elements: {items}. Fill each area naturally with the surrounding scene and leave no trace; remove only these and keep every other text, number, sign and UI element unchanged. "
