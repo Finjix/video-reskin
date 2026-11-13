@@ -23,7 +23,7 @@ ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.
            "4:5": 4 / 5, "5:4": 5 / 4}
 UPLOAD_LIMIT = 8_000_000       # bytes: a larger PNG is uploaded as a JPEG
 INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured)
-PROXY_CRF = 4                  # review clips are near-lossless: Gemini judges the delivered detail
+PROXY_CRF = 16                 # review clips: same quality as the working copy
 BUDGET = .93                   # share of INLINE_LIMIT the video bitrate is capped to (container and VBV headroom)
 ISSUE_SPAN = .3                # an issue shorter than two spans gets frames at its middle and that far either side
 LABEL_FONT = Path(os.environ.get("SystemRoot", "C:/Windows")) / "Fonts/arial.ttf"
@@ -93,7 +93,7 @@ def drawtext(text):
             "box=1:boxcolor=black@0.55:boxborderw=6")
 
 
-def grid_clip(panels, size, output, crf=PROXY_CRF, preset="medium"):
+def grid_clip(panels, size, output, crf=PROXY_CRF, preset="slow"):
     """Two labelled panels on one clip at `size` each, side by side for portrait, stacked for landscape. A panel is
     {"path", "start", "end", "label"}; both share one clock from their starts. Encoded at `crf` with the bitrate
     capped so the clip fits INLINE_LIMIT; a clip that still overshoots is encoded again with a lower cap."""
@@ -479,7 +479,7 @@ def review_clip(job, sid, start, end, result, result_start, kind, folder, contex
     info = saved(job, f"catalog/{sid}")
     compare = grid_clip([{"path":working(job,sid),"start":start,"end":end,"label":"ORIGINAL"},
                          {"path":result,"start":result_start,"end":result_start+end-start,"label":"RESULT"}],
-                        (info["width"], info["height"]), folder / f"{kind}.mp4", crf=16, preset="slow")
+                        (info["width"], info["height"]), folder / f"{kind}.mp4")
     answer = ask(kind, REVIEW, context, [winky.inline(compare,fps=6)])
     if any(not 0 <= x["start"] <= x["end"] <= end-start+1/FPS for x in answer["issues"]):
         raise ValueError("review issue outside the clip")
