@@ -21,7 +21,8 @@ SLIVER = 12                    # frames: gameplay this short between original st
 MAX_RETRIES = 2
 TRANSITION_FRAMES = 4          # Gameplay joins only; original/non-game/end-card boundaries are cuts.
 SHORT_SIDE = 1080              # working copies at most, deliveries exactly (Seedance 2.5's largest render size)
-CRF = 16                       # every x264 encode
+CRF = 16                       # every intermediate x264 encode
+DELIVERY = ["-c:v", "libx264", "-preset", "slow", "-crf", "20", "-pix_fmt", "yuv444p"]   # the finished MP4
 REVIEW_FPS = 6                 # frames per second Gemini samples from every video
 IMAGE_MODEL = "gpt-image-2.6-sunburst"     # on Lumos
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
@@ -589,7 +590,7 @@ def assemble(job, state, sid, plan):
     if video_info(original["path"])["audio"]:
         args += ["-i", original["path"], "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-af", "apad"]
     count = plan["total"]
-    ff([*args, "-c:v", "copy", "-t", str(count / FPS), "-movflags", "+faststart"], output)
+    ff([*args, *DELIVERY, "-r", str(FPS), "-t", str(count / FPS), "-movflags", "+faststart"], output)
     if abs(video_info(output)["duration"] - count / FPS) > 1 / FPS + .001:
         raise ValueError("assembled duration differs by more than one frame")
     return output

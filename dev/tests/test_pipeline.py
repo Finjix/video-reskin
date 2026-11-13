@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from reskin import pipeline as m
-from reskin.common import video_info
+from reskin.common import probe, video_info
 
 
 def verdict(value='pass'):
@@ -476,6 +476,8 @@ class MediaTests(unittest.TestCase):
                 m.ff(['-ss',str(a/24),'-i',m.working(job,'S01'),*m.encode('fps=24'),'-frames:v',str(b-a)],job/'ai'/f"S01-{s['id']}.mp4")
             output=m.assemble(job,state,'S01',p)
             made=video_info(output)
+            stream=next(s for s in probe(output)['streams'] if s['codec_type']=='video')
+            self.assertEqual(stream['pix_fmt'],'yuv444p')
             self.assertTrue(made['audio'])
             self.assertEqual(made['frames'],120)
             self.assertAlmostEqual(made['duration'],5,delta=1/24)

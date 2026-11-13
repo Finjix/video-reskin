@@ -44,7 +44,7 @@ sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). F
 by the video model and may show other digits for a few frames.
 
 **Encoding** (user rule, 2026-11-13). Working copies are at most 1080 on the short side, the delivery size, and every
-encode uses CRF 16.
+intermediate encode uses CRF 16; the delivery is CRF 20, yuv444p, preset slow.
 
 ## Offline checks
 
