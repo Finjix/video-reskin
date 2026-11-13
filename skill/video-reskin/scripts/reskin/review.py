@@ -70,7 +70,8 @@ SEAM_MOMENTS = (-.5, -.25, 0.0, .25, .5)     # the agent's five frames across ev
 SEAM_SPAN = 1.0                # seconds of the joined preview Gemini watches on either side of a seam (user rule)
 
 
-def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF) -> Path:
+def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int = PROXY_CRF,
+              preset: str = "medium") -> Path:
     """Two panels on one clip, each at the delivery's own `size` (Gemini judges the delivered detail) and labelled,
     side by side for portrait, stacked for landscape. A panel is {"path", "start", "end", "label"} and optionally
     "stretch" (its time is multiplied by it, to put a slightly shorter result on the source's clock); both share one
@@ -94,7 +95,7 @@ def grid_clip(panels: list[dict], size: tuple[int, int], output: Path, crf: int 
     cap = INLINE_LIMIT * BUDGET * 8 / longest          # bits per second
     while True:
         run([FFMPEG, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", "-an",
-             "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-maxrate", f"{cap:.0f}",
+             "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p", "-maxrate", f"{cap:.0f}",
              "-bufsize", f"{cap:.0f}", "-r", str(REVIEW_FPS), output])
         size = output.stat().st_size
         if size <= INLINE_LIMIT or cap < 2e6:

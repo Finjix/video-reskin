@@ -71,8 +71,8 @@ def ff(args, output):
     return output
 
 
-def encode(filters):
-    return ["-vf", filters, "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "17", "-pix_fmt", "yuv420p"]
+def encode(filters, *, crf=17, preset="fast"):
+    return ["-vf", filters, "-an", "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p"]
 
 
 def still(source, frame, out):
@@ -104,17 +104,16 @@ def analyze(job, state, sid):
     source = next(s for s in state["sources"] if s["id"] == sid)
     out = working(job, sid)
     if not out.is_file():
-        ff(["-i", source["path"], *encode("fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1")], out)
+        ff(["-i", source["path"], *encode("fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1", crf=16, preset="slow")], out)
     info = video_info(out)
     return put(job, f"catalog/{sid}", info)
 
 
 def survey(job, state, sid):
-    from reskin.survey import proxy
     info = saved(job, f"catalog/{sid}") or analyze(job, state, sid)
     if saved(job, f"survey/{sid}"):
         return saved(job, f"survey/{sid}")
-    path = proxy(working(job, sid), info, job / "work" / f"{sid}-survey.mp4")
+    path = working(job, sid)
     if path.stat().st_size > 256_000_000:
         raise ValueError("survey exceeds Gemini inline limit; use a shorter source")
     answer = ask("survey", SURVEY, {"duration": info["frames"] / FPS},
@@ -189,13 +188,10 @@ def ready(job, sid, plan, seg):
 
 
 def picture_issue(job, key, original, result, report):
-    """Persist image-review evidence before stopping, so the agent can inspect the whole comparison."""
-    from reskin.refs import strip
-    sheet = job / 'review' / f'{key}-issue.png'
-    sheet.parent.mkdir(parents=True,exist_ok=True)
-    strip(report['note'],[Path(original)],Path(result)).save(sheet)
-    put(job,f'review/{key}',{**report,'sheet':str(sheet)})
-    return sheet
+    """Point the agent to the untouched source and generated reference, without a comparison sheet."""
+    put(job,f'review/{key}',{**report,'images':{'original':str(Path(original).resolve()),
+                                            'result':str(Path(result).resolve())}})
+    return job / 'review' / f'{key}.json'
 
 
 def refs(job, sid, plan, seg):
@@ -223,7 +219,7 @@ def refs(job, sid, plan, seg):
         tail_schema['properties']['ok']['description'] = 'True only when Image 1 and Image 2 are consecutive views of the same continuous shot.'
         tail_schema['properties']['covers']['description'] = 'Inventory IDs visible in Image 1, regardless of their material style.'
         tail = ask("tail", tail_schema, {"operation": "same_shot_continuity", "inventory": inventory},
-                   [winky.inline(upload_copy(p, 1536)), winky.inline(upload_copy(first, 1536))])
+                   [winky.inline(p), winky.inline(first)])
         put(job,f'review/{key}-tail',tail)
         if tail["ok"]:
             entry = {"id": key+"-tail", "path": str(p), "covers": [], "visible": tail["covers"], "at": a/FPS}
@@ -259,8 +255,8 @@ def refs(job, sid, plan, seg):
             select_schema['properties']['references']['items']['enum'] = [r['id'] for r in available]
             selection = ask("frames", select_schema, {"operation": "select_references", "at": at/FPS,
                             "available": [{k:v for k,v in r.items() if k != "path"} for r in available]},
-                            [winky.inline(upload_copy(full, 1536)),
-                             *[winky.inline(upload_copy(Path(r["path"]), 512)) for r in available]])
+                            [winky.inline(full),
+                             *[winky.inline(Path(r["path"])) for r in available]])
             ids = selection["references"]
             if not ids or len(ids) > 15 or len(set(ids)) != len(ids) or any(x not in {r["id"] for r in available} for x in ids):
                 raise ValueError(f"invalid image reference selection (1-15 existing IDs required): {ids!r}; available: {[r['id'] for r in available]!r}")
@@ -280,10 +276,10 @@ def refs(job, sid, plan, seg):
         if not out.is_file():
             net.download(lumos.result_urls(lumos.wait(task["generation_id"]))[0], out)
         coverage = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
-                       [winky.inline(upload_copy(full, 1536)), winky.inline(upload_copy(out, 1536))])
+                       [winky.inline(full), winky.inline(out)])
         if not coverage["ok"]:
-            sheet = picture_issue(job,rid,full,out,coverage)
-            raise ValueError(f"reference {rid} failed: {coverage['note']}; inspect {sheet}; run refs --redo --segment {sid}:{seg['id']}")
+            evidence = picture_issue(job,rid,full,out,coverage)
+            raise ValueError(f"reference {rid} failed: {coverage['note']}; open the original images listed in {evidence}; run refs --redo --segment {sid}:{seg['id']}")
         entry = {"id": rid, "path": str(out), "at": at/FPS, "covers": coverage["covers"],
                  "dependencies": [r["id"] for r in dependencies], "generation_id": task["generation_id"]}
         chosen.append(entry)
@@ -405,20 +401,22 @@ def review_clip(job, sid, start, end, result, result_start, kind, folder, contex
     info = saved(job, f"catalog/{sid}")
     compare = grid_clip([{"path":working(job,sid),"start":start,"end":end,"label":"ORIGINAL"},
                          {"path":result,"start":result_start,"end":result_start+end-start,"label":"RESULT"}],
-                        (info["width"], info["height"]), folder / f"{kind}.mp4")
+                        (info["width"], info["height"]), folder / f"{kind}.mp4", crf=16, preset="slow")
     answer = ask(kind, REVIEW, context, [winky.inline(compare,fps=6)])
     if any(not 0 <= x["start"] <= x["end"] <= end-start+1/FPS for x in answer["issues"]):
         raise ValueError("review issue outside the clip")
     if answer["verdict"] == "pass" and answer["issues"]:
         raise ValueError("inconsistent review: pass with issues")
-    from reskin.review import issue_moments, three_frames
+    from reskin.review import issue_moments
     for index, issue in enumerate(answer['issues'],1):
-        sheet = folder / f'{kind}-issue-{index}.png'
-        three_frames([(str(working(job,sid)),lambda t:t+start,'ORIGINAL'),
-                      (str(result),lambda t:t+result_start,'RESULT')],
-                     issue_moments(issue['start'],issue['end'],max(0,end-start-1/FPS)),
-                     (info['width'],info['height']),sheet)
-        issue['sheet'] = str(sheet)
+        issue['frames'] = []
+        for number, moment in enumerate(issue_moments(issue['start'],issue['end'],max(0,end-start-1/FPS)),1):
+            original = still(working(job,sid), round((start+moment)*FPS),
+                             folder / f'{kind}-issue-{index}-{number}-original.png')
+            generated = still(result, round((result_start+moment)*FPS),
+                              folder / f'{kind}-issue-{index}-{number}-result.png')
+            issue['frames'].append({'at':moment, 'original':str(original.resolve()),
+                                    'result':str(generated.resolve())})
     return answer
 
 

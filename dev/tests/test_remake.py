@@ -181,7 +181,7 @@ class GateTests(unittest.TestCase):
 
 
 class MediaTests(unittest.TestCase):
-    def test_failed_seam_and_image_reviews_include_visual_evidence(self):
+    def test_failed_reviews_expose_independent_native_frames_and_images(self):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)
             source=m.working(job,'S01')
@@ -194,12 +194,48 @@ class MediaTests(unittest.TestCase):
             folder.mkdir()
             with patch.object(m,'ask',return_value=response):
                 result=m.review_clip(job,'S01',0,2,source,0,'seam',folder,{})
-            self.assertTrue(Path(result['issues'][0]['sheet']).is_file())
-            self.assertIn('seam-issue',result['issues'][0]['sheet'])
+            from PIL import Image
+            self.assertNotIn('sheet',result['issues'][0])
+            self.assertEqual(len(result['issues'][0]['frames']),3)
+            for evidence in result['issues'][0]['frames']:
+                for key in ('original','result'):
+                    with Image.open(evidence[key]) as image:
+                        self.assertEqual(image.size,(160,90))
             frame=m.still(source,0,job/'frame.png')
-            sheet=m.picture_issue(job,'reference-check',frame,frame,{'ok':False,'note':'Wrong material'})
-            self.assertTrue(sheet.is_file())
-            self.assertEqual(m.saved(job,'review/reference-check')['sheet'],str(sheet))
+            report=m.picture_issue(job,'reference-check',frame,frame,{'ok':False,'note':'Wrong material'})
+            self.assertTrue(report.is_file())
+            self.assertEqual(m.saved(job,'review/reference-check')['images'],
+                             {'original':str(frame.resolve()),'result':str(frame.resolve())})
+
+    def test_survey_sends_working_copy_without_proxy(self):
+        with tempfile.TemporaryDirectory() as td:
+            job=Path(td)
+            source=m.working(job,'S01')
+            source.parent.mkdir(parents=True)
+            source.touch()
+            m.put(job,'catalog/S01',{'frames':48})
+            with patch.object(m.winky,'inline',return_value={}) as inline, \
+                 patch.object(m,'ask',return_value={'inventory':[]}), \
+                 patch('reskin.survey.proxy') as proxy:
+                m.survey(job,{},'S01')
+            inline.assert_called_once_with(source,fps=6)
+            proxy.assert_not_called()
+
+    def test_working_copy_keeps_size_and_24fps_but_removes_source_audio(self):
+        with tempfile.TemporaryDirectory() as td:
+            job=Path(td)/'job'
+            source=Path(td)/'source.mp4'
+            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=30:duration=1',
+                  '-f','lavfi','-i','sine=duration=1','-c:v','libx264','-c:a','aac'],source)
+            self.assertTrue(video_info(source)['audio'])
+            with patch.object(m,'ff',wraps=m.ff) as encode:
+                info=m.analyze(job,{'sources':[{'id':'S01','path':str(source)}]},'S01')
+            args=encode.call_args.args[0]
+            self.assertEqual(args[args.index('-crf')+1],'16')
+            self.assertEqual(args[args.index('-preset')+1],'slow')
+            self.assertEqual(info['fps'],24)
+            self.assertEqual((info['width'],info['height']),(160,90))
+            self.assertFalse(info['audio'])
 
     def test_mocked_two_segment_production_and_submission_resume(self):
         self.run_two_segment_production(True)
