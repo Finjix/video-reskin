@@ -67,8 +67,17 @@ class GateTests(unittest.TestCase):
         self.assertEqual(watch.call_count,1)
         self.assertEqual(watch.call_args.args[6],'segment')
         self.assertIsNone(result['seam'])
-        self.assertEqual(result['decision']['transition_frames'],5)
+        self.assertEqual(result['decision']['transition_frames'],3)
         m.approve(self.job,'S01',self.p,self.p['segments'][1])
+
+    def test_original_footage_boundaries_are_hard_cuts(self):
+        game={'original':False}
+        original={'original':True}
+        self.assertEqual(m.join_transition_frames(None,game),0)
+        self.assertEqual(m.join_transition_frames(game,game),3)
+        self.assertEqual(m.join_transition_frames(game,original),0)
+        self.assertEqual(m.join_transition_frames(original,game),0)
+        self.assertEqual(m.join_transition_frames(original,original),0)
 
     def test_tail_failure_is_gemini_only_without_agent_sheet(self):
         predecessor=m.record(self.job,'S01',self.p['segments'][0]).copy()

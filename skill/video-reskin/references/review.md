@@ -2,7 +2,7 @@
 
 Gemini compares each complete generated segment with the source at 6 frames/s on the same clock. No independent seam or transition review is performed.
 
-Every join receives a fixed 5-frame transition (0.2083 seconds at 24 fps, approximately 0.2 seconds), including joins to original footage and end cards. Assembly blends from the previous last frame into the next clip without removing timeline frames; no post-transition review is added.
+Gameplay-to-gameplay joins receive a fixed 3-frame transition (0.125 seconds at 24 fps). Boundaries into or out of original/non-game footage and end cards are hard cuts. Assembly blends from the previous last frame into the next clip without removing timeline frames; no post-transition review is added.
 
 For every segment or reference-image issue, the main agent must inspect its comparison sheet, verify the reported problem, and scan the entire picture for other defects. Confirmed defects require correction. False positives require a fresh model review before normal approval. A normal approval requires a passed current segment check.
 

@@ -27,7 +27,7 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 8. `approve --segment S01:K01` after reviewing the current passed check. Or `redo --segment S01:K01 --reason "<English reason>"`, then render/check again. All video quality failures share four retries per segment after its first attempt (five versions total). If none passes, the main agent compares all five, inspects reported issue sheets and selects the best available result with select-best --segment S01:K02 --generation-id <id> --reason "<comparison findings and remaining defects>". Continue subsequent segments and assembly with that selected result; retain failed verdicts and disclose remaining defects. No hidden quality rerenders or accumulated corrective prompts.
 9. Repeat refs/render/check/approve. `assemble` requires every segment approved, restores all non-game footage and end cards on their source clock and muxes original audio. Delivery is 1080p, 24 fps. No whole-film model review is added.
 
-Every join uses a fixed approximately 0.2-second transition: 5 frames at 24 fps (0.2083 s), including original/non-game/end-card boundaries. Blend the previous last frame into the next clip's first 5 frames without shortening the timeline or changing the audio clock. No seam or post-transition model review is performed.
+Gameplay-to-gameplay joins use a fixed 3-frame transition (0.125 s at 24 fps). Any boundary into or out of original/non-game footage or end cards is a hard cut. Blend the previous last frame into the next gameplay clip's first 3 frames without shortening the timeline or changing the audio clock. No seam or post-transition model review is performed.
 
 ## Recovery and delivery
 

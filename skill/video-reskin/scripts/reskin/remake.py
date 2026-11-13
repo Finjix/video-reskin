@@ -15,7 +15,7 @@ from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, writ
 FPS = 24
 MAX_FRAMES = 720
 MAX_RETRIES = 4
-TRANSITION_FRAMES = 5  # 0.2083 s at 24 fps, nearest whole-frame duration to 0.2 s.
+TRANSITION_FRAMES = 3  # Gameplay joins only; original/non-game/end-card boundaries are cuts.
 
 
 def obj(**fields):
@@ -348,16 +348,23 @@ def pieces(plan, upto=None):
     return [r for r in sorted(rows, key=lambda r:r["frames"][0]) if r["frames"][0] < end]
 
 
+def join_transition_frames(previous, current):
+    if previous is None or previous['original'] or current['original']:
+        return 0
+    return TRANSITION_FRAMES
+
+
 def assemble(job, state, sid, plan, upto=None):
     from reskin.assemble import target_size
     info = saved(job, f"catalog/{sid}")
     w,h = target_size(info["width"], info["height"])
     clips = []
+    previous_row = None
     for row in pieces(plan, upto):
         a,b = row["frames"]
         source = working(job,sid) if row["original"] else job / "ai" / f"{sid}-{row['id']}.mp4"
         out = job / "work/join" / f"{sid}-{a}.mp4"
-        transition = TRANSITION_FRAMES if clips else 0
+        transition = join_transition_frames(previous_row, row)
         if transition and clips:
             tail = still(clips[-1], video_info(clips[-1])["frames"]-1, out.with_suffix(".png"))
             graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
@@ -368,6 +375,7 @@ def assemble(job, state, sid, plan, upto=None):
             ff(["-ss", str(a/FPS if row["original"] else 0), "-i", source,
                 *encode(f"scale={w}:{h},setsar=1,fps=24"), "-frames:v", str(b-a)],out)
         clips.append(out)
+        previous_row = row
     manifest = job / "work" / f"{sid}-concat.txt"
     manifest.write_text("".join("file '" + str(p.resolve()).replace("\\","/").replace("'", "'\\''") + "'\n" for p in clips), encoding="utf-8")
     original = next(s for s in state["sources"] if s["id"] == sid)
@@ -414,8 +422,10 @@ def check(job,state,sid,plan,seg):
     folder.mkdir(parents=True,exist_ok=True)
     a,b = seg["frames"]
     answer = {"token":check_token(job,sid,plan,seg),"seam":None,"segment":None,"verdict":"fail"}
-    answer['decision'] = {'transition_frames':TRANSITION_FRAMES if a else 0,
-                          'reason':'Automatic fixed 0.2-second transition; no seam review.'}
+    rows = pieces(plan, seg['id'])
+    transition = join_transition_frames(rows[-2] if len(rows)>1 else None, rows[-1])
+    answer['decision'] = {'transition_frames':transition,
+                          'reason':'Three-frame gameplay join; hard cuts at original footage boundaries; no seam review.'}
     answer["token"] = check_token(job,sid,plan,seg)
     result = job / "ai" / f"{sid}-{seg['id']}.mp4"
     answer["segment"] = review_clip(job,sid,a/FPS,b/FPS,result,0,"segment",folder,{})
