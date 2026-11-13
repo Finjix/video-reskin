@@ -67,14 +67,14 @@ class GateTests(unittest.TestCase):
         self.assertEqual(watch.call_count,1)
         self.assertEqual(watch.call_args.args[6],'segment')
         self.assertIsNone(result['seam'])
-        self.assertEqual(result['decision']['transition_frames'],3)
+        self.assertEqual(result['decision']['transition_frames'],4)
         m.approve(self.job,'S01',self.p,self.p['segments'][1])
 
     def test_original_footage_boundaries_are_hard_cuts(self):
         game={'original':False}
         original={'original':True}
         self.assertEqual(m.join_transition_frames(None,game),0)
-        self.assertEqual(m.join_transition_frames(game,game),3)
+        self.assertEqual(m.join_transition_frames(game,game),4)
         self.assertEqual(m.join_transition_frames(game,original),0)
         self.assertEqual(m.join_transition_frames(original,game),0)
         self.assertEqual(m.join_transition_frames(original,original),0)
@@ -285,7 +285,7 @@ class MediaTests(unittest.TestCase):
                         self.assertIsNone(ImageChops.difference(a,b).getbbox())
                 self.assertEqual(video_info(m.assemble(job,state,'S01',p))['frames'],72)
 
-    def test_transition_starts_on_outgoing_last_frame(self):
+    def test_transition_spans_two_frames_on_each_side(self):
         from PIL import Image, ImageStat
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)
@@ -300,7 +300,7 @@ class MediaTests(unittest.TestCase):
             with patch('reskin.assemble.target_size',return_value=(160,90)):
                 result=m.assemble(job,state,'S01',plan)
             self.assertEqual(video_info(result)['frames'],96)
-            for frame,expected in [(46,0),(47,85),(48,170),(49,255),(50,255)]:
+            for frame,expected in [(45,0),(46,64),(47,128),(48,128),(49,191),(50,255)]:
                 image=m.still(result,frame,job/f'frame-{frame}.png')
                 with Image.open(image) as im:
                     self.assertAlmostEqual(ImageStat.Stat(im.convert('L')).mean[0],expected,delta=5)

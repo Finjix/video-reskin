@@ -15,7 +15,7 @@ from reskin.common import FFMPEG, ROOT, digest, read, run, sha, video_info, writ
 FPS = 24
 MAX_FRAMES = 720
 MAX_RETRIES = 4
-TRANSITION_FRAMES = 3  # Gameplay joins only; original/non-game/end-card boundaries are cuts.
+TRANSITION_FRAMES = 4  # Gameplay joins only; original/non-game/end-card boundaries are cuts.
 
 
 def obj(**fields):
@@ -371,13 +371,13 @@ def assemble(job, state, sid, plan, upto=None):
             previous_count = video_info(clips[-1])["frames"]
             outgoing = out.with_name(out.stem + '-outgoing.mp4')
             outgoing_graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
-                f"[v][t]blend=all_expr='if(eq(N,{previous_count}),A*(1-1/{transition})+B/{transition},A)'[o]")
+                f"[v][t]blend=all_expr='if(eq(N,{previous_count}-1),A*0.75+B*0.25,if(eq(N,{previous_count}),A*0.5+B*0.5,A))'[o]")
             ff(["-i", clips[-1], "-loop", "1", "-i", head, "-filter_complex", outgoing_graph,
                 "-map", "[o]", "-an", "-frames:v", str(previous_count), "-r", "24",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p"], outgoing)
             clips[-1] = outgoing
             graph = (f"[0:v]scale={w}:{h},setsar=1[v];[1:v]scale={w}:{h},setsar=1[t];"
-                     f"[v][t]blend=all_expr='A*min(1,(N+1)/{transition})+B*(1-min(1,(N+1)/{transition}))'[o]")
+                     f"[v][t]blend=all_expr='if(eq(N,1),A*0.5+B*0.5,if(eq(N,2),A*0.75+B*0.25,A))'[o]")
             ff(["-i", source, "-loop", "1", "-i", tail, "-filter_complex", graph, "-map", "[o]",
                 "-an", "-frames:v", str(b-a), "-r", "24", "-c:v", "libx264", "-pix_fmt", "yuv420p"], out)
         else:
