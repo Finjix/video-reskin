@@ -15,6 +15,8 @@
 
 没有全景图、三视图、材质长清单、累积纠正提示或最后额外的全片模型审片。
 
+UI、HUD 和文字采用宽松审核：变化或运动中的轻微模糊、重影、果冻感可以接受，只要静态看起来正常、整体位置不明显漂移；不要求变化过程中逐帧文字、数字或形状完全一致。这类轻微问题不打回、不触发质量重试。只有明显漂移、严重变形、静态持续异常或主要元素增减才报问题。Gemini 和主 agent 复核使用同一标准，游戏主体、人物、材质和运动仍按原标准审核。
+
 ## 使用
 
 技能入口：`skill/video-reskin/scripts/video_reskin.cmd`。先 auth / login，再 init --work-order order.json。
@@ -38,7 +40,7 @@
 | 选帧与选参考 | Choose the fewest clear frames covering this segment's scenes, characters, objects and ground, especially newly appearing items. Select existing generated references for content already seen. |
 | 图片转换 | Convert Image 1 to realistic materials, matching the references' style, color, brightness, shadows and texture. |
 | 视频生成 | Edit the video: replace its materials to match the reference images. |
-| 整段审核 | Compare the result with the source. Report missed realistic materials, content changes, motion changes or artifacts. Ignore issues already present in the source. |
+| 整段审核 | Compare the result with the source. Report missed realistic materials, content changes, motion changes or artifacts. Ignore issues already present in the source. Apply a relaxed standard to UI, HUD and text: accept mild blur, ghosting or jelly-like deformation while they change or move, provided they look normal when static and their overall placement remains reasonably stable. Do not require pixel-perfect shapes or frame-by-frame text and number matching during changes. Report UI, HUD or text only for obvious drifting, severe distortion, persistent abnormal appearance when static, or major missing or added elements. Do not fail the segment or request a retry for the tolerated UI, HUD or text imperfections. Keep the usual standards for gameplay objects, characters, materials and motion. |
 
 连续镜头的视频提示仅额外加：`Start from Image 1.`
 

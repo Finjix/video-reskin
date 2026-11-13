@@ -2,6 +2,8 @@
 
 Gemini compares each complete generated segment with the source at 6 frames/s on the same clock. No independent seam or transition review is performed.
 
+UI, HUD and text use a relaxed standard in both Gemini review and main-agent verification. Mild blur, ghosting or jelly-like deformation during changes or movement is acceptable when they look normal when static and their overall placement remains reasonably stable. Do not require pixel-perfect shapes or frame-by-frame text and number matching during changes. Report only obvious drifting, severe distortion, persistent abnormal appearance when static, or major missing or added elements. Tolerated imperfections must not fail a segment or trigger a quality retry. Gameplay objects, characters, materials and motion retain their usual review standards.
+
 Gameplay-to-gameplay joins receive a fixed 3-frame transition (0.125 seconds at 24 fps). Boundaries into or out of original/non-game footage and end cards are hard cuts. Assembly blends from the previous last frame into the next clip without removing timeline frames; no post-transition review is added.
 
 For every segment or reference-image issue, the main agent must inspect its comparison sheet, verify the reported problem, and scan the entire picture for other defects. Confirmed defects require correction. False positives require a fresh model review before normal approval. A normal approval requires a passed current segment check.
