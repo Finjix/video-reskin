@@ -65,7 +65,7 @@ def gemini(parts: list[dict], *, schema: dict | None = None, model: str = REVIEW
     """generateContent; with a schema the JSON answer is parsed. `media_resolution` (default HIGH) sets how finely
     Gemini reads images and video frames."""
     body = {"contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"temperature": temperature}}
+            "generationConfig": {"temperature": temperature, "thinkingConfig": {"thinkingLevel": "medium"}}}
     if media_resolution:
         body["generationConfig"]["mediaResolution"] = media_resolution
     if schema:
