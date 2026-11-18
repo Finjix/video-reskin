@@ -47,8 +47,12 @@ The same gameplay appears in two themes (a frozen abyss with blue fire in 69238,
 69241 is frozen), so the prompt names only the style, like the realistic one. The samples stay saturated: deep
 blue/purple shadows, bright fire, characters as bright as before. A "dark gothic game art" image prompt applied to
 every element (GOFCN69114 射冰版, 2026-11-18) gave near-black, grey frames instead: the snow ground turned to dark
-stone and fence posts to rune pillars. Hence no "gothic": the prompt names a dark fantasy night in the game's own
-stylized 3D look with blue/purple shadows, firelight and vivid colors. That wording is not yet checked in a live run.
+stone and fence posts to rune pillars. Hence no "gothic". The look the user then chose (`assets/styles/dark.jpg`, 2026-11-18) is a snowy deep-blue
+night with pale snow, glowing cracked ice, amber lanterns, weathered dark wood and skull banners. Tests on
+GOF3D10232 射冰取鱼 frames at 0 s and 7.5 s: the prompt alone drew the banners, lanterns and dark wood but added a
+moon whenever it said "moonlit" and left the ice dull; the example picture alone matched ice, snow and blue but
+dropped banners and lanterns; the example picture plus the descriptive prompt matched on both frames. Hence the
+picture is the first conversion's look and the prompt names the traits. Not yet checked through a full video.
 
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn

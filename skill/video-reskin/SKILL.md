@@ -19,12 +19,12 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 
 1. `init --work-order <json>`: sources, optional output_root and the required style, chosen from the user's request:
    - `realistic` for requests such as 转化为写实, 写实风格 or realistic: realistic materials.
-   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: a dark fantasy night in the game's own stylized 3D look.
+   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: an eerie snowy night in the game's own stylized 3D look.
    Ask the user when the request names neither or both. Delivery is 1080p, 24 fps.
 2. `analyze`: build a silent 24 fps working copy at source size, scaled down to 1080 on the short side when larger. Originals stay the audio and delivery source.
 3. `survey`: Gemini watches the whole working copy once, marking non-game footage, end cards, candidate cuts and a content inventory.
 4. `plan`: the fewest segments of at most 30 seconds and at least 2 seconds when a stretch needs several, cut near semantic boundaries; gameplay slivers under half a second between non-game parts stay original. Non-game parts and end cards are restored later, not generated.
-5. `refs`: for the next unapproved segment of each source, Gemini picks full frames covering its scenes, characters, objects and ground, especially new props. The first frame is converted from its source alone; later ones also use earlier generated references. Each converted image is reviewed for coverage in the job's style and unchanged logos/text before rendering.
+5. `refs`: for the next unapproved segment of each source, Gemini picks full frames covering its scenes, characters, objects and ground, especially new props. The first frame is converted from its source alone, plus the style's example picture `assets/styles/<style>.jpg` when there is one (dark has one); later ones also use earlier generated references. Each converted image is reviewed for coverage in the job's style and unchanged logos/text before rendering.
 6. `render`: submit the segment cut from the working copy. A segment continuing the previous shot starts from the predecessor's last frame when Gemini judges it the same shot; otherwise, and after hard cuts or non-game gaps, it starts from a converted first frame. Sources proceed one segment at a time.
 7. `check`: Gemini reviews the complete segment against the source under [review](references/review.md). For every reported issue, open the listed frames or images and verify it there.
 8. `approve --segment S01:K01` after a passed current check, or `redo --segment S01:K01 --reason "<English reason>"` (required), then render/check again. After two failed retries, compare the three versions and `select-best` (see [review](references/review.md)).

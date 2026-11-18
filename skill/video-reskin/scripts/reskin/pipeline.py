@@ -77,6 +77,13 @@ def look(job):
     return prompt("styles")[read(job / JOB.STATE)["style"]]
 
 
+def style_picture(job):
+    """The style's example picture (assets/styles/<style>.jpg), the look of a source's first converted frame; or
+    None."""
+    path = ROOT / "assets/styles" / (read(job / JOB.STATE)["style"] + ".jpg")
+    return path if path.is_file() else None
+
+
 def target_size(width, height):
     """The delivery size: SHORT_SIDE on the short side, the source's aspect, even dimensions."""
     if width >= height:
@@ -408,12 +415,15 @@ def convert(job, sid, rid, at, inventory, available):
         available = [r for r in available if needed.intersection(r["covers"])] or available[-1:]
         ids = select_looks(job, at, full, available)
         looks = [Path(next(r for r in available if r["id"] == x)["path"]) for x in ids]
+        example = None if available else style_picture(job)
+        looks += [example] if example else []
         uploaded = [lumos.upload(upload_copy(p), "image-to-image") for p in [full, *looks]]
         info = saved(job, f"catalog/{sid}")
         started = lumos.submit_image_to_image(uploaded, look(job)["image"], model=IMAGE_MODEL,
                                               aspect_ratio=aspect_for(info["width"], info["height"]),
                                               resolution="2K", quality="medium")
-        task = put(job, f"image-tasks/{rid}", {**started, "dependencies": ids})
+        task = put(job, f"image-tasks/{rid}", {**started, "dependencies": ids,
+                                                **({"style_picture": example.name} if example else {})})
     if not out.is_file():
         try:
             result = lumos.wait(task["generation_id"])
