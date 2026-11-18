@@ -3,8 +3,10 @@
 Entry: `scripts/video_reskin.cmd`. Job creation:
 
 ```json
-{"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery"}
+{"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery","style":"dark"}
 ```
+
+`style` is required: `realistic` or `dark` (a key of `styles` in `assets/prompts.json`), chosen from the user's request as SKILL.md describes. The delivery is `<source name>_S01_<style>.mp4`.
 
 `init --work-order order.json` prints job_dir. Subsequent commands require `--job-dir <job_dir>`.
 
@@ -15,7 +17,7 @@ Use `--only S01` to select sources and `--segment S01:K02` for a segment; approv
 auth/login/runtime take their own account/runtime options.
 
 Job data:
-- job.json: source identity, output root, fixed 24 fps timeline.
+- job.json: source identity, output root, style, fixed 24 fps timeline.
 - catalog/: normalized media information.
 - survey/: non-game intervals, end-card boundary, semantic cut candidates and English content inventory.
 - plans/: half-open source-frame ranges, passthrough ranges and continuity.

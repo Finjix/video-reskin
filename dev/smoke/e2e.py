@@ -74,7 +74,8 @@ def main():
     if not sources:
         raise SystemExit(f"no footage matching {args.match} in {FOOTAGE}")
     folder = Path(tempfile.mkdtemp(prefix="vr-e2e-"))
-    order = {"sources": [str(p) for p in sources], "output_root": str(folder), "request": "smoke test"}
+    order = {"sources": [str(p) for p in sources], "output_root": str(folder), "request": "smoke test",
+             "style": "realistic"}
     job = Path(launcher(["init", "--work-order", "-"], json.dumps(order, ensure_ascii=False)).splitlines()[0].split(": ", 1)[1])
     for command in ("analyze", "survey", "plan"):
         launcher([command, "--job-dir", str(job)])

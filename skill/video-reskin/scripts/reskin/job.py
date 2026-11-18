@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from reskin.common import desktop, read, sha, write
+from reskin.common import ROOT, desktop, read, sha, write
 
 STATE = "job.json"
 SOURCE_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v"}
@@ -30,8 +30,10 @@ def expand_sources(entries: list) -> list[Path]:
 
 def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     sources = expand_sources(order.get("sources") or [])
-    if (order.get("style") or "realistic") != "realistic":
-        raise ValueError("only the realistic style is supported")
+    style = order.get("style")
+    styles = read(ROOT / "assets/prompts.json")["styles"]
+    if style not in styles:
+        raise ValueError(f"style must be one of {', '.join(styles)}, chosen from the user's request (got {style!r})")
     if order.get("options"):
         raise ValueError("work order options are not supported: delivery is fixed at 1080p, 24 fps")
     if job_dir:
@@ -52,7 +54,7 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
         rows.append({"id": f"S{number:02d}", "path": str(path), "name": path.stem, "sha256": sha(path),
                      "size": path.stat().st_size})
     state = {"schema": SCHEMA, "created": datetime.now().isoformat(timespec="seconds"), "delivery_dir": str(delivery),
-             "request": order.get("request", ""), "style": "realistic", "sources": rows}
+             "request": order.get("request", ""), "style": style, "sources": rows}
     write(job / STATE, state)
     return job, state
 

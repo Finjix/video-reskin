@@ -1,5 +1,7 @@
 # Review
 
+Reference-image and segment checks judge the result against the job style's target description (`styles` in `assets/prompts.json`). Changes the style calls for are not content changes.
+
 ## Segments
 
 Gemini compares each complete generated segment with the source at 6 frames/s on the same clock. Seams and transitions are not reviewed separately.

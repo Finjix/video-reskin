@@ -1,6 +1,6 @@
 # video-reskin
 
-将游戏画面转换为写实材质的 Windows Agent Skill。先看完整视频，再逐段补齐完整帧参考图、生成、审片；输出 1080p / 24 fps，最终放回非游戏画面、尾板和原声。
+将游戏画面转换为写实材质（realistic）或暗黑哥特风格（dark）的 Windows Agent Skill。先看完整视频，再逐段补齐完整帧参考图、生成、审片；输出 1080p / 24 fps，最终放回非游戏画面、尾板和原声。
 
 ## 工作流程
 
@@ -17,7 +17,7 @@
 ## 使用
 
 技能入口：`skill/video-reskin/scripts/video_reskin.cmd`。先 auth / login，再 init --work-order order.json。
-工单示例：`{"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery"}`。
+工单示例：`{"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery","style":"dark"}`。style 必填，由 agent 按用户请求判断：“转化为写实”等为 realistic，“转化为暗黑”等为 dark，都没说或都说了就先问用户。成片命名为 `<源文件名>_S01_<style>.mp4`。
 
 其余命令加 `--job-dir <任务 temp 目录>`：
 `analyze → survey → plan → refs → render → check → approve --segment S01:K01`，重复逐段循环后 assemble。
@@ -25,7 +25,7 @@
 `refs --redo --segment S01:K02` 重做本段图片。
 服务中断后复用已记录的任务 ID，生成失败则重新提交。新参考图不自动重生成已批准片段；前段变化后，后段需重新 refs 和 render。
 
-命令、任务目录、过渡权重和媒体参数见 [workflow.md](skill/video-reskin/references/workflow.md)。全部提示词在 [prompts.json](skill/video-reskin/assets/prompts.json)。
+命令、任务目录、过渡权重和媒体参数见 [workflow.md](skill/video-reskin/references/workflow.md)。全部提示词在 [prompts.json](skill/video-reskin/assets/prompts.json)，各风格的转换图、视频提示词和目标描述在其 styles 下；参考图检查和整段审核都按任务风格的目标描述判断。
 
 凭据由 Windows DPAPI 加密保存。已有工作副本和分析、参考图、审核缓存不会自动重建；完整采用新配置请新建任务。
 

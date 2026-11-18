@@ -78,6 +78,7 @@ class GateTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.job=Path(self.tmp.name)
+        m.put(self.job,'job',{'style':'realistic'})
         self.p={'total':96,'originals':[],'segments':[
             {'id':'K01','frames':[0,48],'continuous':False},
             {'id':'K02','frames':[48,96],'continuous':True}]}
@@ -362,11 +363,14 @@ class MediaTests(unittest.TestCase):
         self.run_two_segment_production(False)
 
     def run_two_segment_production(self, suitable_tail):
+        style='realistic' if suitable_tail else 'dark'
+        styles=m.prompt('styles')
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)/'temp'
             source=Path(td)/'source.mp4'
             m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=30:duration=3','-c:v','libx264','-pix_fmt','yuv420p'],source)
-            state={'delivery_dir':td,'sources':[{'id':'S01','path':str(source),'name':'sample'}]}
+            state={'delivery_dir':td,'style':style,'sources':[{'id':'S01','path':str(source),'name':'sample'}]}
+            m.put(job,'job',state)
             info=m.analyze(job,state,'S01')
             survey={'non_game':[],'end_card_start':3,'cuts':[],
                      'inventory':[{'id':'ground','name':'ground','kind':'ground','start':0,'end':3,'first_clear':0}]}
@@ -381,6 +385,7 @@ class MediaTests(unittest.TestCase):
             def image_submit(refs,text,**kw):
                 self.assertEqual(kw['resolution'],'2K')
                 self.assertEqual(kw['quality'],'medium')
+                self.assertEqual(text,styles[style]['image'])
                 key=f'image{len(image_calls)}'
                 image_calls.append(refs)
                 generations[key]=refs[0]['path']
@@ -395,6 +400,8 @@ class MediaTests(unittest.TestCase):
             def answer(kind,schema,context,media=()):
                 if schema==m.FRAMES:
                     return {'frames':[{'at':context['segment'][0],'covers':['ground']}],'references':[]}
+                if schema==m.COVER and kind!='tail':
+                    self.assertEqual(context['target_style'],styles[style]['target'])
                 if schema==m.COVER or kind=='tail':
                     if kind=='tail':
                         self.assertEqual(context['operation'],'same_shot_continuity')
@@ -404,6 +411,7 @@ class MediaTests(unittest.TestCase):
                 if context.get('operation')=='select_references':
                     return {'references':[context['available'][0]['id']]}
                 if kind in ('seam','segment'):
+                    self.assertEqual(context,{'target_style':styles[style]['target']})
                     reviews.append(kind)
                     return verdict()
                 self.fail(f'unexpected request {kind}')
@@ -432,12 +440,15 @@ class MediaTests(unittest.TestCase):
                 self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],48)
                 self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png' if suitable_tail else '-f48.png'))
                 self.assertEqual('Start from Image 1.' in video_calls[1][2],suitable_tail)
+                self.assertTrue(all(call[2].startswith(styles[style]['video']) for call in video_calls))
                 from PIL import Image,ImageChops
                 expected=m.still(job/'ai/S01-K01.mp4',47,job/'expected-tail.png')
                 if suitable_tail:
                     with Image.open(expected) as a,Image.open(video_calls[1][1][0]['path']) as b:
                         self.assertIsNone(ImageChops.difference(a,b).getbbox())
-                self.assertEqual(video_info(m.assemble(job,state,'S01',p))['frames'],72)
+                delivery=m.assemble(job,state,'S01',p)
+                self.assertEqual(delivery.name,f'sample_S01_{style}.mp4')
+                self.assertEqual(video_info(delivery)['frames'],72)
 
     def test_transition_spans_two_frames_on_each_side(self):
         from PIL import Image, ImageStat
@@ -448,7 +459,7 @@ class MediaTests(unittest.TestCase):
                       '-c:v','libx264','-pix_fmt','yuv420p'],job/f'ai/S01-{key}.mp4')
             source=job/'ai/S01-K01.mp4'
             m.put(job,'catalog/S01',video_info(source))
-            state={'delivery_dir':td,'sources':[{'id':'S01','name':'sample','path':str(source)}]}
+            state={'delivery_dir':td,'style':'realistic','sources':[{'id':'S01','name':'sample','path':str(source)}]}
             plan={'total':96,'originals':[],'segments':[
                 {'id':'K01','frames':[0,48]},{'id':'K02','frames':[48,96]}]}
             with patch.object(m,'target_size',return_value=(160,90)):
@@ -465,7 +476,7 @@ class MediaTests(unittest.TestCase):
             source=Path(td)/'source.mp4'
             m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=30:duration=5',
                   '-f','lavfi','-i','sine=frequency=440:duration=5','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac'],source)
-            state={'delivery_dir':td,'sources':[{'id':'S01','path':str(source),'name':'sample'}]}
+            state={'delivery_dir':td,'style':'realistic','sources':[{'id':'S01','path':str(source),'name':'sample'}]}
             info=m.analyze(job,state,'S01')
             self.assertEqual(info['fps'],24)
             p={'total':120,'originals':[[48,72],[96,120]],'segments':[

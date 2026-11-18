@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Restyle game videos into realistic materials using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio.
+description: Restyle game videos into realistic materials or a dark gothic style using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio.
 ---
 
 # Video reskin
@@ -17,11 +17,14 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 
 ## Production
 
-1. `init --work-order <json>`: sources and optional output_root. Defaults: realistic materials, 1080p, 24 fps.
+1. `init --work-order <json>`: sources, optional output_root and the required style, chosen from the user's request:
+   - `realistic` for requests such as 转化为写实, 写实风格 or realistic: realistic materials.
+   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: a dark gothic style.
+   Ask the user when the request names neither or both. Delivery is 1080p, 24 fps.
 2. `analyze`: build a silent 24 fps working copy at source size, scaled down to 1080 on the short side when larger. Originals stay the audio and delivery source.
 3. `survey`: Gemini watches the whole working copy once, marking non-game footage, end cards, candidate cuts and a content inventory.
 4. `plan`: the fewest segments of at most 30 seconds and at least 2 seconds when a stretch needs several, cut near semantic boundaries; gameplay slivers under half a second between non-game parts stay original. Non-game parts and end cards are restored later, not generated.
-5. `refs`: for the next unapproved segment of each source, Gemini picks full frames covering its scenes, characters, objects and ground, especially new props. The first frame is converted from its source alone; later ones also use earlier generated references. Each converted image is reviewed for realistic coverage and unchanged logos/text before rendering.
+5. `refs`: for the next unapproved segment of each source, Gemini picks full frames covering its scenes, characters, objects and ground, especially new props. The first frame is converted from its source alone; later ones also use earlier generated references. Each converted image is reviewed for coverage in the job's style and unchanged logos/text before rendering.
 6. `render`: submit the segment cut from the working copy. A segment continuing the previous shot starts from the predecessor's last frame when Gemini judges it the same shot; otherwise, and after hard cuts or non-game gaps, it starts from a converted first frame. Sources proceed one segment at a time.
 7. `check`: Gemini reviews the complete segment against the source under [review](references/review.md). For every reported issue, open the listed frames or images and verify it there.
 8. `approve --segment S01:K01` after a passed current check, or `redo --segment S01:K01 --reason "<English reason>"` (required), then render/check again. After two failed retries, compare the three versions and `select-best` (see [review](references/review.md)).
@@ -34,7 +37,7 @@ Commands accept `--job-dir <temp>`; refs/render/check/approve/redo accept `--seg
 `refs --redo --segment S01:K02` replaces that segment's references and archives the previous images.
 New references do not rerender approved videos. Once a predecessor changes, the following segment needs refs and render again: an unapproved result made from other references or after another predecessor is rendered anew and its quality retries start again. A failed generation is recorded under service-failures/ and the next run submits it again; it is not a retry. `refs --redo` is refused while another segment uses that segment's pictures.
 
-All model prompts are English and live in `assets/prompts.json`. Do not add material lists, overlay instructions or accumulated correction sentences.
+All model prompts are English and live in `assets/prompts.json`; each style's image and video prompts and its target description are under `styles`. Do not add material lists, overlay instructions or accumulated correction sentences.
 
 Final reply in the user's language: delivery folder, segment/check/retry outcomes and any unresolved issues.
 Only finished MP4s and temp/ belong in the delivery folder.

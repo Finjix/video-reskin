@@ -33,6 +33,25 @@ class SizeTests(unittest.TestCase):
         self.assertEqual(pipeline.aspect_for(1080, 3000), "9:16")          # the nearest preset (4K needs one)
 
 
+class StyleTests(unittest.TestCase):
+    def test_work_order_style(self):
+        from reskin import job
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'source.mp4'
+            source.write_bytes(b'video')
+            for style in ('realistic', 'dark'):
+                _, state = job.init({'sources': [str(source)], 'style': style}, Path(td) / style / 'temp')
+                self.assertEqual(state['style'], style)
+            for index, order in enumerate(({}, {'style': ''}, {'style': 'cartoon'})):
+                with self.assertRaisesRegex(ValueError, 'style must be one of realistic, dark'):
+                    job.init({'sources': [str(source)], **order}, Path(td) / f'bad{index}' / 'temp')
+
+    def test_every_style_has_its_prompts(self):
+        for name, prompts in pipeline.prompt('styles').items():
+            self.assertEqual(set(prompts), {'target', 'image', 'video'}, name)
+            self.assertTrue(pipeline.ascii_only(prompts), name)
+
+
 class NetTests(unittest.TestCase):
     def test_multipart(self):
         body, content_type = net.multipart([("model", "m"), ("image[]", ("a.png", b"\x89PNG", "image/png"))])

@@ -36,7 +36,8 @@ def main():
     assert report["decision"] == "pass", report
     source = folder / "素材 1.mp4"
     source.write_bytes(b"not really a video")
-    order = {"sources": [str(source)], "output_root": str(folder / "output"), "request": "中文 stdin 测试"}
+    order = {"sources": [str(source)], "output_root": str(folder / "output"), "request": "中文 stdin 测试",
+             "style": "realistic"}
     out, _ = invoke(["init", "--work-order", "-"], json.dumps(order, ensure_ascii=False))
     job = Path(out.splitlines()[0].split(": ", 1)[1])
     saved = json.loads((job / "job.json").read_text(encoding="utf-8"))

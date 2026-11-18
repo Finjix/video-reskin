@@ -61,7 +61,7 @@ SURVEY["properties"]["end_card_start"]["description"] = "Seconds; use the full v
 SURVEY["properties"]["inventory"]["description"] = "English content entries with unique IDs; all times are source seconds."
 FRAMES["properties"]["references"]["description"] = ("IDs of existing generated pictures needed by this segment; "
                                                      "reuse rather than convert duplicates.")
-COVER["properties"]["covers"]["description"] = ("Inventory IDs visibly converted to realistic materials in the result, "
+COVER["properties"]["covers"]["description"] = ("Inventory IDs visibly shown in the target style in the result, "
                                                 "not merely present in the source.")
 TAIL["properties"]["ok"]["description"] = "True only when Image 1 and Image 2 are consecutive views of the same continuous shot."
 REVIEW["properties"]["issues"]["description"] = ("Unresolved defects relative to source, in seconds from the comparison "
@@ -70,6 +70,11 @@ REVIEW["properties"]["issues"]["description"] = ("Unresolved defects relative to
 
 def prompt(kind):
     return read(ROOT / "assets/prompts.json")[kind]
+
+
+def look(job):
+    """The job style's prompts: its target description and its image and video prompts."""
+    return prompt("styles")[read(job / JOB.STATE)["style"]]
 
 
 def target_size(width, height):
@@ -405,7 +410,7 @@ def convert(job, sid, rid, at, inventory, available):
         looks = [Path(next(r for r in available if r["id"] == x)["path"]) for x in ids]
         uploaded = [lumos.upload(upload_copy(p), "image-to-image") for p in [full, *looks]]
         info = saved(job, f"catalog/{sid}")
-        started = lumos.submit_image_to_image(uploaded, prompt("image"), model=IMAGE_MODEL,
+        started = lumos.submit_image_to_image(uploaded, look(job)["image"], model=IMAGE_MODEL,
                                               aspect_ratio=aspect_for(info["width"], info["height"]),
                                               resolution="2K", quality="medium")
         task = put(job, f"image-tasks/{rid}", {**started, "dependencies": ids})
@@ -419,7 +424,8 @@ def convert(job, sid, rid, at, inventory, available):
         net.download(lumos.result_urls(result)[0], out)
     coverage = saved(job, f"references/{rid}-coverage")
     if coverage.get("sha256") != sha(out):
-        answer = ask("frames", COVER, {"operation": "inspect_realistic_coverage", "inventory": inventory},
+        answer = ask("frames", COVER, {"operation": "inspect_style_coverage", "target_style": look(job)["target"],
+                                     "inventory": inventory},
                      [winky.inline(full), winky.inline(out)])
         coverage = put(job, f"references/{rid}-coverage", {**answer, "sha256": sha(out)})
     if not coverage["ok"]:
@@ -517,7 +523,7 @@ def render(job, sid, plan, seg):
         raise ValueError("reference clip exceeds upload limit")
     if not r.get("generation_id"):
         uses_tail = references[0]["id"] == f"{key}-tail"
-        text = prompt("video") + (" " + prompt("continuation") if uses_tail else "")
+        text = look(job)["video"] + (" " + prompt("continuation") if uses_tail else "")
         started = lumos.submit_video_edit(lumos.upload(clip, "video-to-video"),
                                           [lumos.upload(upload_copy(Path(x["path"])), "video-to-video")
                                            for x in references], text)
@@ -585,7 +591,7 @@ def assemble(job, state, sid, plan):
     manifest.write_text("".join("file '" + str(p.resolve()).replace("\\", "/").replace("'", "'\\''") + "'\n"
                                 for p in clips), encoding="utf-8")
     original = next(s for s in state["sources"] if s["id"] == sid)
-    output = Path(state["delivery_dir"]) / f"{original['name']}_{sid}_realistic.mp4"
+    output = Path(state["delivery_dir"]) / f"{original['name']}_{sid}_{state['style']}.mp4"
     args = ["-f", "concat", "-safe", "0", "-i", manifest]
     if video_info(original["path"])["audio"]:
         args += ["-i", original["path"], "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-af", "apad"]
@@ -632,7 +638,8 @@ def check(job, sid, plan, seg):
     a, b = seg["frames"]
     rows = pieces(plan, seg["id"])
     transition = join_transition_frames(rows[-2] if len(rows) > 1 else None, rows[-1])
-    segment = review_clip(job, sid, a / FPS, b / FPS, job / "ai" / f"{sid}-{seg['id']}.mp4", 0, "segment", folder, {})
+    segment = review_clip(job, sid, a / FPS, b / FPS, job / "ai" / f"{sid}-{seg['id']}.mp4", 0, "segment", folder,
+                          {"target_style": look(job)["target"]})
     answer = {"token": check_token(job, sid, plan, seg), "seam": None, "segment": segment,
               "verdict": segment["verdict"], "status": "complete",
               "decision": {"transition_frames": transition,

@@ -39,6 +39,13 @@ found had already appeared in a segment check, and each round cost a 207 MB, 86-
 needs a passed check of the current result, and there is no whole-film review. Without the gate one run chained a
 whole shot from a flawed redo and re-rendered two clean segments (2026-11-10).
 
+**Dark style** (user's example deliveries, 2026-11-18: GOFCN69238 and GOFCN69240 小兵数字门, GOFCN69241
+大炮出兵数字门, all 1080x1920). Only the environment changes: road, railings, terrain, sky and distant buildings
+become a gothic night world with firelight, skull banners and spiked parapets, keeping the layout. Soldiers, barrels,
+number gates, cannons, effects, the logo, the disclaimer caption and the end card stay as they were, only relit.
+The same gameplay appears in two themes (a frozen abyss with blue fire in 69238, lava and a blood moon in 69240;
+69241 is frozen), so the prompt names only the style, like the realistic one. Not yet checked in a live run.
+
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
 by the video model and may show other digits for a few frames.
