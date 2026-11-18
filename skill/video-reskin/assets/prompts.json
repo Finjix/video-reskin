@@ -11,8 +11,8 @@
       "video": "Edit the video: replace its materials to match the reference images."
     },
     "dark": {
-      "target": "A dark gothic style on all game content; logos, text, numbers and HUD labels unchanged.",
-      "image": "Convert Image 1 to a dark gothic style, but keep all logos, text, numbers and HUD labels unchanged and exclude them from style conversion.",
+      "target": "A dark fantasy night in the same stylized 3D game look, with deep blue and purple shadows, glowing firelight and vivid colors; logos, text, numbers and HUD labels unchanged.",
+      "image": "Convert Image 1 to a dark fantasy night in the same stylized 3D game look, with deep blue and purple shadows, glowing firelight and vivid colors, but keep all logos, text, numbers and HUD labels unchanged and exclude them from style conversion.",
       "video": "Edit the video: replace its style to match the reference images."
     }
   }

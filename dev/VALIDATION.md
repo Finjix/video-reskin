@@ -44,7 +44,11 @@ whole shot from a flawed redo and re-rendered two clean segments (2026-11-10).
 become a gothic night world with firelight, skull banners and spiked parapets, keeping the layout. Soldiers, barrels,
 number gates, cannons, effects, the logo, the disclaimer caption and the end card stay as they were, only relit.
 The same gameplay appears in two themes (a frozen abyss with blue fire in 69238, lava and a blood moon in 69240;
-69241 is frozen), so the prompt names only the style, like the realistic one. Not yet checked in a live run.
+69241 is frozen), so the prompt names only the style, like the realistic one. The samples stay saturated: deep
+blue/purple shadows, bright fire, characters as bright as before. A "dark gothic game art" image prompt applied to
+every element (GOFCN69114 射冰版, 2026-11-18) gave near-black, grey frames instead: the snow ground turned to dark
+stone and fence posts to rune pillars. Hence no "gothic": the prompt names a dark fantasy night in the game's own
+stylized 3D look with blue/purple shadows, firelight and vivid colors. That wording is not yet checked in a live run.
 
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn

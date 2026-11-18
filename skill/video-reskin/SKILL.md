@@ -1,6 +1,6 @@
 ---
 name: video-reskin
-description: Restyle game videos into realistic materials or a dark gothic style using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio.
+description: Restyle game videos into realistic materials or a dark fantasy night look using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio.
 ---
 
 # Video reskin
@@ -19,7 +19,7 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 
 1. `init --work-order <json>`: sources, optional output_root and the required style, chosen from the user's request:
    - `realistic` for requests such as 转化为写实, 写实风格 or realistic: realistic materials.
-   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: a dark gothic style.
+   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: a dark fantasy night in the game's own stylized 3D look.
    Ask the user when the request names neither or both. Delivery is 1080p, 24 fps.
 2. `analyze`: build a silent 24 fps working copy at source size, scaled down to 1080 on the short side when larger. Originals stay the audio and delivery source.
 3. `survey`: Gemini watches the whole working copy once, marking non-game footage, end cards, candidate cuts and a content inventory.
