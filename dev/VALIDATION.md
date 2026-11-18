@@ -52,7 +52,10 @@ night with pale snow, glowing cracked ice, amber lanterns, weathered dark wood a
 GOF3D10232 射冰取鱼 frames at 0 s and 7.5 s: the prompt alone drew the banners, lanterns and dark wood but added a
 moon whenever it said "moonlit" and left the ice dull; the example picture alone matched ice, snow and blue but
 dropped banners and lanterns; the example picture plus the descriptive prompt matched on both frames. Hence the
-picture is the first conversion's look and the prompt names the traits. Not yet checked through a full video.
+picture is the first conversion's look and the prompt names the traits. Snow and ice are left out of the prompt
+because not every game is set in snow: without them a log-sawing conveyor frame (`D:/temporary/v.mp4`) became a dark
+night with lanterns and skull banners and gained no snow, while the 射冰取鱼 frame at 7.5 s kept its pale snow and
+glowing ice from the picture. Not yet checked through a full video.
 
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn

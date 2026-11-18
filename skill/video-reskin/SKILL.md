@@ -19,7 +19,7 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 
 1. `init --work-order <json>`: sources, optional output_root and the required style, chosen from the user's request:
    - `realistic` for requests such as 转化为写实, 写实风格 or realistic: realistic materials.
-   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: an eerie snowy night in the game's own stylized 3D look.
+   - `dark` for requests such as 转化为暗黑, 暗黑风格 or dark: an eerie dark night in the game's own stylized 3D look.
    Ask the user when the request names neither or both. Delivery is 1080p, 24 fps.
 2. `analyze`: build a silent 24 fps working copy at source size, scaled down to 1080 on the short side when larger. Originals stay the audio and delivery source.
 3. `survey`: Gemini watches the whole working copy once, marking non-game footage, end cards, candidate cuts and a content inventory.
