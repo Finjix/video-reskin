@@ -6,7 +6,7 @@ Entry: `scripts/video_reskin.cmd`. Job creation:
 {"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery","style":"dark"}
 ```
 
-`style` is required: `realistic` or `dark` (a key of `styles` in `assets/prompts.json`), chosen from the user's request as SKILL.md describes. A style may have an example picture, `assets/styles/<style>.jpg`, which the first converted frame of each source uses as its look; image-tasks/ records it as style_picture. The delivery is `<source name>_S01_<style>.mp4`.
+`style` is required: `realistic` or `dark` (a key of `styles` in `assets/prompts.json`), chosen from the user's request as SKILL.md describes. A style may have example pictures, `assets/styles/<style>/*.jpg`, which the first converted frame of each source uses for its palette, lighting and mood, not its content; image-tasks/ records them as style_pictures. The delivery is `<source name>_S01_<style>.mp4`.
 
 `init --work-order order.json` prints job_dir. Subsequent commands require `--job-dir <job_dir>`.
 
