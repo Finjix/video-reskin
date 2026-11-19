@@ -437,11 +437,11 @@ class MediaTests(unittest.TestCase):
                     m.approve(job,'S01',p,s)
                 self.assertEqual(reviews,['segment','segment'])
                 self.assertEqual(len(image_calls),2)
-                # The first conversion takes the style's example pictures, if it has any; later ones the earlier result.
-                examples=sorted((m.ROOT/'assets/styles'/style).glob('*.jpg'))
+                # The first conversion takes the style's example picture, if it has one; later ones the earlier result.
+                example=m.ROOT/'assets/styles'/f'{style}.jpg'
                 first=[Path(x['path']).name for x in image_calls[0][1:]]
-                self.assertEqual(first,[p.name for p in examples])
-                self.assertEqual(style=='dark',len(examples)==3)
+                self.assertEqual(first,[example.name] if example.is_file() else [])
+                self.assertEqual(style=='dark',example.is_file())
                 self.assertTrue(all(Path(x['path']).suffix=='.png' for x in image_calls[1][1:]))
                 self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],48)
                 self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png' if suitable_tail else '-f48.png'))

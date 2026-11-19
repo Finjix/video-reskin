@@ -56,11 +56,6 @@ picture is the first conversion's look and the prompt names the traits. Snow and
 because not every game is set in snow: without them a log-sawing conveyor frame (`D:/temporary/v.mp4`) became a dark
 night with lanterns and skull banners and gained no snow, while the 射冰取鱼 frame at 7.5 s kept its pale snow and
 glowing ice from the picture. Not yet checked through a full video.
-Example pictures widened (2026-11-19, user's request): lanterns, dark wood and skull banners leave the prompt, which
-now names only palette, lighting and mood, and asks to keep Image 1's scene and not copy the examples' content.
-`assets/styles/dark/` holds the earlier picture (1.jpg) plus one frame from each example delivery, logo and
-disclaimer cropped off (2.jpg 69238 at 4.4 s, 3.jpg 69241 at 9.0 s). The red lava frame of 69240 was left out at the user's
-request, keeping one deep-blue palette. Not yet checked on a conversion.
 
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
