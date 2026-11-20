@@ -22,7 +22,7 @@ MAX_RETRIES = 2
 TRANSITION_FRAMES = 4          # Gameplay joins only; original/non-game/end-card boundaries are cuts.
 SHORT_SIDE = 1080              # working copies at most, deliveries exactly (Seedance 2.5's largest render size)
 CRF = 16                       # every intermediate x264 encode
-DELIVERY = ["-c:v", "libx264", "-preset", "slow", "-crf", "20", "-pix_fmt", "yuv444p"]   # the finished MP4
+DELIVERY = ["-c:v", "libx264", "-profile:v", "high", "-preset", "medium", "-crf", "14", "-pix_fmt", "yuv420p"]
 REVIEW_FPS = 6                 # frames per second Gemini samples from every video
 IMAGE_MODEL = "gpt-image-2.6-sunburst"     # on Lumos
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
@@ -604,7 +604,8 @@ def assemble(job, state, sid, plan):
     output = Path(state["delivery_dir"]) / f"{original['name']}_{sid}_{state['style']}.mp4"
     args = ["-f", "concat", "-safe", "0", "-i", manifest]
     if video_info(original["path"])["audio"]:
-        args += ["-i", original["path"], "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-af", "apad"]
+        args += ["-i", original["path"], "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-profile:a", "aac_low",
+                 "-ar", "48000", "-ac", "2", "-b:a", "128k", "-af", "apad"]
     count = plan["total"]
     ff([*args, *DELIVERY, "-r", str(FPS), "-t", str(count / FPS), "-movflags", "+faststart"], output)
     if abs(video_info(output)["duration"] - count / FPS) > 1 / FPS + .001:

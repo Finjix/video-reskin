@@ -28,7 +28,7 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
 6. `render`: submit the segment cut from the working copy. A segment continuing the previous shot starts from the predecessor's last frame when Gemini judges it the same shot; otherwise, and after hard cuts or non-game gaps, it starts from a converted first frame. Sources proceed one segment at a time.
 7. `check`: Gemini reviews the complete segment against the source under [review](references/review.md). For every reported issue, open the listed frames or images and verify it there.
 8. `approve --segment S01:K01` after a passed current check, or `redo --segment S01:K01 --reason "<English reason>"` (required), then render/check again. After two failed retries, compare the three versions and `select-best` (see [review](references/review.md)).
-9. Repeat refs/render/check/approve, then `assemble`: every segment approved, non-game footage and end cards restored on the source clock, original audio muxed, 1080p 24 fps. There is no whole-film model review.
+9. Repeat refs/render/check/approve, then run `assemble` to restore non-game footage and end cards on the source clock and encode the delivery. Export MP4 with H.264 High, 8-bit yuv420p, CRF 14, preset medium, a 1080-pixel short side, and 24 fps. Encode original audio, when present, as 48 kHz stereo AAC-LC at 128 kbps. There is no whole-film model review.
 
 ## Recovery and delivery
 
