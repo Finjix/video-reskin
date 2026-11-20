@@ -12,7 +12,7 @@
 6. 每段最多 2 次质量重试；三版都不合格时用 select-best 选最好的一版并记录已知问题。生成服务失败会记录并重新提交，不计重试。
 7. 游戏片段之间做 4 帧过渡，与非游戏画面、尾板之间硬接，原声对齐。
 
-成片为启用 faststart 的 MP4，视频采用 H.264 High、8-bit yuv420p、CRF 14、medium 预设，短边 1080、24 fps。源视频有音轨时，原声转码为 AAC-LC、48 kHz、双声道、128 kbps。
+成片为启用 faststart 的 MP4，视频采用 H.264 High、8-bit yuv420p、CRF 16、medium 预设，短边 1080、24 fps。源视频有音轨时，原声转码为 AAC-LC、48 kHz、双声道、128 kbps。
 
 审核规则见 [review.md](skill/video-reskin/references/review.md)：整段按正常播放观感验收，UI/HUD/文字宽松；参考图严格要求 Logo 和文字保持原样。
 

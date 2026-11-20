@@ -61,8 +61,8 @@ glowing ice from the picture. Not yet checked through a full video.
 sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
 by the video model and may show other digits for a few frames.
 
-**Encoding.** Working copies are at most 1080 on the short side and intermediate encodes use CRF 16. Delivery follows
-the GOFCN68809 reference: faststart MP4, H.264 High, 8-bit yuv420p, CRF 14, preset medium and 24 fps.
+**Encoding.** Working copies are at most 1080 on the short side and intermediate encodes use CRF 16. Delivery uses
+faststart MP4, H.264 High, 8-bit yuv420p, CRF 16, preset medium and 24 fps.
 Source audio is encoded as 48 kHz stereo AAC-LC at 128 kbps when present.
 
 ## Offline checks
