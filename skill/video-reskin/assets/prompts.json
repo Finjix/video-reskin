@@ -11,8 +11,8 @@
       "video": "Edit the video: replace its materials to match the reference images."
     },
     "dark": {
-      "target": "An eerie dark night in the same stylized 3D game look and terrain, with deep blue shadows, warm lantern glow, weathered dark wood and skull banners; logos, text, numbers and HUD labels unchanged.",
-      "image": "Convert Image 1 to an eerie dark night in the same stylized 3D game look, matching the style of the other images and keeping its terrain, with deep blue shadows, warm lantern glow, weathered dark wood and skull banners, but keep all logos, text, numbers and HUD labels unchanged and exclude them from style conversion.",
+      "target": "An eerie dark night in the same stylized 3D game look and terrain, with deep blue shadows, warm lantern glow, weathered dark wood and banners bearing pale ice-blue snowflake motifs; logos, text, numbers and HUD labels unchanged.",
+      "image": "Convert Image 1 to an eerie dark night in the same stylized 3D game look, matching the style of the other images and keeping its terrain, with deep blue shadows, warm lantern glow, weathered dark wood and banners bearing pale ice-blue snowflake motifs, but keep all logos, text, numbers and HUD labels unchanged and exclude them from style conversion.",
       "video": "Edit the video: replace its style to match the reference images."
     }
   }
