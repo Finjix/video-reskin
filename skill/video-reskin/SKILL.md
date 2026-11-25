@@ -1,9 +1,13 @@
 ---
 name: video-reskin
-description: Restyle game videos into realistic materials or a dark fantasy night look using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio.
+description: Restyle game videos into realistic materials or a dark fantasy night look using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio. Also replace one prominent game element at a time (换元素), with multiple independently named variants per source.
 ---
 
 # Video reskin
+
+For 换元素 or an object substitution, use the [element workflow](references/elements.md). Survey the source once and compare candidates at phone playback size. Favor repeated stockpiles, foreground objects and items that dominate a recognizable shot. Record when the viewer first sees the change, where it is most obvious and when it recurs. Choose substitutes whose silhouette, material or color reads at a glance. Start every variant from the original.
+
+The following sections apply to the realistic and dark styles.
 
 Use Windows and the bundled entry point:
 `& "<skill_root>/scripts/video_reskin.cmd" <command> ...`.

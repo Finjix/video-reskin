@@ -783,7 +783,9 @@ def main():
     p.add_argument("--work-order", type=Path)
     p.add_argument("--segment")
     p.add_argument("--generation-id")
-    p.add_argument("--only", nargs="*")
+    p.add_argument("--only", nargs="*", help="source/segment IDs, or V01 V02 ... for element variants")
+    p.add_argument("--input", type=Path, help="elements variant plan JSON")
+    p.add_argument("--at", type=float, help="source playback time in seconds for element survey or check")
     p.add_argument("--reason", help="English explanation (redo, select-best)")
     p.add_argument("--redo", action="store_true", help="explicitly redo this segment's reference images")
     args, extra = p.parse_known_args()
@@ -801,13 +803,19 @@ def main():
             job, _ = JOB.init(order, args.job_dir)
             print(f"job_dir: {job}")
             return
-        if args.command in ("approve", "redo", "select-best") and not args.segment:
-            raise ValueError("--segment is required for approve, redo and select-best")
         if not args.job_dir:
             raise ValueError("--job-dir is required")
-        runtime.ensure("media")
         job = args.job_dir.resolve()
         state = load(job)
+        if state["style"] == "elements":
+            from reskin import elements
+            runtime.ensure("media")
+            return elements.dispatch(args, job, state)
+        if args.input or args.at is not None:
+            raise ValueError("--input and --at require an elements job")
+        if args.command in ("approve", "redo", "select-best") and not args.segment:
+            raise ValueError("--segment is required for approve, redo and select-best")
+        runtime.ensure("media")
         errors = []
         selected = args.only or []
         for source in state["sources"]:

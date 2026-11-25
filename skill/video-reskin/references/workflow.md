@@ -1,5 +1,7 @@
 # Commands and data
 
+For a single-element substitution or multiple object variants, use the [element work order and commands](elements.md). The following commands describe full-frame style changes.
+
 Entry: `scripts/video_reskin.cmd`. Job creation:
 
 ```json

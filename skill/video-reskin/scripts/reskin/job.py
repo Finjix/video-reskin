@@ -32,9 +32,11 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     sources = expand_sources(order.get("sources") or [])
     style = order.get("style")
     styles = read(ROOT / "assets/prompts.json")["styles"]
-    if style not in styles:
-        raise ValueError(f"style must be one of {', '.join(styles)}, chosen from the user's request (got {style!r})")
+    if style not in (*styles, "elements"):
+        raise ValueError(f"style must be one of {', '.join(styles)}, elements (got {style!r})")
     if order.get("options"):
+        if style == "elements":
+            raise ValueError("elements uses the source dimensions and timing; work order options are not supported")
         raise ValueError("work order options are not supported: delivery is fixed at 1080p, 24 fps")
     if job_dir:
         job = Path(job_dir).resolve()
@@ -44,8 +46,11 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
     else:
         root = Path(order.get("output_root") or desktop()).expanduser().resolve()
         stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-        delivery = root / f"视频换风格_{stamp}"
+        label = "视频换元素" if style == "elements" else "视频换风格"
+        delivery = root / f"{label}_{stamp}"
         job = delivery / "temp"
+    if style == "elements" and order.get("output_root"):
+        delivery = Path(order["output_root"]).expanduser().resolve()
     if (job / STATE).is_file():
         raise FileExistsError(f"a job already exists in {job}; continue it with --job-dir, or init a new one")
     job.mkdir(parents=True, exist_ok=True)
@@ -55,6 +60,9 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
                      "size": path.stat().st_size})
     state = {"schema": SCHEMA, "created": datetime.now().isoformat(timespec="seconds"), "delivery_dir": str(delivery),
              "request": order.get("request", ""), "style": style, "sources": rows}
+    if style == "elements":
+        from reskin.elements import variants_from_order
+        state["variants"] = variants_from_order(order, rows, delivery) if "variants" in order else []
     write(job / STATE, state)
     return job, state
 
