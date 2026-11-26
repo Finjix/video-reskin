@@ -506,11 +506,9 @@ def dispatch(args, job, state):
                 variants = variants_from_order(order, state["sources"], Path(state["delivery_dir"]), job)
                 state["variants"] = variants
                 state["surveys"] = order["surveys"]
-                if "generation_limit" in order:
-                    state["generation_limit"] = element_seedance.generation_limit(order["generation_limit"])
                 write(job / jobs.STATE, state)
         print(json.dumps({"variants": state["variants"], "planned_segments": sum(len(v.get("seedance", {}).get("segments", []))
-                         for v in state["variants"]), "generation_limit": state.get("generation_limit", 0)}, ensure_ascii=False))
+                         for v in state["variants"])}, ensure_ascii=False))
         return
     survey = args.command in ("analyze", "survey")
     if not survey and args.command not in ("refs", "render", "check", "approve", "assemble", "status"):

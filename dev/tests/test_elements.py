@@ -25,7 +25,7 @@ class ElementTests(unittest.TestCase):
         pipeline.ff(["-f", "lavfi", "-i", "color=black:s=64x48:r=30:d=1", "-f", "lavfi", "-i",
                      "sine=frequency=330:duration=1", "-c:v", "libx264", "-c:a", "aac"], self.original)
         Image.new("RGB", (64, 48), "blue").save(self.reference)
-        self.order = {"style": "elements", "generation_limit": 12, "sources": [str(self.original)], "output_root": str(self.root / "delivery"),
+        self.order = {"style": "elements", "sources": [str(self.original)], "output_root": str(self.root / "delivery"),
                       "variants": [
                           self.variant("蓝箱", "blue case", [[3, 6], [10, 20]], "BLUE_CASE"),
                           self.variant("红箱.mp4", "red case", [[2, 15]], "RED_CASE")]}

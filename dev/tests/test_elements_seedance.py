@@ -18,7 +18,7 @@ class SeedanceSegmentTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name)
-        write(self.folder / "job.json", {"generation_limit": 12})
+        write(self.folder / "job.json", {})
         video = self.folder / "source.mp4"
         # Exactly one white picture among the black pictures distinguishes the selected index from either neighbour.
         pipeline.ff(["-f", "lavfi", "-i", "color=black:s=64x48:r=120:d=0.25", "-vf",
@@ -60,20 +60,15 @@ class SeedanceSegmentTests(unittest.TestCase):
     def request(self, sequence=1):
         return next((self.folder / "seedance").glob(f"{sequence:02}-*/request.json"))
 
-    def test_job_limit_blocks_new_submissions_and_allows_completed_results(self):
-        write(self.folder / "job.json", {})
-        with self.assertRaisesRegex(ValueError, "generation_limit"):
-            self.obtain(self.segment)
-        self.submit.assert_not_called()
-        write(self.folder / "job.json", {"generation_limit": 1})
-        self.obtain(self.segment)
-        with self.assertRaisesRegex(ValueError, "generation_limit"):
-            self.obtain({**self.segment, "prompt": "another design"})
-        self.assertEqual(self.obtain(self.segment)[0]["generation_id"], "g1")
-        self.assertEqual(self.submit.call_count, 1)
+    def test_new_and_legacy_orders_submit_and_reuse_without_a_job_limit(self):
+        for index, order in enumerate(({}, {"generation_limit": 0}), 1):
+            write(self.folder / "job.json", order)
+            segment = {**self.segment, "prompt": f"design {index}"}
+            self.assertEqual(self.obtain(segment)[0]["generation_id"], f"g{index}")
+            self.assertEqual(self.obtain(segment)[0]["generation_id"], f"g{index}")
+            self.assertEqual(self.submit.call_count, index)
 
     def test_reference_upload_failure_never_reserves_a_paid_attempt(self):
-        write(self.folder / "job.json", {"generation_limit": 1})
         with patch.object(lumos, "upload", side_effect=OSError("upload interrupted")):
             with self.assertRaises(OSError):
                 self.obtain(self.segment)
@@ -116,7 +111,7 @@ class SeedanceSegmentTests(unittest.TestCase):
         self.assertEqual(read(self.request())["failed_generation_ids"], ["g1", "g2"])
 
     def test_reservations_serialize_and_follow_a_variant_through_plan_reordering(self):
-        order = {"generation_limit": 12, "variants": [{"id": "V01", "name": "wood"}, {"id": "V02", "name": "ice"}]}
+        order = {"variants": [{"id": "V01", "name": "wood"}, {"id": "V02", "name": "ice"}]}
         write(self.folder / "job.json", order)
         barrier = Barrier(6)
         def reserve(i):

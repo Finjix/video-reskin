@@ -157,12 +157,6 @@ def segment_folder(folder, index, key):
     return expected
 
 
-def generation_limit(value):
-    if type(value) is not int or value < 0:
-        raise ValueError("generation_limit must be a nonnegative total number of video submissions for this job")
-    return value
-
-
 def submission_history(job, ledger, names, attempt, order):
     """Import old request IDs and the earlier key-only reservations once, including failures."""
     old = read(ledger) if ledger.exists() else []
@@ -236,18 +230,15 @@ def range_exhausted(rows, attempt, names, limit):
 def reserve_submission(job, key, source_hash, slot, span, *, check_only=False):
     """Reserve before the paid POST, even when its response might never arrive."""
     if job is None:
-        raise ValueError("a job with a generation_limit is required before submitting a new Seedance task")
+        raise ValueError("a job directory is required before submitting a new Seedance task")
     job = job.resolve()
     state = job / "job.json"
     with runtime.locked(str(state)):
         order = read(state)
-        limit = generation_limit(order.get("generation_limit", 0))
         ledger = job / "elements" / "submissions.json"
         names = {v["id"]: unicodedata.normalize("NFKC", v["name"]).casefold() for v in order.get("variants", [])}
         attempt = {"key": key, "source": source_hash, "variant": names.get(slot, slot), "slot": slot, "range": span}
         history = submission_history(job, ledger, names, attempt, order)
-        if len(history) >= limit:
-            raise ValueError(f"Seedance generation_limit reached ({len(history)}/{limit}); existing results remain reusable")
         from reskin.pipeline import MAX_RETRIES
         segment_limit = 1 + MAX_RETRIES
         if range_exhausted(history, attempt, names, segment_limit):
