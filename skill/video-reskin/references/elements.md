@@ -41,6 +41,8 @@
 
 ## 由 Seedance 编辑视频
 
+新建替代物参考图统一通过 Lumos 图生图。阶段中省略 `references`，填写原片帧号 `reference_frame` 和静帧说明 `reference_prompt`。默认取该阶段首帧并沿用阶段提示词。比如冻木可写“沿用原木模型，包一层可见树皮的厚冰”。先用 `plan` 本地查看 `image_tasks` 的数量。执行 `refs --job-dir <工作区>/temp --only V01` 才会提交这些生图任务。它们独立于视频提交额度。核对返回图片后再运行 `render`。同一原帧和设计重复使用时会复用已生成的图片，已有成图可直接写入 `references`。
+
 每个替换区段向 Seedance 提交对应的原片视频、至少一张替代物参考图以及编辑说明。参考板用于选图，将该阶段清晰、匹配视角的图放入 `references`。在 `prompt` 写明原对象、替代物的结构、在整段动作中的变化，以及需要保留的镜头、角色、文字和遮挡关系。Seedance 返回的视频构成成片中的替换画面。后期负责裁切、对齐、拼接原片、恢复原声与尾板，并制作审核材料。历史工单已有的本地素材与成片可供回看。
 
 **切片与换风格共用同一个规划器。** 工单可用 `surveys.S01` 传入换风格勘察得到的 `non_game`、`end_card_start`、`cuts`（秒）。同一原片的各版共用这份勘察。连续玩法沿用换风格的最少段数和语义切点规则，30 秒是服务上限。锤击、运输、收钱等写进 `seedance.stages`，原生帧范围用来安排参考和提示。规划器把同一生成片段覆盖的动作合并为一次请求。整段没有目标时跳过，片段内目标全离场的画面从原片恢复。
@@ -79,7 +81,7 @@
       ],
       "seedance": {
         "stages": [
-          {"range": [0, 180], "references": ["D:/work/ref/bamboo-cut.png"],
+          {"range": [0, 180], "reference_frame": 24, "reference_prompt": "Give the harvested logs thick hollow bamboo walls and raised nodes.",
            "prompt": "Replace the original logs with thick hollow bamboo. Keep the visible nodes and tube walls through the cut. Preserve camera movement, tools and text."},
           {"range": [300, 525], "references": ["D:/work/ref/bamboo-stack.png", "D:/work/ref/tipper.png"],
            "prompt": "Show hollow bamboo from pickup through loading. When the truck arrives, give it a riveted tipper bed with sloping sides. Preserve the order of the actor, load, rails and bed as they overlap."}

@@ -152,6 +152,23 @@ class ElementTests(unittest.TestCase):
                 self.action(command)
         self.submit.assert_not_called()
 
+    def test_lumos_reference_generation_and_reuse(self):
+        variant = self.order["variants"][0]
+        stage = variant["seedance"]["segments"][0]
+        del stage["references"]
+        stage.update(reference_frame=4, reference_prompt="Show the blue case.")
+        self.plan([variant])
+        with patch.object(lumos, "submit_image_to_image", return_value={"generation_id": "image-1"}) as submit, \
+             patch.object(lumos, "wait", return_value={}), patch.object(lumos, "result_urls", return_value=["url"]), \
+             patch.object(net, "download", side_effect=lambda url, path: shutil.copyfile(self.reference, path)):
+            refs = self.action("refs")["references"]
+            self.assertTrue(all(Path(p).is_file() for p in refs))
+            self.action("refs")
+            submit.assert_called_once()
+            self.assertEqual(submit.call_args.kwargs["model"], pipeline.IMAGE_MODEL)
+            self.assertIn("Show the blue case.", submit.call_args.args[1])
+        self.submit.assert_not_called()
+
     def test_many_action_notes_use_the_same_semantic_cuts_as_style_edits(self):
         times = [i / 30 for i in range(2101)]
         survey = {"non_game": [{"start": 7, "end": 9}], "end_card_start": 65,

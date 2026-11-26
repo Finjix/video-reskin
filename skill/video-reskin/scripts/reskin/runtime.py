@@ -80,9 +80,8 @@ def locked(name: str):
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / (hashlib.sha256(name.encode()).hexdigest() + ".lock")
     with path.open("a+b") as stream:
-        stream.seek(0, 2)
-        if not stream.tell():
-            stream.write(b"0"); stream.flush()
+        # Windows byte-range locking permits locking beyond EOF. Writing a marker
+        # before taking the lock can race with another caller that already owns it.
         deadline = time.monotonic() + 1800
         while True:
             try:

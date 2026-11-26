@@ -65,7 +65,7 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
         from reskin.element_seedance import generation_limit
         state["generation_limit"] = generation_limit(order.get("generation_limit", 0))
         state["surveys"] = order.get("surveys", {})
-        state["variants"] = variants_from_order(order, rows, delivery) if "variants" in order else []
+        state["variants"] = variants_from_order(order, rows, delivery, job) if "variants" in order else []
     write(job / STATE, state)
     return job, state
 

@@ -72,7 +72,7 @@ def call(method: str, path: str, value=None, *, form: tuple[bytes, str] | None =
                                                                               "Accept": "application/json"}, timeout=timeout)
                 reply = net.decode_json(payload)
             else:
-                attempts = 1 if method == "POST" and path == "/generations/video-to-video" else 4
+                attempts = 1 if method == "POST" and path in ("/generations/video-to-video", "/generations/image-to-image") else 4
                 reply = net.json_call(method, url, value, headers=headers, timeout=timeout, attempts=attempts)
         except net.HttpError as error:
             if error.status == 401 and attempt == 0:

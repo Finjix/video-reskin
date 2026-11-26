@@ -14,12 +14,13 @@ MODEL = lumos.VIDEO_MODEL
 RESOLUTION = lumos.VIDEO_RESOLUTION
 
 
-def plan(value, ranges, label, clock, survey=None):
-    from reskin.pipeline import FPS, build_plan
+def plan(value, ranges, label, clock, survey=None, *, job=None, source=None, design=None):
+    from reskin.pipeline import FPS, IMAGE_MODEL, build_plan
     segments = value.get("stages", value.get("segments")) if isinstance(value, dict) else None
     if not isinstance(segments, list) or not segments:
         raise ValueError(f"{label}: seedance.segments must describe the original video intervals to edit")
     result = []
+    recipes = {}
     union = []
     for segment in segments:
         if not isinstance(segment, dict):
@@ -29,6 +30,17 @@ def plan(value, ranges, label, clock, survey=None):
                 or not 0 <= span[0] < span[1] or (union and span[0] < union[-1][1])):
             raise ValueError(f"{label}: Seedance frame intervals must be ordered and disjoint")
         references = segment.get("references")
+        if references is None and job is not None:
+            frame = segment.get("reference_frame", span[0])
+            description = segment.get("reference_prompt", segment.get("prompt"))
+            if type(frame) is not int or not span[0] <= frame < span[1] or not isinstance(description, str) or not description.strip():
+                raise ValueError(f"{label}: invalid reference_frame or reference_prompt")
+            edit = (f"Edit this gameplay still in its original art style. Target design: {design}. {description} "
+                    "Keep camera, other objects, character and interface in place. " + lumos.CASH_GUIDANCE)
+            key = digest([source["sha256"], frame, edit, IMAGE_MODEL, "2K", "medium"])
+            output = str((job / "elements" / "references" / key / "result.png").resolve())
+            recipes[output] = {"frame": frame, "prompt": edit, "model": IMAGE_MODEL}
+            references = [output]
         if (not isinstance(references, list) or not 1 <= len(references) <= 30
                 or any(not isinstance(p, str) or not p.strip() for p in references)):
             raise ValueError(f"{label}: provide 1 to 30 reference images per Seedance segment")
@@ -87,7 +99,45 @@ def plan(value, ranges, label, clock, survey=None):
                   "Follow the input timeline in seconds. Preserve the original scene when the target is absent.\n" +
                   "\n".join(notes))
         outputs.append({"range": [start, end], "references": refs, "prompt": prompt})
-    return {"segments": outputs}
+    return {"segments": outputs, **({"image_tasks": recipes} if recipes else {})}
+
+
+def reference_images(source, plan):
+    from PIL import Image
+    from reskin.pipeline import aspect_for, still, upload_copy
+
+    outputs = list(dict.fromkeys(p for segment in plan["segments"] for p in segment["references"]))
+    recipes = plan.get("image_tasks", {})
+    for name in outputs:
+        if name not in recipes and not Path(name).is_file():
+            raise ValueError(f"supplied reusable reference is missing: {name}")
+    for name, recipe in recipes.items():
+        output = Path(name)
+        folder = output.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        with runtime.locked(str(output)):
+            receipt = folder / "request.json"
+            task = read(receipt) if receipt.exists() else {}
+            if output.is_file() and task.get("sha256") == sha(output):
+                continue
+            if not task:
+                original = folder / "source.png"
+                still(source["path"], recipe["frame"], original)
+                with Image.open(original) as image:
+                    aspect = aspect_for(*image.size)
+                media = lumos.upload(upload_copy(original), "image-to-image")
+                write(receipt, {**recipe, "status": "submitting"})
+                task = lumos.submit_image_to_image([media], recipe["prompt"], model=recipe["model"],
+                                                    aspect_ratio=aspect, resolution="2K", quality="medium")
+                write(receipt, {**recipe, "generation_id": task["generation_id"]})
+            if not task.get("generation_id"):
+                raise ValueError(f"image submission has no confirmed ID; reconcile the Lumos task before retrying: {receipt}")
+            result = lumos.wait(task["generation_id"])
+            net.download(lumos.result_urls(result)[0], output)
+            with Image.open(output) as image:
+                image.verify()
+            write(receipt, {**recipe, "generation_id": task["generation_id"], "sha256": sha(output)})
+    return {"references": outputs}
 
 
 def signature(source, segment):

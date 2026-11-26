@@ -107,7 +107,7 @@ def distinct_replacements(rows):
         raise ValueError("include a non-frozen replacement design in a batch of variants")
 
 
-def variants_from_order(order, sources, delivery):
+def variants_from_order(order, sources, delivery, job=None):
     requested = order.get("variants")
     if not isinstance(requested, list) or not requested:
         raise ValueError("elements requires one or more variants")
@@ -164,7 +164,9 @@ def variants_from_order(order, sources, delivery):
         if sid not in clocks:
             path = next(s["path"] for s in sources if s["id"] == sid)
             clocks[sid] = [*packet_times(path), video_info(path)["duration"]]
-        row["seedance"] = element_seedance.plan(variant["seedance"], row["ranges"], vid, clocks[sid], surveys.get(sid))
+        source = next(s for s in sources if s["id"] == sid)
+        row["seedance"] = element_seedance.plan(variant["seedance"], row["ranges"], vid, clocks[sid], surveys.get(sid),
+                                               job=job, source=source, design=row["replacement"])
         protected.update(Path(p) for segment in row["seedance"]["segments"] for p in segment["references"])
         rows.append(row)
     if any((delivery / (row["name"] + ".mp4")).resolve() in protected for row in rows):
@@ -385,12 +387,25 @@ def command(action, job, state, variant, at=None):
             raise ValueError("historical local element edits are read-only; submit a Seedance plan before production")
         key = receipt.get("key", "")
     else:
-        if action in ("render", "approve", "assemble"):
+        if action in ("refs", "render", "approve", "assemble"):
             distinct_replacements(state["variants"])
+        if action == "refs":
+            if sha(Path(source["path"])) != source["sha256"]:
+                raise ValueError("source changed; initialize the new source in its own job")
+            return element_seedance.reference_images(source, variant["seedance"])
         missing = [p for segment in variant["seedance"]["segments"] for p in segment["references"]
                    if not Path(p).is_file()]
         if missing and action == "status":
             return {"status": "awaiting reference images", "missing": missing}
+        if missing:
+            raise ValueError("missing reference images: run refs for planned Lumos images or restore the supplied references")
+        for name in variant["seedance"].get("image_tasks", {}):
+            path = Path(name)
+            task = path.with_name("request.json")
+            if not task.is_file() or read(task).get("sha256") != sha(path):
+                if action == "status":
+                    return {"status": "reference image needs verification", "path": name}
+                raise ValueError(f"run refs to verify the Lumos reference: {path}")
         key = render_key(source, variant)
     current = bool(key and receipt.get("key") == key and output.is_file() and receipt["sha256"] == sha(output))
     if current and not historical:
@@ -488,7 +503,7 @@ def dispatch(args, job, state):
             with runtime.locked(str(job / jobs.STATE)):
                 state = jobs.load(job)
                 order.setdefault("surveys", state.get("surveys", {}))
-                variants = variants_from_order(order, state["sources"], Path(state["delivery_dir"]))
+                variants = variants_from_order(order, state["sources"], Path(state["delivery_dir"]), job)
                 state["variants"] = variants
                 state["surveys"] = order["surveys"]
                 if "generation_limit" in order:
@@ -498,7 +513,7 @@ def dispatch(args, job, state):
                          for v in state["variants"]), "generation_limit": state.get("generation_limit", 0)}, ensure_ascii=False))
         return
     survey = args.command in ("analyze", "survey")
-    if not survey and args.command not in ("render", "check", "approve", "assemble", "status"):
+    if not survey and args.command not in ("refs", "render", "check", "approve", "assemble", "status"):
         raise ValueError("elements uses analyze/survey, then render, check, approve and assemble")
     if style_options or args.input:
         raise ValueError("elements accepts --only to select variant IDs, or source IDs for analyze/survey")
