@@ -16,7 +16,7 @@ from reskin.common import FFMPEG, ROOT, digest, log, read, run, sha, video_info,
 
 FPS = 24
 MAX_FRAMES = 720               # Seedance's 30 s input maximum
-MIN_FRAMES = 48                # Seedance's 2 s input minimum; shorter segments are padded and trimmed back
+MIN_FRAMES = lumos.VIDEO_MIN_SECONDS * FPS
 SLIVER = 12                    # frames: gameplay this short between original stretches is survey timing noise
 MAX_RETRIES = 2
 TRANSITION_FRAMES = 4          # Gameplay joins only; original/non-game/end-card boundaries are cuts.
@@ -494,11 +494,12 @@ def refs(job, sid, plan, seg):
     return put(job, f"references/{key}", chosen)
 
 
-def normalize(job, sid, seg, raw):
+def normalize(job, sid, seg, raw, *, input_frames=None):
     """The generated clip at the segment's frame count: one constant retime without motion warping; short-clip
     padding trimmed."""
     a, b = seg["frames"]
-    speed = max(MIN_FRAMES, b - a) / FPS / video_info(raw)["duration"]
+    # Historical generations used a two-second input minimum and have no input frame count.
+    speed = (input_frames or max(2 * FPS, b - a)) / FPS / video_info(raw)["duration"]
     ff(["-i", raw, *encode(f"setpts=PTS*{speed:.10f},fps={FPS},tpad=stop_mode=clone:stop_duration=1"),
         "-frames:v", str(b - a)], job / "ai" / f"{sid}-{seg['id']}.mp4")
 
@@ -525,20 +526,21 @@ def render(job, sid, plan, seg):
         r = put(job, f"state/{key}", {"history": [*r.get("history", []), attempt]})
     a, b = seg["frames"]
     clip = job / "segments" / f"{key}.mp4"
-    if not clip.is_file():
+    input_frames = max(MIN_FRAMES, b - a)
+    if not clip.is_file() or (not r.get("generation_id") and video_info(clip)["frames"] != input_frames):
         ff(["-ss", str(a / FPS), "-i", working(job, sid),
-            *encode(f"fps={FPS},trim=end_frame={b - a},tpad=stop_mode=clone:stop_duration=2"),
-            "-frames:v", str(max(MIN_FRAMES, b - a))], clip)
+            *encode(f"fps={FPS},trim=end_frame={b - a},tpad=stop_mode=clone:stop_duration={lumos.VIDEO_MIN_SECONDS}"),
+            "-frames:v", str(input_frames)], clip)
     if clip.stat().st_size > 190_000_000:
         raise ValueError("reference clip exceeds upload limit")
     if not r.get("generation_id"):
         uses_tail = references[0]["id"] == f"{key}-tail"
-        text = look(job)["video"] + (" " + prompt("continuation") if uses_tail else "")
+        text = look(job)["video"] + (" " + prompt("continuation") if uses_tail else "") + " " + lumos.CASH_GUIDANCE
         started = lumos.submit_video_edit(lumos.upload(clip, "video-to-video"),
                                           [lumos.upload(upload_copy(Path(x["path"])), "video-to-video")
                                            for x in references], text)
         r.update(generation_id=started["generation_id"], status="submitted", prompt=text, frames=seg["frames"],
-                 references=basis, after=previous)
+                 references=basis, after=previous, input_frames=input_frames)
         put(job, f"state/{key}", r)
     try:
         result = lumos.wait(r["generation_id"])
@@ -549,7 +551,7 @@ def render(job, sid, plan, seg):
     raw = job / "raw" / f"{key}-{r['generation_id']}.mp4"
     if not raw.is_file():
         net.download(lumos.result_urls(result)[0], raw)
-    normalize(job, sid, seg, raw)
+    normalize(job, sid, seg, raw, input_frames=r.get("input_frames"))
     r.update(status="done")
     return put(job, f"state/{key}", r)
 
@@ -695,11 +697,11 @@ def select_best(job, sid, plan, seg, generation_id, reason):
     raw = job / "raw" / f"{sid}-{seg['id']}-{generation_id}.mp4"
     if not raw.is_file():
         raise ValueError("selected raw result is missing")
-    normalize(job, sid, seg, raw)
+    normalize(job, sid, seg, raw, input_frames=finished[generation_id].get("input_frames"))
     put(job, f"review/{sid}-{seg['id']}-best-selection",
         {"generation_id": generation_id, "reason": reason, "attempts": attempts,
          "check_at_selection": saved(job, f"checks/{sid}-{seg['id']}")})
-    r.update(generation_id=generation_id, status="done",
+    r.update(generation_id=generation_id, status="done", input_frames=finished[generation_id].get("input_frames"),
              history=[x for x in attempts if x.get("generation_id") != generation_id],
              acceptance={"mode": "best_available", "reason": reason})
     put(job, f"state/{sid}-{seg['id']}", r)

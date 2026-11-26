@@ -1,8 +1,34 @@
-"""Sparse, source-native comparison sheets for element replacement."""
+"""Source-native comparison sheets and synchronized motion clips for element replacement."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from reskin.common import FFMPEG, digest, run
+
+
+def motion_clip(source, result, frames, size, last_hold, dest):
+    """Show consecutive frames at their original presentation times, source on the left."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    start, end = frames
+    ratio = min(1, 512 / size[0], 640 / size[1])
+    w, h = (max(2, round(dim * ratio / 2) * 2) for dim in size)
+    bar = Image.new("RGB", (2 * w, 24), "#15191e")
+    draw = ImageDraw.Draw(bar)
+    for side, label in enumerate(("Source", "Result")):
+        draw.text((side * w + 3, 2), label, font=ImageFont.load_default(size=13), fill="white")
+    header = dest.with_suffix(".png")
+    bar.save(header)
+    panel = f"trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS,scale={w}:{h}:flags=lanczos,setsar=1"
+    graph = (f"[0:v:0]{panel},pad={2*w}:{h+24}:0:24[left];"
+             f"[1:v:0]{panel}[right];[left][right]overlay={w}:24:ts_sync_mode=nearest[pair];"
+             f"[pair][2:v]overlay,trim=end_frame={end-start}[out]")
+    # A VFR source may hold the last selected picture until well after the next nominal frame.
+    duration = f"setts=duration='if(eq(N,{end-start-1}),{max(1, round(last_hold * 1_000_000))},DURATION)'"
+    run([FFMPEG, "-v", "error", "-filter_complex_threads", "2", "-i", source, "-i", result, "-i", header,
+         "-filter_complex", graph, "-map", "[out]", "-an", "-fps_mode:v", "passthrough", "-enc_time_base:v",
+         "1:1000000", "-video_track_timescale", "1000000", "-c:v", "libx264", "-bf", "0", "-bsf:v", duration,
+         "-threads:v", "3", "-preset", "veryfast", "-crf", "18",
+         "-pix_fmt", "yuv420p", "-movflags", "+faststart", dest])
 
 
 def element_sheets(source, result, frames, times, folder, *, full_size=False):

@@ -15,6 +15,10 @@ from reskin import credentials, net
 BASE = "https://lumos.diandian.info"
 SERVER = BASE + "/legil/server"
 VIDEO_MODEL = "doubao-seedance-2-5-260628"   # Seedance 2.5
+VIDEO_MIN_SECONDS = 4
+CASH_GUIDANCE = ("Preserve all original banknotes, including paper stacks on the payout pad, carried cash, "
+                 "flying or spent notes, and the HUD icon. Match their paper shape, original color, locations, "
+                 "count, timing and motion to the input. Keep a vacant payout pad vacant.")
 VIDEO_RESOLUTION = "1080p"          # Seedance 2.5 renders 480p, 720p or 1080p; deliveries are 1080p
 DONE = {"Succeeded", "Failed", "PartiallySucceeded", "Cancelled"}
 _TOKEN = {"value": None, "expires": 0.0}
@@ -68,7 +72,8 @@ def call(method: str, path: str, value=None, *, form: tuple[bytes, str] | None =
                                                                               "Accept": "application/json"}, timeout=timeout)
                 reply = net.decode_json(payload)
             else:
-                reply = net.json_call(method, url, value, headers=headers, timeout=timeout)
+                attempts = 1 if method == "POST" and path == "/generations/video-to-video" else 4
+                reply = net.json_call(method, url, value, headers=headers, timeout=timeout, attempts=attempts)
         except net.HttpError as error:
             if error.status == 401 and attempt == 0:
                 continue
@@ -101,7 +106,7 @@ def upload(path: Path, generation_type: str) -> dict:
 
 def submit_video_edit(video: dict, images: list[dict], prompt: str, *, resolution: str = VIDEO_RESOLUTION,
                       model: str = VIDEO_MODEL) -> dict:
-    """Seedance 2.5 video edit (the fields the Legil page sends): one reference video of 2-30 s (at most 200 MB),
+    """Seedance 2.5 video edit (the fields the Legil page sends): one reference video of 4-30 s (at most 200 MB),
     up to 30 reference images; the result is as long as the input (no duration), 480p/720p/1080p."""
     body = {"reference_videos": [video], "reference_images": images, "generation_mode": "video_edit",
             "prompt": prompt, "generate_audio": False, "resolution": resolution, "aspect_ratio": "adaptive",

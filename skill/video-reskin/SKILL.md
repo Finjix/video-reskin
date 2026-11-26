@@ -1,11 +1,11 @@
 ---
 name: video-reskin
-description: Restyle game videos into realistic materials or a dark fantasy night look using a whole-video Gemini survey, incremental full-frame references and sequential Seedance editing, with full-segment review and restoration of non-game footage, end cards and original audio. Also replace one prominent game element at a time (换元素), with multiple independently named variants per source.
+description: Use Seedance video editing to restyle gameplay in realistic or dark styles, or replace one or more prominent elements together. Design distinct replacement assets across output variants and preserve the original timing, end card and audio.
 ---
 
 # Video reskin
 
-For 换元素 or an object substitution, use the [element workflow](references/elements.md). Survey the source once and compare candidates at phone playback size. Favor repeated stockpiles, foreground objects and items that dominate a recognizable shot. Record when the viewer first sees the change, where it is most obvious and when it recurs. Choose substitutes whose silhouette, material or color reads at a glance. Start every variant from the original.
+For 换元素 or an object substitution, follow the [element workflow](references/elements.md). Survey the source once, then select replacements with a distinct silhouette and modeled structure at phone playback size. A variant may change several elements together. Give each replacement design to only one output in the batch. Banknotes are protected in every state and must retain their original appearance and motion. Consider a frozen design such as ice-encased timber or frost-covered meat when it fits. Include a non-frozen alternative in multi-version batches. Use the same source survey and segment planner as realistic and dark edits. Keep action-specific instructions and references inside those segments. Count all submissions against the work-order limit and allow at most two retries per segment. Inspect and reuse previous takes before requesting another. Use the original video as the Seedance edit input for every generated interval. Inspect the returned video through the full actions before delivery.
 
 The following sections apply to the realistic and dark styles.
 
@@ -27,7 +27,7 @@ Do independent preparation while waiting. Never put credentials into jobs, repor
    Ask the user when the request names neither or both. Delivery is 1080p, 24 fps.
 2. `analyze`: build a silent 24 fps working copy at source size, scaled down to 1080 on the short side when larger. Originals stay the audio and delivery source.
 3. `survey`: Gemini watches the whole working copy once, marking non-game footage, end cards, candidate cuts and a content inventory.
-4. `plan`: the fewest segments of at most 30 seconds and at least 2 seconds when a stretch needs several, cut near semantic boundaries; gameplay slivers under half a second between non-game parts stay original. Non-game parts and end cards are restored later, not generated.
+4. `plan`: the fewest segments of at most 30 seconds and at least 4 seconds when a stretch needs several, cut near semantic boundaries; gameplay slivers under half a second between non-game parts stay original. Non-game parts and end cards are restored later, not generated.
 5. `refs`: for the next unapproved segment of each source, Gemini picks full frames covering its scenes, characters, objects and ground, especially new props. The first frame is converted from its source alone, plus the style's example picture `assets/styles/<style>.jpg` when there is one (dark has one); later ones also use earlier generated references. Each converted image is reviewed for coverage in the job's style and unchanged logos/text before rendering.
 6. `render`: submit the segment cut from the working copy. A segment continuing the previous shot starts from the predecessor's last frame when Gemini judges it the same shot; otherwise, and after hard cuts or non-game gaps, it starts from a converted first frame. Sources proceed one segment at a time.
 7. `check`: Gemini reviews the complete segment against the source under [review](references/review.md). For every reported issue, open the listed frames or images and verify it there.

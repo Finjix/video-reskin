@@ -161,7 +161,7 @@ class GateTests(unittest.TestCase):
         with patch.object(m.lumos,'upload',return_value={}),patch.object(m,'upload_copy',side_effect=lambda p:p),\
              patch.object(m.lumos,'submit_video_edit',side_effect=submit),patch.object(m.lumos,'wait',side_effect=wait),\
              patch.object(m.lumos,'result_urls',return_value=['url']),patch.object(m.net,'download'),\
-             patch.object(m,'normalize'):
+             patch.object(m,'normalize'),patch.object(m,'video_info',return_value={'frames':96}):
             return m.render(self.job,'S01',self.p,self.p['segments'][1])
 
     def test_changed_predecessor_rerenders_without_a_retry(self):
@@ -443,7 +443,7 @@ class MediaTests(unittest.TestCase):
                 self.assertEqual(first,[example.name] if example.is_file() else [])
                 self.assertEqual(style=='dark',example.is_file())
                 self.assertTrue(all(Path(x['path']).suffix=='.png' for x in image_calls[1][1:]))
-                self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],48)
+                self.assertEqual(video_info(Path(video_calls[1][0]['path']))['frames'],96)
                 self.assertTrue(video_calls[1][1][0]['path'].endswith('-tail.png' if suitable_tail else '-f48.png'))
                 self.assertEqual('Start from Image 1.' in video_calls[1][2],suitable_tail)
                 self.assertTrue(all(call[2].startswith(styles[style]['video']) for call in video_calls))

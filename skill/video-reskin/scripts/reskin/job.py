@@ -62,6 +62,9 @@ def init(order: dict, job_dir: Path | None = None) -> tuple[Path, dict]:
              "request": order.get("request", ""), "style": style, "sources": rows}
     if style == "elements":
         from reskin.elements import variants_from_order
+        from reskin.element_seedance import generation_limit
+        state["generation_limit"] = generation_limit(order.get("generation_limit", 0))
+        state["surveys"] = order.get("surveys", {})
         state["variants"] = variants_from_order(order, rows, delivery) if "variants" in order else []
     write(job / STATE, state)
     return job, state

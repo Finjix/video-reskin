@@ -1,6 +1,6 @@
 # Commands and data
 
-For a single-element substitution or multiple object variants, use the [element work order and commands](elements.md). The following commands describe full-frame style changes.
+For Seedance edits that replace one or more objects per output, use the [element work order and commands](elements.md). The following commands describe full-frame style changes.
 
 Entry: `scripts/video_reskin.cmd`. Job creation:
 
@@ -35,7 +35,7 @@ Job data:
 - work/: the working copy, survey copy, join clips and other local media.
 
 A changed predecessor revokes the following approval and requires refs and render again. Approved results stay pinned when references change.
-A gameplay stretch that needs several segments is split into pieces of at least two seconds; a stretch shorter than two seconds on its own is padded with its boundary frame and trimmed back. Gameplay under half a second between or beside original stretches stays original.
+A gameplay stretch that needs several segments is split into pieces of at least four seconds; a stretch shorter than four seconds on its own is padded with its boundary frame and trimmed back. Gameplay under half a second between or beside original stretches stays original.
 
 ## Joins
 

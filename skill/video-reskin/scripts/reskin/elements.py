@@ -1,21 +1,110 @@
-"""Native-frame single-object edits, review and delivery for independent variants of a source."""
+"""Native-frame element edits, review and delivery for independent variants of a source."""
 from __future__ import annotations
 
 import json
 import os
 import re
 import shutil
+import unicodedata
 from bisect import bisect_left
+from contextlib import nullcontext
 from fractions import Fraction
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 
-from reskin import elements_review as review, runtime
+from reskin import element_seedance, elements_review as review, lumos, runtime
 from reskin.common import FFMPEG, FFPROBE, digest, probe, read, run, sha, video_info, write
 
 
 def integers(row, count):
     return isinstance(row, list) and len(row) == count and all(type(n) is int for n in row)
+
+
+BANKNOTES = re.compile(r"钞票|鈔票|纸币|紙幣|现钞|現鈔|现金|現金|纸钞|紙鈔|钱捆|钱堆|钱叠|"
+                       r"\bbank[ -]?notes?\b|\b(?:dollar|paper|green) bills?\b|^bills?$|"
+                       r"\bcash\b(?![- ]register)|\bpaper (?:currency|money)\b|"
+                       r"\b(?:stack|bundle|pile)s? of (?:green )?money\b", re.I)
+FROZEN = re.compile(r"冰冻|冰封|冰壳|覆冰|结冰|凍結|冻结|霜冻|(?:冻|凍)(?:木|肉|鱼|魚|鸡|雞|虾|蝦|牛|羊|猪|豬)|"
+                    r"\bfrozen\b|\bice[- ](?:encased|covered|crusted|coated|wrapped)|\bfrost[- ]covered", re.I)
+
+
+def protect_banknotes(targets, label):
+    for target in targets:
+        name = unicodedata.normalize("NFKC", target["element"]).strip()
+        name = re.split(r"\s+(?:next to|beside|near)\s+", name, maxsplit=1, flags=re.I)[0]
+        name = re.split(r"(?:旁边|旁邊|旁|周围|周圍)的", name)[-1]
+        if BANKNOTES.search(name):
+            raise ValueError(f"{label}: banknotes are protected; select a different target")
+
+
+def target_selection(selection, label):
+    if isinstance(selection, str) and selection.strip():
+        return {"reason": selection.strip()}
+    if not isinstance(selection, dict):
+        raise ValueError(f"{label}: target_selection takes a reason or an object with optional named frames")
+    moments = selection.get("frames", {})
+    if not isinstance(moments, dict):
+        raise ValueError(f"{label}: target_selection.frames maps names to source frame numbers")
+    for name, value in moments.items():
+        points = value if isinstance(value, list) else [value]
+        if not isinstance(name, str) or not name.strip() or any(type(n) is not int or n < 0 for n in points):
+            raise ValueError(f"{label}: each named selection frame must be a nonnegative frame number")
+    return selection
+
+
+def target_spec(spec, default_ranges, label):
+    if not isinstance(spec, dict):
+        raise ValueError(f"{label}: expected a target object")
+    result = {}
+    for field in ("element", "replacement"):
+        value = spec.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label}: describe the {field}")
+        result[field] = value.strip()
+    if "replacement_key" in spec:
+        key = spec["replacement_key"]
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{label}: replacement_key must be a nonempty shared name for this appearance")
+        result["replacement_key"] = key.strip()
+    ranges = spec.get("ranges", default_ranges)
+    if not isinstance(ranges, list) or not ranges:
+        raise ValueError(f"{label}: ranges must list the target's visible source frame intervals")
+    end = 0
+    for interval in ranges:
+        if not integers(interval, 2) or not end <= interval[0] < interval[1]:
+            raise ValueError(f"{label}: ranges must be ordered disjoint [start, end) frame intervals")
+        end = interval[1]
+    result["ranges"] = ranges
+    if "target_selection" in spec:
+        result["target_selection"] = target_selection(spec["target_selection"], label)
+    return result
+
+
+def combined_ranges(targets):
+    result = []
+    for start, end in sorted(span for target in targets for span in target["ranges"]):
+        if result and start <= result[-1][1]:
+            result[-1][1] = max(result[-1][1], end)
+        else:
+            result.append([start, end])
+    return result
+
+
+def distinct_replacements(rows):
+    owners = {}
+    frozen_only = []
+    for row in rows:
+        targets = row.get("targets", [row])
+        protect_banknotes(targets, row["id"])
+        frozen_only.append(all(FROZEN.search(t["replacement"] + " " + t.get("replacement_key", "")) for t in targets))
+        for target in targets:
+            for label in (target["replacement"], target.get("replacement_key", target["replacement"])):
+                identity = "".join(unicodedata.normalize("NFKC", label).casefold().split())
+                owner = owners.setdefault(identity, row["id"])
+                if owner != row["id"]:
+                    raise ValueError(f"{row['id']}: replacement {label!r} repeats {owner}; choose a distinct result")
+    if len(rows) > 1 and all(frozen_only):
+        raise ValueError("include a non-frozen replacement design in a batch of variants")
 
 
 def variants_from_order(order, sources, delivery):
@@ -25,6 +114,10 @@ def variants_from_order(order, sources, delivery):
     source_ids = {s["id"] for s in sources}
     protected = {Path(s["path"]).resolve() for s in sources}
     seen_names, rows = set(), []
+    clocks = {}
+    surveys = order.get("surveys", {})
+    if not isinstance(surveys, dict) or set(surveys) - source_ids:
+        raise ValueError("surveys maps source IDs to their gameplay survey")
     for index, variant in enumerate(requested, 1):
         vid = f"V{index:02d}"
         if not isinstance(variant, dict):
@@ -41,77 +134,50 @@ def variants_from_order(order, sources, delivery):
         if sid not in source_ids:
             raise ValueError(f"{vid}: specify a source ID from this work order")
         row = {"id": vid, "source": sid, "name": name}
-        for field in ("element", "replacement"):
-            value = variant.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{vid}: describe the {field}")
-            row[field] = value.strip()
-        ranges = variant.get("ranges")
-        if not isinstance(ranges, list) or not ranges:
-            raise ValueError(f"{vid}: ranges must list the target's visible source frame intervals")
-        end = 0
-        for interval in ranges:
-            if not integers(interval, 2) or not end <= interval[0] < interval[1]:
-                raise ValueError(f"{vid}: ranges must be ordered disjoint [start, end) frame intervals")
-            end = interval[1]
-        row["ranges"] = ranges
+        if "targets" in variant:
+            entries = variant["targets"]
+            if not isinstance(entries, list) or not entries:
+                raise ValueError(f"{vid}: targets must contain one or more target objects")
+            targets = [target_spec(t, variant.get("ranges"), f"{vid} target {i}") for i, t in enumerate(entries, 1)]
+            row.update(targets=targets, ranges=combined_ranges(targets),
+                       element=" + ".join(t["element"] for t in targets),
+                       replacement=" + ".join(t["replacement"] for t in targets))
+            if "target_selection" in variant:
+                row["target_selection"] = target_selection(variant["target_selection"], vid)
+        else:
+            row.update(target_spec(variant, None, vid))
         frames = variant.get("review_frames", [])
         if not isinstance(frames, list) or any(type(n) is not int or n < 0 for n in frames):
             raise ValueError(f"{vid}: review_frames must contain source frame numbers")
         row["review_frames"] = frames
-        if "target_selection" in variant:
-            selection = variant["target_selection"]
-            if isinstance(selection, str) and selection.strip():
-                selection = {"reason": selection.strip()}
-            if not isinstance(selection, dict):
-                raise ValueError(f"{vid}: target_selection takes a reason or an object with optional named frames")
-            moments = selection.get("frames", {})
-            if not isinstance(moments, dict):
-                raise ValueError(f"{vid}: target_selection.frames maps names to source frame numbers")
-            for label, value in moments.items():
-                points = value if isinstance(value, list) else [value]
-                if not label.strip() or any(type(n) is not int or n < 0 for n in points):
-                    raise ValueError(f"{vid}: each named selection frame must be a nonnegative frame number")
-            row["target_selection"] = selection
-        if bool(variant.get("candidate")) == bool(variant.get("overlay")):
-            raise ValueError(f"{vid}: provide exactly one edited candidate or tracked overlay")
-        if variant.get("candidate"):
-            candidate = Path(variant["candidate"]).expanduser().resolve()
-            if candidate in protected:
-                raise ValueError(f"{vid}: candidate must differ from the source")
-            row["candidate"] = str(candidate)
-        else:
-            overlay = variant["overlay"]
-            if not isinstance(overlay, dict) or not overlay.get("image"):
-                raise ValueError(f"{vid}: overlay needs an image")
-            track = overlay.get("track")
-            if (not isinstance(track, list) or not track or any(not integers(p, 3) for p in track)
-                    or track[0][0] < 0 or any(a[0] >= b[0] for a, b in zip(track, track[1:]))):
-                raise ValueError(f"{vid}: track must list increasing [frame, x, y] points")
-            size = [overlay.get("width"), overlay.get("height")]
-            if not integers(size, 2) or min(size) < 1:
-                raise ValueError(f"{vid}: overlay width and height must be positive pixel dimensions")
-            row["overlay"] = {"image": str(Path(overlay["image"]).expanduser().resolve()),
-                              "width": size[0], "height": size[1], "track": track}
+        motion = variant.get("motion_review", {})
+        if not isinstance(motion, dict):
+            raise ValueError(f"{vid}: motion_review maps action names to [start, end) source frame intervals")
+        for label, interval in motion.items():
+            if (not isinstance(label, str) or not label.strip() or not integers(interval, 2)
+                    or not 0 <= interval[0] < interval[1]):
+                raise ValueError(f"{vid}: each motion_review entry needs a name and a nonempty [start, end) frame interval")
+        if motion:
+            row["motion_review"] = motion
+        if variant.get("candidate") or variant.get("overlay") or "seedance" not in variant:
+            raise ValueError(f"{vid}: new element edits require Seedance original-video generation")
+        if sid not in clocks:
+            path = next(s["path"] for s in sources if s["id"] == sid)
+            clocks[sid] = [*packet_times(path), video_info(path)["duration"]]
+        row["seedance"] = element_seedance.plan(variant["seedance"], row["ranges"], vid, clocks[sid], surveys.get(sid))
+        protected.update(Path(p) for segment in row["seedance"]["segments"] for p in segment["references"])
         rows.append(row)
-    protected.update(asset(row) for row in rows)
     if any((delivery / (row["name"] + ".mp4")).resolve() in protected for row in rows):
         raise ValueError("a delivery filename would overwrite an input")
+    distinct_replacements(rows)
     return rows
 
 
-def asset(variant):
-    return Path(variant["candidate"] if "candidate" in variant else variant["overlay"]["image"])
-
-
-def render_keys(source, variant):
-    original = Path(source["path"])
-    if sha(original) != source["sha256"]:
-        raise ValueError(f"source changed: {original}; initialize the new source in its own job")
-    asset_sha = sha(asset(variant))
-    legacy = {k: v for k, v in variant.items() if k != "target_selection"}
-    recipe = {k: v for k, v in legacy.items() if k != "review_frames"}
-    return digest([source["sha256"], recipe, asset_sha]), digest([source["sha256"], legacy, asset_sha])
+def render_key(source, variant):
+    if sha(Path(source["path"])) != source["sha256"]:
+        raise ValueError(f"source changed: {source['path']}; initialize the new source in its own job")
+    signatures = [element_seedance.signature(source, segment) for segment in variant["seedance"]["segments"]]
+    return digest([variant["source"], variant["element"], variant["replacement"], signatures])
 
 
 def packet_times(path):
@@ -150,20 +216,6 @@ def check_clock(times, path):
         raise ValueError(f"frame count or presentation timing differs from source: {path}")
 
 
-def coordinate(track, axis):
-    """Overlay's x/y evaluator counts from one, while source tracking points count from zero."""
-    def interval(first, last):
-        if first < last:
-            split = (first + last + 1) // 2
-            return f"if(lt(n-1,{track[split][0]}),{interval(first, split-1)},{interval(split, last)})"
-        if first == len(track) - 1:
-            return str(track[first][axis])
-        left, right = track[first:first + 2]
-        a, b = left[axis], right[axis]
-        return f"{a}+({b}-{a})*(n-1-{left[0]})/{right[0]-left[0]}"
-    return f"if(lt(n-1,{track[0][0]}),{track[0][axis]},{interval(0, len(track)-1)})"
-
-
 def render(job, source, variant, key, output):
     original = Path(source["path"])
     info = video_info(original)
@@ -173,29 +225,28 @@ def render(job, source, variant, key, output):
     if variant["ranges"][-1][1] > len(times) or any(i >= len(times) for i in variant["review_frames"]):
         raise ValueError("range or review frame exceeds source frame count")
     start = float(video.get("start_time", 0)) - float(streams["format"].get("start_time", 0))
-    enabled = "+".join(f"between(n,{a},{b-1})" for a, b in variant["ranges"])
-    inputs = ["-i", original]
-    position = "x=0:y=0"
-    if "candidate" in variant:
-        candidate = asset(variant)
-        candidate_info = video_info(candidate)
-        if any(info[k] != candidate_info[k] for k in ("width", "height")):
-            raise ValueError("candidate display dimensions differ from source")
-        if abs(info["duration"] - candidate_info["duration"]) > 1 / info["fps"] + .001:
-            raise ValueError("candidate video duration differs from source")
-        check_clock(times, candidate)
-        inputs += ["-i", candidate]
-        prep = "format=yuv420p"
-    else:
-        layer = variant["overlay"]
-        if layer["track"][-1][0] >= len(times):
-            raise ValueError("tracking point exceeds source frame count")
-        inputs += ["-i", asset(variant)]
-        prep = f"scale={layer['width']}:{layer['height']}:flags=lanczos,format=rgba"
-        position = f"x='{coordinate(layer['track'], 1)}':y='{coordinate(layer['track'], 2)}'"
-    graph = (f"[1:v:0]{prep},setpts=PTS-STARTPTS+({start:.9f})/TB[layer];"
-             f"[0:v:0][layer]overlay={position}:ts_sync_mode=nearest:enable='{enabled}',"
-             f"trim=end_frame={len(times)},pad=ceil(iw/2)*2:ceil(ih/2)*2[out]")
+    generations = element_seedance.obtain(output.parent, source, variant, times, info, budget_job=job)
+    inputs = ["-threads:v", "3", "-i", original]
+    graph_parts = []
+    previous = "0:v:0"
+    for i, generation in enumerate(generations, 1):
+        a, b = generation["range"]
+        inputs.extend(["-threads:v", "2", "-i", generation["raw"]])
+        if generation["width"] * info["height"] != generation["height"] * info["width"]:
+            # Providers can pad a few pixels to meet encoder alignment. Wider changes imply a different shot.
+            aspect_error = abs(generation["width"] / generation["height"] / (info["width"] / info["height"]) - 1)
+            if aspect_error > .03:
+                raise ValueError(f"unexpected Seedance aspect ratio for {generation['generation_id']}")
+        speed = (generation["input_frames_24fps"] / 24) / generation["raw_duration"]
+        shift = int((start + times[a]) * 1_000_000)
+        graph_parts.append(f"[{i}:v:0]scale={info['width']}:{info['height']}:flags=lanczos,setsar=1,"
+                           f"format=yuv420p,settb=1/1000000,setpts=(PTS-STARTPTS)*{speed:.12f}+{shift}[gen{i}]")
+        enabled = "+".join(f"between(n,{max(a, lo)},{min(b, hi)-1})" for lo, hi in variant["ranges"] if lo < b and a < hi)
+        graph_parts.append(f"[{previous}][gen{i}]overlay=ts_sync_mode=nearest:eof_action=repeat:"
+                           f"enable='{enabled}'[base{i}]")
+        previous = f"base{i}"
+    graph_parts.append(f"[{previous}]trim=end_frame={len(times)},pad=ceil(iw/2)*2:ceil(ih/2)*2[out]")
+    graph = ";".join(graph_parts)
     audio = ["-c:a", "copy"]
     for i, stream in enumerate(s for s in streams["streams"] if s["codec_type"] == "audio"):
         if stream["codec_name"] not in {"aac", "ac3", "eac3", "alac", "mp3", "opus", "flac"}:
@@ -220,7 +271,7 @@ def render(job, source, variant, key, output):
             raise ValueError("rendered video duration differs from source")
         checksum = sha(partial)
         partial.replace(output)
-    receipt = {"key": key, "sha256": checksum, "video": str(output)}
+    receipt = {"key": key, "sha256": checksum, "video": str(output), "generations": generations}
     write(job / "elements" / variant["id"] / "render.json", receipt)
     return receipt
 
@@ -228,16 +279,73 @@ def render(job, source, variant, key, output):
 def sample_frames(variant, times):
     count = len(times)
     frames = {0, count - 1, *variant["review_frames"]}
-    for start, end in variant["ranges"]:
+    for start, end in {tuple(span) for target in variant.get("targets", [variant]) for span in target["ranges"]}:
         frames.update((start - 1, start, (start + end - 1) // 2, end - 1, end))
         frames.update(periodic_frames(times, start, end, 5))
     priority = {}
-    for named in variant.get("target_selection", {}).get("frames", {}).values():
-        for n in named if isinstance(named, list) else [named]:
-            if n >= count:
-                raise ValueError(f"selection frame {n} exceeds the source frame count")
-            priority[n] = None
+    for target in [variant, *variant.get("targets", [])]:
+        for named in target.get("target_selection", {}).get("frames", {}).values():
+            for n in named if isinstance(named, list) else [named]:
+                if n >= count:
+                    raise ValueError(f"selection frame {n} exceeds the source frame count")
+                priority[n] = None
     return [*priority, *sorted(n for n in frames if 0 <= n < count and n not in priority)]
+
+
+def motion_ranges(variant):
+    """Keep the requested action names and fill uncovered parts of each generated source interval."""
+    clips = dict(variant.get("motion_review", {}))
+    named = sorted(clips.values())
+    for segment in variant.get("seedance", {}).get("segments", []):
+        start, end = segment["range"]
+        cursor = start
+        for first, after in [*named, [end, end]]:
+            if first > cursor:
+                stop = min(first, end)
+                name = f"Frames {cursor}–{stop - 1}"
+                while name in clips:
+                    name += " (auto)"
+                clips[name] = [cursor, stop]
+            cursor = max(cursor, after)
+            if cursor >= end:
+                break
+    return dict(sorted(clips.items(), key=lambda item: item[1]))
+
+
+def motion_valid(record, interval, video):
+    return (isinstance(record, dict) and record.get("frames") == interval and record.get("video") == str(video)
+            and video.is_file() and record.get("sha256") == sha(video))
+
+
+def motion_path(folder, interval):
+    start, end = interval
+    return folder / f"motion-{start}-{end}.mp4"
+
+
+def motion_evidence(source, result, ranges, times, info, folder, previous):
+    clips = {}
+    by_interval = {}
+    for name, interval in ranges.items():
+        start, end = interval
+        if (start, end) in by_interval:
+            clips[name] = by_interval[start, end]
+            continue
+        video = motion_path(folder, interval)
+        record = previous.get(name, {})
+        if not motion_valid(record, interval, video):
+            with TemporaryDirectory(dir=folder) as td:
+                temp = Path(td) / "pair.mp4"
+                until = times[end] if end < len(times) else times[0] + info["duration"]
+                last_hold = until - times[end - 1]
+                review.motion_clip(source, result, interval, (info["width"], info["height"]), last_hold, temp)
+                check_clock([t - times[start] for t in times[start:end]], temp)
+                if abs(video_info(temp)["duration"] - (until - times[start])) > .0011:
+                    raise ValueError("motion review duration differs from the source interval")
+                checksum = sha(temp)
+                temp.replace(video)
+            record = {"frames": interval, "video": str(video), "sha256": checksum}
+        clips[name] = by_interval[start, end] = record
+    return clips
 
 
 def publish(output, delivery, checksum, prior):
@@ -269,26 +377,55 @@ def command(action, job, state, variant, at=None):
     receipt_path, checks_path = folder / "render.json", folder / "check.json"
     receipt = read(receipt_path) if receipt_path.exists() else {}
     checks = read(checks_path) if checks_path.exists() else {}
-    selection = {"target_selection": variant["target_selection"]} if "target_selection" in variant else {}
-    if action == "status" and not asset(variant).is_file():
-        return {"element": variant["element"], "replacement": variant["replacement"], **selection,
-                "status": "awaiting asset"}
-    key, legacy = render_keys(source, variant)
-    current = receipt.get("key") in (key, legacy) and output.is_file() and receipt["sha256"] == sha(output)
-    if current and receipt["key"] == legacy:
-        receipt["key"] = key
-        write(receipt_path, receipt)
+    selection = {k: variant[k] for k in ("targets", "target_selection", "motion_review", "replacement_key")
+                 if k in variant}
+    historical = "seedance" not in variant
+    if historical:
+        if action not in ("status", "check"):
+            raise ValueError("historical local element edits are read-only; submit a Seedance plan before production")
+        key = receipt.get("key", "")
+    else:
+        if action in ("render", "approve", "assemble"):
+            distinct_replacements(state["variants"])
+        missing = [p for segment in variant["seedance"]["segments"] for p in segment["references"]
+                   if not Path(p).is_file()]
+        if missing and action == "status":
+            return {"status": "awaiting reference images", "missing": missing}
+        key = render_key(source, variant)
+    current = bool(key and receipt.get("key") == key and output.is_file() and receipt["sha256"] == sha(output))
+    if current and not historical:
+        rows = receipt.get("generations", [])
+        current = (len(rows) == len(variant["seedance"]["segments"]) and
+                   all(r.get("status") == "succeeded" and r.get("model") == element_seedance.MODEL
+                       and r.get("generation_mode") == "video_edit" and r.get("generation_id")
+                       and r.get("raw_sha256") and r.get("range") == seg["range"]
+                       and r.get("key") == element_seedance.signature(source, seg)
+                       for r, seg in zip(rows, variant["seedance"]["segments"])))
     if action == "render":
         return receipt if current else render(job, source, variant, key, output)
-    review_key = digest([key, variant["review_frames"], selection])
-    previous_key = digest([legacy, selection]) if selection else legacy
+    review_key = digest([key, variant["review_frames"], selection, lumos.CASH_GUIDANCE])
+    previous_key = digest([key, selection]) if selection else key
+    review_folder = folder / "review" / (review_key[:12] + "-" + str(receipt.get("sha256", ""))[:12])
+    motion = motion_ranges(variant)
+    prior_clips = checks.get("motion_clips", {})
     checked = (current and checks.get("render_sha256") == receipt["sha256"]
-               and checks.get("key") in (review_key, previous_key)
-               and checks.get("sheets") and all(Path(p).is_file() for p in checks["sheets"]))
+               and (checks.get("key") == review_key or (historical and checks.get("key") == previous_key))
+               and checks.get("sheets") and all(Path(p).is_file() for p in checks["sheets"])
+               and all(motion_valid(prior_clips.get(name, {}), span, motion_path(review_folder, span))
+                       for name, span in motion.items()))
     approved = bool(checked and checks.get("approved"))
     if action == "status":
+        requests = []
+        for index, segment in enumerate(variant.get("seedance", {}).get("segments", []), 1):
+            identity = element_seedance.signature(source, segment)
+            state_file = element_seedance.segment_folder(folder, index, identity) / "request.json"
+            request = read(state_file) if state_file.is_file() else {}
+            requests.append({"range": segment["range"], "status": request.get("status", "waiting"),
+                             "generation_id": request.get("generation_id")})
         return {"element": variant["element"], "replacement": variant["replacement"],
-                **selection, "rendered": current, "checked": bool(checked), "approved": approved}
+                **selection, "rendered": current, "checked": bool(checked), "approved": approved,
+                "production": "historical" if historical else "Seedance",
+                "segments": requests, "generation_ids": [r["generation_id"] for r in requests if r["generation_id"]]}
     if not current:
         raise ValueError("run render for the current source and replacement asset first")
     if action == "check":
@@ -296,17 +433,23 @@ def command(action, job, state, variant, at=None):
         times = playback_times(output)
         if at is None:
             frames = sample_frames(variant, times)
+            if any(end > len(times) for start, end in motion.values()):
+                raise ValueError("motion_review interval exceeds source frame count")
         else:
             if not times[0] <= at < times[0] + info["duration"]:
                 raise ValueError("--at must be within the source duration")
             frames = [frame_near(times, at)]
-        evidence = review.element_sheets(source["path"], output, frames, times,
-                                         folder / "review" / (review_key[:12] + "-" + receipt["sha256"][:12]),
+        evidence = review.element_sheets(source["path"], output, frames, times, review_folder,
                                          full_size=at is not None)
         if at is not None:
             return evidence
+        if motion:
+            evidence["motion_clips"] = motion_evidence(source["path"], output, motion, times, info, review_folder,
+                                                      prior_clips)
         report = {**evidence, **selection, "key": review_key, "render_sha256": receipt["sha256"], "approved": approved,
                   "element": variant["element"], "replacement": variant["replacement"], "video": str(output)}
+        if not historical:
+            report["generation_ids"] = [r["generation_id"] for r in receipt["generations"]]
         write(checks_path, report)
         return report
     if action == "approve":
@@ -344,10 +487,15 @@ def dispatch(args, job, state):
             order = read(args.input)
             with runtime.locked(str(job / jobs.STATE)):
                 state = jobs.load(job)
+                order.setdefault("surveys", state.get("surveys", {}))
                 variants = variants_from_order(order, state["sources"], Path(state["delivery_dir"]))
                 state["variants"] = variants
+                state["surveys"] = order["surveys"]
+                if "generation_limit" in order:
+                    state["generation_limit"] = element_seedance.generation_limit(order["generation_limit"])
                 write(job / jobs.STATE, state)
-        print(json.dumps({"variants": state["variants"]}, ensure_ascii=False))
+        print(json.dumps({"variants": state["variants"], "planned_segments": sum(len(v.get("seedance", {}).get("segments", []))
+                         for v in state["variants"]), "generation_limit": state.get("generation_limit", 0)}, ensure_ascii=False))
         return
     survey = args.command in ("analyze", "survey")
     if not survey and args.command not in ("render", "check", "approve", "assemble", "status"):
@@ -386,7 +534,7 @@ def dispatch(args, job, state):
                     result = review.element_sheets(item["path"], None, frames, times, job / "elements" / key / "survey",
                                                    full_size=args.at is not None)
             else:
-                with runtime.locked(str(job / "elements" / key)):
+                with nullcontext() if args.command == "status" else runtime.locked(str(job / "elements" / key)):
                     result = command(args.command, job, state, item, args.at)
             print(json.dumps({"source" if survey else "variant": key, "result": result}, ensure_ascii=False))
         except (ValueError, RuntimeError, OSError, KeyError) as exc:
