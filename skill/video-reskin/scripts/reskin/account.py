@@ -1,4 +1,4 @@
-"""Account and runtime commands: auth (Winky key, Lumos login), login (Feishu QR) and runtime."""
+"""Account and runtime commands for Lumos login and the private runtime."""
 from __future__ import annotations
 
 import argparse
@@ -15,18 +15,10 @@ def show(lines) -> None:
 
 
 def cmd_auth(args) -> int:
-    from reskin import lumos, winky
-    if args.key:
-        credentials.save_winky_key(args.key)
+    from reskin import lumos
     if args.forget_login:
         credentials.forget_lumos_login()
-    summary = credentials.summary()
-    lines = [f"credentials: {summary['file']}",
-             f"winky key: {summary['winky_key'] or 'missing (auth --key <key>)'}"
-             + (f" ({summary['winky_key_source']})" if summary["winky_key"] else "")]
-    if summary["winky_key"]:
-        checked = winky.check_key()
-        lines.append(f"winky: key {checked['key']} (Gemini review)")
+    lines = [f"credentials: {credentials.path()}"]
     try:
         live = lumos.user()
         lines.append(f"lumos: logged in as {live.get('name')} ({live.get('user_id')})")
@@ -72,8 +64,7 @@ def main() -> None:
         action.set_defaults(handler=handler)
         return action
 
-    auth = command("auth", cmd_auth, help="store or check the Winky API key and the Lumos login")
-    auth.add_argument("--key", help="the user's Winky API key (stored encrypted for this Windows user)")
+    auth = command("auth", cmd_auth, help="check the Lumos login")
     auth.add_argument("--forget-login", action="store_true", help="drop the stored Lumos login")
     login = command("login", cmd_login, help="Feishu QR login to Lumos (opens the QR image on screen)")
     login.add_argument("--timeout", type=float, default=300, help="seconds to wait for the scan (QR codes refresh on their own)")

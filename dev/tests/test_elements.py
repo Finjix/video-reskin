@@ -169,6 +169,30 @@ class ElementTests(unittest.TestCase):
             self.assertIn("Show the blue case.", submit.call_args.args[1])
         self.submit.assert_not_called()
 
+    def test_reference_prompt_names_only_the_targets_in_its_stage(self):
+        variant = {"name": "two", "targets": [
+            {"element": "crate", "replacement": "blue case", "ranges": [[2, 8]]},
+            {"element": "cart", "replacement": "steel tray", "ranges": [[12, 20]]}],
+            "seedance": {"stages": [{"range": [2, 8], "prompt": "case"}, {"range": [12, 20], "prompt": "tray"}]}}
+        self.plan([variant])
+        prompts = [task["prompt"] for task in self.state["variants"][0]["seedance"]["image_tasks"].values()]
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(any("blue case" in p and "steel tray" not in p for p in prompts))
+        self.assertTrue(any("steel tray" in p and "blue case" not in p for p in prompts))
+
+    def test_several_variants_submit_before_any_waits(self):
+        events = []
+        self.submit.side_effect = lambda *a, **k: events.append("submit") or self.submit_generation(*a, **k)
+        waiting = self.wait_generation
+        with patch.object(lumos, "wait", side_effect=lambda gid, **k: events.append("wait") or waiting(gid)):
+            args = Namespace(command="render", only=None, segment=None, input=None, accept=None, covers=[],
+                             reason=None, redo=False, generation_id=None, at=None)
+            with redirect_stdout(StringIO()):
+                elements.dispatch(args, self.folder, self.state)
+        self.assertEqual(events[:2], ["submit", "submit"])
+        self.assertEqual(self.submit.call_count, 2)
+        self.assertTrue(all(self.action("status", i)["rendered"] for i in range(2)))
+
     def test_many_action_notes_use_the_same_semantic_cuts_as_style_edits(self):
         times = [i / 30 for i in range(2101)]
         survey = {"non_game": [{"start": 7, "end": 9}], "end_card_start": 65,
@@ -317,30 +341,6 @@ class ElementTests(unittest.TestCase):
         self.action("render")
         with self.assertRaisesRegex(ValueError, "exceeds source"):
             self.action("check")
-
-    def test_legacy_local_outputs_remain_inspectable_without_new_production(self):
-        # Simulate a previously rendered work order, including a now-disallowed repeated outcome.
-        for spec in self.state["variants"]:
-            spec.pop("seedance")
-            spec["candidate"] = str(self.root / "archived-candidate.mp4")
-            spec["replacement"] = "blue case"
-        shutil.copy2(self.original, self.root / "archived-candidate.mp4")
-        variant = self.state["variants"][0]
-        write(self.folder / job.STATE, self.state)
-        self.state = job.load(self.folder)
-        folder = self.folder / "elements/V01"
-        folder.mkdir(parents=True, exist_ok=True)
-        render = folder / "render.mp4"
-        shutil.copy2(self.original, render)
-        write(folder / "render.json", {"key": "historical-render-receipt", "sha256": sha(render), "video": str(render)})
-        self.action("status")
-        self.assertTrue(self.action("check")["sheets"])
-        for action in ("render", "approve", "assemble"):
-            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "(?i)seedance|legacy|histor"):
-                self.action(action)
-        self.assertFalse(self.submit.called)
-        with self.assertRaisesRegex(ValueError, "(?i)seedance|local"):
-            self.plan([variant])
 
     def test_source_first_survey_native_clock_and_full_vfr_motion_hold(self):
         pipeline.ff(["-f", "lavfi", "-i", "testsrc2=s=64x48:r=30:d=1", "-f", "lavfi", "-i",

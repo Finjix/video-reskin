@@ -8,13 +8,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from reskin import lumos, net, runtime
-from reskin.common import FFMPEG, digest, log, read, run, sha, video_info, write
+from reskin.common import FFMPEG, ROOT, digest, log, read, run, sha, video_info, write
 
 MODEL = lumos.VIDEO_MODEL
 RESOLUTION = lumos.VIDEO_RESOLUTION
+CASH_GUIDANCE = read(ROOT / "assets/prompts.json")["banknotes"]
 
 
-def plan(value, ranges, label, clock, survey=None, *, job=None, source=None, design=None):
+def plan(value, ranges, label, clock, survey=None, *, job=None, source=None, targets=()):
     from reskin.pipeline import FPS, IMAGE_MODEL, build_plan
     segments = value.get("stages", value.get("segments")) if isinstance(value, dict) else None
     if not isinstance(segments, list) or not segments:
@@ -35,8 +36,11 @@ def plan(value, ranges, label, clock, survey=None, *, job=None, source=None, des
             description = segment.get("reference_prompt", segment.get("prompt"))
             if type(frame) is not int or not span[0] <= frame < span[1] or not isinstance(description, str) or not description.strip():
                 raise ValueError(f"{label}: invalid reference_frame or reference_prompt")
+            # Name only the designs of the targets this stage shows.
+            design = " + ".join(t["replacement"] for t in targets
+                                if any(lo < span[1] and span[0] < hi for lo, hi in t["ranges"]))
             edit = (f"Edit this gameplay still in its original art style. Target design: {design}. {description} "
-                    "Keep camera, other objects, character and interface in place. " + lumos.CASH_GUIDANCE)
+                    "Keep camera, other objects, character and interface in place. " + CASH_GUIDANCE)
             key = digest([source["sha256"], frame, edit, IMAGE_MODEL, "2K", "medium"])
             output = str((job / "elements" / "references" / key / "result.png").resolve())
             recipes[output] = {"frame": frame, "prompt": edit, "model": IMAGE_MODEL}
@@ -102,7 +106,9 @@ def plan(value, ranges, label, clock, survey=None, *, job=None, source=None, des
     return {"segments": outputs, **({"image_tasks": recipes} if recipes else {})}
 
 
-def reference_images(source, plan):
+def reference_images(source, plan, *, wait=True):
+    """Submit every missing Lumos reference still first, then wait for them together."""
+    from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
     from reskin.pipeline import aspect_for, still, upload_copy
 
@@ -111,6 +117,7 @@ def reference_images(source, plan):
     for name in outputs:
         if name not in recipes and not Path(name).is_file():
             raise ValueError(f"supplied reusable reference is missing: {name}")
+    pending = []
     for name, recipe in recipes.items():
         output = Path(name)
         folder = output.parent
@@ -132,11 +139,25 @@ def reference_images(source, plan):
                 write(receipt, {**recipe, "generation_id": task["generation_id"]})
             if not task.get("generation_id"):
                 raise ValueError(f"image submission has no confirmed ID; reconcile the Lumos task before retrying: {receipt}")
-            result = lumos.wait(task["generation_id"])
+        pending.append((output, recipe, task["generation_id"]))
+
+    def finish(item):
+        output, recipe, generation_id = item
+        with runtime.locked(str(output)):
+            receipt = output.parent / "request.json"
+            if output.is_file() and read(receipt).get("sha256") == sha(output):
+                return
+            result = lumos.wait(generation_id)
             net.download(lumos.result_urls(result)[0], output)
             with Image.open(output) as image:
                 image.verify()
-            write(receipt, {**recipe, "generation_id": task["generation_id"], "sha256": sha(output)})
+            write(receipt, {**recipe, "generation_id": generation_id, "sha256": sha(output)})
+
+    if not wait:
+        return {"references": outputs, "pending": [str(item[0]) for item in pending]}
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+            list(pool.map(finish, pending))
     return {"references": outputs}
 
 
@@ -157,48 +178,21 @@ def segment_folder(folder, index, key):
     return expected
 
 
-def submission_history(job, ledger, names, attempt, order):
-    """Import old request IDs and the earlier key-only reservations once, including failures."""
-    old = read(ledger) if ledger.exists() else []
-    if old and all(isinstance(row, dict) for row in old):
-        return old
-    rows, seen_ids, scopes = [], set(), {}
+def submission_history(job, ledger, names):
+    """The ledger of paid submissions, rebuilt from the request receipts when it is missing."""
+    rows = read(ledger) if ledger.exists() else None
+    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+        return rows
+    rows, seen = [], set()
     for path in (job / "elements").glob("*/seedance/*/request.json"):
         request = read(path)
         slot = path.parents[2].name
-        key = request["key"]
-        record = {"key": key, "source": request["source_sha256"], "slot": slot,
+        record = {"key": request["key"], "source": request["source_sha256"], "slot": slot,
                   "variant": names.get(slot, slot), "range": request["range"]}
-        scopes.setdefault(key, []).append(record)
         for generation in [*request.get("failed_generation_ids", []), request.get("generation_id")]:
-            if generation and generation not in seen_ids:
+            if generation and generation not in seen:
                 rows.append(record)
-                seen_ids.add(generation)
-    known = Counter(row["key"] for row in rows)
-    unresolved = set(old) - set(scopes)
-    if unresolved:
-        sources = {s["id"]: s for s in order.get("sources", [])}
-        for variant in order.get("variants", []):
-            source = sources.get(variant.get("source"))
-            if not source:
-                continue
-            for segment in variant.get("seedance", {}).get("segments", []):
-                try:
-                    key = signature(source, segment)
-                except OSError:
-                    continue  # A historical reference can already have been archived.
-                if key in unresolved:
-                    slot = variant["id"]
-                    scopes.setdefault(key, []).append({"key": key, "source": source["sha256"], "slot": slot,
-                                                       "variant": names[slot], "range": segment["range"]})
-        scopes.setdefault(attempt["key"], [attempt])
-    for key in old:
-        if known[key]:
-            known[key] -= 1
-        else:
-            # An old timeout may have no receipt and therefore no recoverable assignment.
-            matching = scopes.get(key, [])
-            rows.append(matching[0] if len(matching) == 1 else {"key": key})
+                seen.add(generation)
     return rows
 
 
@@ -207,15 +201,11 @@ def range_exhausted(rows, attempt, names, limit):
     start, end = attempt["range"]
     events = Counter()
     for row in rows:
-        if "source" not in row:
-            # Unattributable legacy reservations can already have charged this interval.
-            lo, hi = start, end
-        else:
-            same_name = row["variant"] == attempt["variant"]
-            renamed_slot = row["slot"] == attempt["slot"] and row["variant"] not in names.values()
-            if row["source"] != attempt["source"] or not (same_name or renamed_slot):
-                continue
-            lo, hi = max(start, row["range"][0]), min(end, row["range"][1])
+        same_name = row["variant"] == attempt["variant"]
+        renamed_slot = row["slot"] == attempt["slot"] and row["variant"] not in names.values()
+        if row["source"] != attempt["source"] or not (same_name or renamed_slot):
+            continue
+        lo, hi = max(start, row["range"][0]), min(end, row["range"][1])
         if lo < hi:
             events[lo] += 1
             events[hi] -= 1
@@ -238,7 +228,7 @@ def reserve_submission(job, key, source_hash, slot, span, *, check_only=False):
         ledger = job / "elements" / "submissions.json"
         names = {v["id"]: unicodedata.normalize("NFKC", v["name"]).casefold() for v in order.get("variants", [])}
         attempt = {"key": key, "source": source_hash, "variant": names.get(slot, slot), "slot": slot, "range": span}
-        history = submission_history(job, ledger, names, attempt, order)
+        history = submission_history(job, ledger, names)
         from reskin.pipeline import MAX_RETRIES
         segment_limit = 1 + MAX_RETRIES
         if range_exhausted(history, attempt, names, segment_limit):
@@ -257,7 +247,7 @@ def original_clip(folder, source, span, frame_count):
             info = video_info(clip)
             ready = info["frames"] == frame_count and info["fps"] == 24
         except (ValueError, RuntimeError):
-            pass  # The former fps-before-padding filter could leave a valid MP4 without any pictures.
+            pass  # an unreadable or empty cached clip is encoded again
     if not ready:
         partial = folder / "original.partial.mp4"
         start, end = span
@@ -307,7 +297,7 @@ def submit(folder, source, segment, count, identity, *, budget_job=None):
         with TemporaryDirectory(dir=folder) as td:
             prepared = [upload_reference(Path(p), Path(td), i) for i, p in enumerate(segment["references"])]
         images = [asset for asset, metadata in prepared]
-        prompt = segment["prompt"] + "\n\n" + lumos.CASH_GUIDANCE
+        prompt = segment["prompt"] + "\n\n" + CASH_GUIDANCE
         reserve_submission(*allowance)
         started = lumos.submit_video_edit(video, images, prompt, resolution=RESOLUTION, model=MODEL)
         generation_id = started.get("generation_id")
@@ -356,7 +346,9 @@ def complete(folder, receipt):
     return updated
 
 
-def obtain(folder, source, variant, times, info, *, budget_job=None):
+def obtain(folder, source, variant, times, info, *, budget_job=None, submit_only=False):
+    """Submit every interval without a live generation, then wait for all of them. With submit_only the call
+    returns after submitting, so several variants can render at the same time."""
     from concurrent.futures import ThreadPoolExecutor
     segments = variant["seedance"]["segments"]
     specs = []
@@ -374,6 +366,8 @@ def obtain(folder, source, variant, times, info, *, budget_job=None):
         specs.append((path, segment, min(720, max(lumos.VIDEO_MIN_SECONDS * 24, round(duration * 24))), key))
     # Persist each accepted ID before polling. A retry resumes every already-submitted interval.
     requests = [submit(path, source, segment, count, key, budget_job=budget_job) for path, segment, count, key in specs]
+    if submit_only:
+        return requests
     def collect(pair):
         spec, receipt = pair
         return complete(spec[0], receipt)

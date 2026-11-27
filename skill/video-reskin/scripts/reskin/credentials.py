@@ -1,4 +1,4 @@
-"""The Winky API key and the Lumos login, stored per Windows user (DPAPI-encrypted) outside the skill folder."""
+"""Lumos login storage outside the skill folder, encrypted for the Windows user."""
 from __future__ import annotations
 
 import base64
@@ -7,11 +7,8 @@ import time
 
 from reskin.common import home, read, write
 
-ENV_KEY = "VIDEO_RESKIN_WINKY_KEY"
-
-
 class MissingCredential(RuntimeError):
-    """A key or login the user has to provide; the message says which command fixes it."""
+    """A missing or unreadable login."""
 
 
 def path():
@@ -75,21 +72,6 @@ def _get(key: str) -> tuple[str | None, dict]:
         return None, row
 
 
-def winky_key() -> str:
-    configured = os.environ.get(ENV_KEY)
-    if configured:
-        return configured.strip()
-    value, _ = _get("winky_key")
-    if not value:
-        raise MissingCredential("no Winky API key yet: ask the user for their key (Lumos -> Winky -> API Keys), "
-                                "then run auth --key <key>")
-    return value
-
-
-def save_winky_key(key: str):
-    _store("winky_key", key.strip())
-
-
 def lumos_refresh_token() -> str:
     value, _ = _get("lumos_refresh_token")
     if not value:
@@ -103,13 +85,3 @@ def save_lumos_login(token: str, user: dict):
 
 def forget_lumos_login():
     _store("lumos_refresh_token", None)
-
-
-def summary() -> dict:
-    data = _load()
-    key = os.environ.get(ENV_KEY) or _get("winky_key")[0]
-    login = data.get("lumos_refresh_token") or {}
-    return {"file": str(path()),
-            "winky_key": (key[:10] + "..." + key[-4:]) if key else None,
-            "winky_key_source": "environment" if os.environ.get(ENV_KEY) else ("stored" if key else None),
-            "lumos_user": login.get("user"), "lumos_login_saved_at": login.get("saved_at")}

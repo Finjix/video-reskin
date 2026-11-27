@@ -16,9 +16,6 @@ BASE = "https://lumos.diandian.info"
 SERVER = BASE + "/legil/server"
 VIDEO_MODEL = "doubao-seedance-2-5-260628"   # Seedance 2.5
 VIDEO_MIN_SECONDS = 4
-CASH_GUIDANCE = ("Preserve all original banknotes, including paper stacks on the payout pad, carried cash, "
-                 "flying or spent notes, and the HUD icon. Match their paper shape, original color, locations, "
-                 "count, timing and motion to the input. Keep a vacant payout pad vacant.")
 VIDEO_RESOLUTION = "1080p"          # Seedance 2.5 renders 480p, 720p or 1080p; deliveries are 1080p
 DONE = {"Succeeded", "Failed", "PartiallySucceeded", "Cancelled"}
 _TOKEN = {"value": None, "expires": 0.0}

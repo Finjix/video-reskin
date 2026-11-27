@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 from reskin import runtime
 FFMPEG = runtime.Executable("ffmpeg")
 FFPROBE = runtime.Executable("ffprobe")
+FPS = 24
 _DIGESTS: dict[tuple, str] = {}
 
 

@@ -10,10 +10,6 @@ from reskin import pipeline as m
 from reskin.common import probe, video_info
 
 
-def verdict(value='pass'):
-    return {'verdict':value,'summary':'Checked against source','issues':[]}
-
-
 class PlanTests(unittest.TestCase):
     def test_minimum_segments_and_exact_clock(self):
         for length in (1,47,48,719,720,721,1440,1441,6000):
@@ -46,16 +42,6 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(m.working_size(1081,1921),(1080,1920))
         self.assertEqual(m.working_size(159,91),(158,90))
 
-    def test_model_text_is_folded_to_ascii(self):
-        answer={'verdict':'fail','summary':'Logo \u201cAce\u201d 2\u00d7 larger \u2014 caf\u00e9','issues':[]}
-        with patch.object(m.winky,'gemini',return_value=answer) as call:
-            self.assertEqual(m.ask('segment',m.REVIEW,{})['summary'],'Logo "Ace" 2x larger - cafe')
-        self.assertEqual(call.call_count,1)
-        with patch.object(m.winky,'gemini',return_value={'summary':'\u753b\u9762'}) as call:
-            with self.assertRaisesRegex(ValueError,'English'):
-                m.ask('segment',m.REVIEW,{})
-        self.assertEqual(call.call_count,2)
-
     def test_semantic_cut_near_limit(self):
         self.assertEqual(m.split_run(0,1400,[600,700])[0],[0,700])
 
@@ -85,24 +71,33 @@ class GateTests(unittest.TestCase):
         for s in self.p['segments']:
             m.put(self.job,'state/S01-'+s['id'],{'status':'done','generation_id':s['id']})
         m.put(self.job,'state/S01-K02',{'status':'done','generation_id':'K02','after':'K01'})
-        first=self.p['segments'][0]
-        m.put(self.job,'checks/S01-K01',{'verdict':'pass','token':m.check_token(self.job,'S01',self.p,first)})
-        m.approve(self.job,'S01',self.p,first)
+        m.put(self.job,'catalog/S01',{'width':160,'height':90})
+        self.approve_first()
+
+    def prepare_check(self, segment):
+        sheet=self.job/f"{segment['id']}.jpg"
+        sheet.touch()
+        with patch.object(m.review,'sheets',return_value={'sample_fps':6,'sample_count':12,'sheets':[str(sheet)]}) as pages:
+            result=m.check(self.job,'S01',self.p,segment)
+        return result,pages
 
     def test_next_segment_is_gated(self):
         m.put(self.job,'state/S01-K01',{'generation_id':'changed'})
         with self.assertRaisesRegex(ValueError,'waiting'):
             m.ready(self.job,'S01',self.p,self.p['segments'][1])
 
-    def test_check_goes_directly_to_full_segment_with_fixed_transition(self):
-        with patch.object(m,'assemble') as join, patch.object(m,'review_clip',return_value=verdict()) as watch:
-            result=m.check(self.job,'S01',self.p,self.p['segments'][1])
-        join.assert_not_called()
-        self.assertEqual(watch.call_count,1)
-        self.assertEqual(watch.call_args.args[6],'segment')
-        self.assertIsNone(result['seam'])
-        self.assertEqual(result['decision']['transition_frames'],4)
-        m.approve(self.job,'S01',self.p,self.p['segments'][1])
+    def test_check_prepares_current_generation_for_approval(self):
+        s=self.p['segments'][1]
+        m.put(self.job,'checks/S01-K02',{'token':m.check_token(self.job,'S01',self.p,s),'verdict':'pass'})
+        with self.assertRaisesRegex(ValueError,'run check'):
+            m.approve(self.job,'S01',self.p,s)
+        result,pages=self.prepare_check(s)
+        self.assertEqual(pages.call_args.args[:3],(m.working(self.job,'S01'),48,96))
+        self.assertEqual(result['generation_id'],'K02')
+        self.assertEqual(result['target_style'],m.prompt('styles')['realistic']['target'])
+        self.assertFalse(m.approved(self.job,'S01',self.p,s))
+        m.approve(self.job,'S01',self.p,s)
+        self.assertTrue(m.approved(self.job,'S01',self.p,s))
 
     def test_original_footage_boundaries_are_hard_cuts(self):
         game={'original':False}
@@ -113,41 +108,39 @@ class GateTests(unittest.TestCase):
         self.assertEqual(m.join_transition_frames(original,game),0)
         self.assertEqual(m.join_transition_frames(original,original),0)
 
-    def test_tail_failure_is_gemini_only_without_agent_sheet(self):
-        predecessor=m.record(self.job,'S01',self.p['segments'][0]).copy()
+    def test_source_first_frame_used_when_tail_is_unsuitable(self):
+        first,second=self.p['segments']
+        predecessor=m.record(self.job,'S01',first).copy()
         converted=self.job/'converted.png'
         converted.touch()
         m.put(self.job,'references/S01-registry',[
             {'id':'S01-K02-f48','path':str(converted),'covers':[],'at':2.0}])
-        with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
-             patch.object(m,'ask',side_effect=[{'ok':False,'covers':[],'note':'Unsuitable tail'},
-                                             {'frames':[],'references':[]}]),\
-             patch.object(m.winky,'inline',return_value={}),\
-             patch.object(m,'upload_copy',side_effect=lambda p,*a:p),patch.object(m,'picture_issue') as sheet:
-            m.put(self.job,'survey/S01',{'inventory':[]})
-            result=m.refs(self.job,'S01',self.p,self.p['segments'][1])
+        m.put(self.job,'survey/S01',{'inventory':[]})
+        with patch.object(m,'tail_images',return_value={'tail':'tail.png','first':'first.png'}) as images:
+            pending=m.refs(self.job,'S01',self.p,second)
+            self.assertEqual(pending['continuity_images'],{'tail':'tail.png','first':'first.png'})
+            result=m.refs(self.job,'S01',self.p,second,{'use_tail':False})
         self.assertEqual([r['id'] for r in result],['S01-K02-f48'])
-        self.assertEqual(m.record(self.job,'S01',self.p['segments'][0]),predecessor)
-        self.assertTrue(m.approved(self.job,'S01',self.p,self.p['segments'][0]))
-        self.assertTrue(self.p['segments'][1]['continuous'])
-        sheet.assert_not_called()
-        self.assertFalse(m.saved(self.job,'review/S01-K02-tail')['ok'])
+        self.assertEqual(m.record(self.job,'S01',first),predecessor)
+        self.assertTrue(m.approved(self.job,'S01',self.p,first))
+        images.assert_called_once()
 
     def test_changed_predecessor_requires_a_new_render(self):
         s=self.p['segments'][1]
-        m.put(self.job,'checks/S01-K02',{'verdict':'pass','token':m.check_token(self.job,'S01',self.p,s)})
+        self.prepare_check(s)
         m.approve(self.job,'S01',self.p,s)
-        self.reapprove_first('new')
+        self.approve_first('new')
         self.assertFalse(m.approved(self.job,'S01',self.p,s))
         with self.assertRaisesRegex(ValueError,'previous segment changed'):
             m.check(self.job,'S01',self.p,s)
         with self.assertRaisesRegex(ValueError,'run refs first'):
             m.render(self.job,'S01',self.p,s)
 
-    def reapprove_first(self,generation):
+    def approve_first(self,generation=None):
         first=self.p['segments'][0]
-        m.put(self.job,'state/S01-K01',{'status':'done','generation_id':generation})
-        m.put(self.job,'checks/S01-K01',{'verdict':'pass','token':m.check_token(self.job,'S01',self.p,first)})
+        if generation:
+            m.put(self.job,'state/S01-K01',{'status':'done','generation_id':generation})
+        self.prepare_check(first)
         m.approve(self.job,'S01',self.p,first)
 
     def run_render(self,wait):
@@ -166,7 +159,7 @@ class GateTests(unittest.TestCase):
 
     def test_changed_predecessor_rerenders_without_a_retry(self):
         m.put(self.job,'state/S01-K02',{'status':'done','generation_id':'K02','after':'K01','retries':1,'references':'old'})
-        self.reapprove_first('new')
+        self.approve_first('new')
         m.put(self.job,'references/S01-K02',[{'id':'S01-K02-tail','path':'tail.png','covers':[]}])
         m.put(self.job,'references/S01-K02-dependency',{'previous':'new'})
         r=self.run_render(lambda key:{})
@@ -202,12 +195,13 @@ class GateTests(unittest.TestCase):
         out.parent.mkdir(parents=True,exist_ok=True)
         out.write_bytes(b'generated')
         m.put(self.job,'image-tasks/S01-K02-f48',{'generation_id':'img','dependencies':[]})
-        rejected={'ok':False,'covers':[],'note':'Logo lettering changed'}
-        with patch.object(m,'still',return_value=out),patch.object(m.winky,'inline',return_value={}),             patch.object(m,'ask',return_value=rejected) as judge:
+        cached={'ok':False,'covers':[],'note':'Logo lettering changed','sha256':m.sha(out)}
+        m.put(self.job,'references/S01-K02-f48-coverage',cached)
+        with patch.object(m,'still',return_value=out),patch.object(m.lumos,'wait') as wait:
             for _ in range(2):
                 with self.assertRaisesRegex(ValueError,'refs --redo'):
                     m.convert(self.job,'S01','S01-K02-f48',48,[],[])
-        self.assertEqual(judge.call_count,1)
+        wait.assert_not_called()
         m.reset_refs(self.job,'S01',self.p,self.p['segments'][1])
         self.assertFalse((self.job/'references/S01-K02-f48-coverage.json').exists())
 
@@ -233,28 +227,32 @@ class GateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'two retries'):
             m.redo(self.job,'S01',self.p,s,'again')
 
-    def test_best_available_preserves_failed_review_and_all_attempts(self):
+    def test_best_available_preserves_review_and_all_attempts(self):
         s=self.p['segments'][1]
         with self.assertRaisesRegex(ValueError,'two completed'):
             m.select_best(self.job,'S01',self.p,s,'K02','Too early')
         for i in range(2):
             r=m.redo(self.job,'S01',self.p,s,'Confirmed defect')
-            r.update(status='done',generation_id=f'try{i}')
+            r.update(status='done',generation_id=f'try{i}',after='K01')
             m.put(self.job,'state/S01-K02',r)
-        raw=self.job/'raw/S01-K02-try1.mp4'
+        raw=self.job/'raw/S01-K02-K02.mp4'
         raw.parent.mkdir()
         raw.touch()
-        m.put(self.job,'checks/S01-K02',{'verdict':'fail','issues':['Known residual defect']})
-        with patch.object(m,'video_info',return_value={'duration':2}),patch.object(m,'ff'):
-            chosen=m.select_best(self.job,'S01',self.p,s,'try1','Compared all three; least content drift, minor residual glow')
+        evidence,_=self.prepare_check(s)
+        with patch.object(m,'video_info',return_value={'duration':2}),patch.object(m,'ff'),\
+             patch.object(m.review,'sheets',return_value={'sample_fps':6,'sheets':[]}):
+            earlier=m.check(self.job,'S01',self.p,s,generation_id='K02')
+            self.assertEqual(earlier['generation_id'],'K02')
+            self.assertEqual(m.saved(self.job,'checks/S01-K02'),evidence)
+            chosen=m.select_best(self.job,'S01',self.p,s,'K02','Compared all three, minor residual glow')
         self.assertEqual(chosen['retries'],2)
         self.assertEqual(chosen['acceptance']['mode'],'best_available')
         self.assertTrue(m.approved(self.job,'S01',self.p,s))
-        self.assertEqual(m.saved(self.job,'checks/S01-K02')['verdict'],'fail')
+        self.assertEqual(m.saved(self.job,'checks/S01-K02'),evidence)
         self.assertEqual(len(chosen['history']),2)
 
     def test_stale_check_cannot_approve(self):
-        m.put(self.job,'checks/S01-K02',{'verdict':'pass','token':'old'})
+        m.put(self.job,'checks/S01-K02',{**self.prepare_check(self.p['segments'][1])[0],'token':'old'})
         with self.assertRaises(ValueError):
             m.approve(self.job,'S01',self.p,self.p['segments'][1])
 
@@ -265,80 +263,62 @@ class GateTests(unittest.TestCase):
         picture=self.job/'prop.png'
         picture.write_bytes(b'cached')
         m.put(self.job,'references/S01-registry',[{'id':'old-prop','path':str(picture),'covers':['prop']}])
-        def answer(kind,schema,context,media=()):
-            if schema==m.COVER or kind=='tail':
-                return {'ok':True,'covers':[],'note':'No prop in tail'}
-            return {'frames':[],'references':['old-prop']}
-        with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
-             patch.object(m,'ask',side_effect=answer),patch.object(m.winky,'inline',return_value={}),\
-             patch.object(m,'upload_copy',side_effect=lambda p,*a:p),patch.object(m.lumos,'submit_image_to_image') as submit:
-            refs=m.refs(self.job,'S01',p,s)
+        with patch.object(m,'tail_images',return_value={'tail':'tail.png'}),\
+             patch.object(m.lumos,'submit_image_to_image') as submit:
+            refs=m.refs(self.job,'S01',p,s,{'use_tail':True,'references':['old-prop']})
         self.assertEqual([r['id'] for r in refs],['S01-K02-tail','old-prop'])
         submit.assert_not_called()
 
     def test_new_prop_not_covered_by_tail_blocks_generation(self):
         s=self.p['segments'][1]
         m.put(self.job,'survey/S01',{'inventory':[{'id':'new-prop','start':2,'end':4}]})
-        def answer(kind,schema,context,media=()):
-            return ({'ok':True,'covers':[],'note':'Prop absent'} if schema==m.COVER or kind=='tail'
-                    else {'frames':[],'references':[]})
-        with patch.object(m,'still'),patch.object(m,'video_info',return_value={'frames':48}),\
-             patch.object(m,'ask',side_effect=answer),patch.object(m.winky,'inline',return_value={}),\
-             patch.object(m,'upload_copy',side_effect=lambda p,*a:p):
+        with patch.object(m,'tail_images',return_value={'tail':'tail.png'}):
             with self.assertRaisesRegex(ValueError,'new-prop'):
-                m.refs(self.job,'S01',self.p,s)
+                m.refs(self.job,'S01',self.p,s,{'use_tail':True})
 
 
 class MediaTests(unittest.TestCase):
-    def test_failed_reviews_expose_independent_native_frames_and_images(self):
+    def test_review_pairs_sample_the_same_frames_across_pages(self):
+        from PIL import Image, ImageChops
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)
             source=m.working(job,'S01')
-            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=24:duration=2',
-                  '-c:v','libx264','-pix_fmt','yuv420p'],source)
+            m.ff(['-f','lavfi','-i','nullsrc=s=160x90:r=24:d=3',
+                  '-vf',"geq=lum='16+2*N':cb=128:cr=128",'-c:v','libx264','-crf','0'],source)
+            result=job/'ai/S01-K01.mp4'
+            m.ff(['-i',source,'-vf','trim=start_frame=5:end_frame=54,setpts=PTS-STARTPTS',
+                  '-c:v','libx264','-crf','0'],result)
+            m.put(job,'job',{'style':'realistic'})
             m.put(job,'catalog/S01',video_info(source))
-            issue={'start':0.5,'end':0.6,'description':'Object changes at join'}
-            response={**verdict('fail'),'issues':[issue]}
-            folder=job/'review'
-            folder.mkdir()
-            with patch.object(m,'ask',return_value=response):
-                result=m.review_clip(job,'S01',0,2,source,0,'seam',folder,{})
-            from PIL import Image
-            self.assertNotIn('sheet',result['issues'][0])
-            self.assertEqual(len(result['issues'][0]['frames']),3)
-            for evidence in result['issues'][0]['frames']:
-                for key in ('original','result'):
-                    with Image.open(evidence[key]) as image:
-                        self.assertEqual(image.size,(160,90))
-            frame=m.still(source,0,job/'frame.png')
-            report=m.picture_issue(job,'reference-check',frame,frame,{'ok':False,'note':'Wrong material'})
-            self.assertTrue(report.is_file())
-            self.assertEqual(m.saved(job,'review/reference-check')['images'],
-                             {'original':str(frame.resolve()),'result':str(frame.resolve())})
+            m.put(job,'state/S01-K01',{'status':'done','generation_id':'video'})
+            segment={'id':'K01','frames':[5,54],'continuous':False}
+            plan={'segments':[segment]}
+            report=m.check(job,'S01',plan,segment)
+            self.assertEqual((report['sample_fps'],report['sample_count'],len(report['sheets'])),(6,13,2))
+            for page,index in zip(report['sheets'],(5,53)):
+                with Image.open(page) as sheet:
+                    original=sheet.getpixel((88,75))[0]
+                    generated=sheet.getpixel((256,75))[0]
+                    self.assertAlmostEqual(original,2*index*255/219,delta=2)
+                    self.assertEqual(original,generated)
+                    if index==5:
+                        self.assertAlmostEqual(sheet.getpixel((424,75))[0],18*255/219,delta=2)
+            evidence=m.check(job,'S01',plan,segment,at=0.36)
+            self.assertEqual(evidence['at'],0.375)
+            with Image.open(evidence['images']['original']) as a,Image.open(evidence['images']['result']) as b:
+                self.assertEqual(a.size,(160,90))
+                self.assertIsNone(ImageChops.difference(a,b).getbbox())
 
-    def test_survey_sends_the_working_copy(self):
+    def test_survey_samples_entire_working_copy(self):
         with tempfile.TemporaryDirectory() as td:
             job=Path(td)
             source=m.working(job,'S01')
-            source.parent.mkdir(parents=True)
-            source.touch()
-            m.put(job,'catalog/S01',{'frames':48})
-            with patch.object(m.winky,'inline',return_value={}) as inline, \
-                 patch.object(m,'ask',return_value={'inventory':[]}):
-                m.survey(job,{},'S01')
-            inline.assert_called_once_with(source,fps=6)
-
-    def test_review_issue_times_are_clamped_and_force_a_failure(self):
-        with tempfile.TemporaryDirectory() as td:
-            job=Path(td)
-            source=m.working(job,'S01')
-            m.ff(['-f','lavfi','-i','testsrc2=size=160x90:rate=24:duration=2',*m.codec()],source)
+            m.ff(['-f','lavfi','-i','testsrc2=size=90x160:rate=24:duration=5',*m.codec()],source)
             m.put(job,'catalog/S01',video_info(source))
-            response={**verdict('pass'),'issues':[{'start':2.4,'end':1.5,'description':'Late glitch'}]}
-            with patch.object(m,'ask',return_value=response):
-                result=m.review_clip(job,'S01',0,2,source,0,'segment',job/'review',{})
-            self.assertEqual(result['verdict'],'fail')
-            self.assertEqual((result['issues'][0]['start'],result['issues'][0]['end']),(1.5,2))
+            survey=m.survey(job,{},'S01')
+            self.assertEqual(survey['source_video'],str(source))
+            self.assertEqual((survey['sample_fps'],survey['sample_count'],len(survey['sheets'])),(6,30,2))
+            self.assertTrue(all(Path(path).is_file() for path in survey['sheets']))
 
     def test_working_copy_keeps_size_and_24fps_but_removes_source_audio(self):
         with tempfile.TemporaryDirectory() as td:
@@ -381,7 +361,6 @@ class MediaTests(unittest.TestCase):
             generations={}
             image_calls=[]
             video_calls=[]
-            reviews=[]
             def image_submit(refs,text,**kw):
                 self.assertEqual(kw['resolution'],'2K')
                 self.assertEqual(kw['quality'],'medium')
@@ -397,34 +376,28 @@ class MediaTests(unittest.TestCase):
                 video_calls.append((video,refs,text))
                 generations[key]=video['path']
                 return {'generation_id':key}
-            def answer(kind,schema,context,media=()):
-                if schema==m.FRAMES:
-                    return {'frames':[{'at':context['segment'][0],'covers':['ground']}],'references':[]}
-                if schema==m.COVER and kind!='tail':
-                    self.assertEqual(context['target_style'],styles[style]['target'])
-                if schema==m.COVER or kind=='tail':
-                    if kind=='tail':
-                        self.assertEqual(context['operation'],'same_shot_continuity')
-                        self.assertEqual(len(media),2)
-                    ok = suitable_tail or kind != 'tail'
-                    return {'ok':ok,'covers':['ground'] if ok else [],'note':'Tail suitability checked'}
-                if context.get('operation')=='select_references':
-                    return {'references':[context['available'][0]['id']]}
-                if kind in ('seam','segment'):
-                    self.assertEqual(context,{'target_style':styles[style]['target']})
-                    reviews.append(kind)
-                    return verdict()
-                self.fail(f'unexpected request {kind}')
             def download(path,out):
                 Path(out).parent.mkdir(parents=True,exist_ok=True)
                 shutil.copyfile(path,out)
-            with patch.object(m,'ask',side_effect=answer),patch.object(m.lumos,'upload',side_effect=lambda p,*a:{'path':str(p)}),\
+            with patch.object(m.lumos,'upload',side_effect=lambda p,*a:{'path':str(p)}),\
                  patch.object(m.lumos,'submit_image_to_image',side_effect=image_submit),\
                  patch.object(m.lumos,'submit_video_edit',side_effect=video_submit) as submit,\
                  patch.object(m.lumos,'wait',side_effect=lambda key:{'generations':{'media_result':[{'media_url':generations[key]}]}}) as wait,\
                  patch.object(m.net,'download',side_effect=download):
                 for i,s in enumerate(p['segments']):
-                    refs=m.refs(job,'S01',p,s)
+                    pending=m.refs(job,'S01',p,s)
+                    self.assertEqual(pending['status'],'select_frames')
+                    self.assertEqual(bool(pending['continuity_images']),i==1)
+                    use_tail=i==1 and suitable_tail
+                    image=m.refs(job,'S01',p,s,{'use_tail':use_tail,'frames':[2.25] if use_tail else []})
+                    self.assertEqual(image['status'],'inspect_reference')
+                    self.assertEqual(image['target_style'],styles[style]['target'])
+                    self.assertTrue(all(Path(p).is_file() for p in image['images'].values()))
+                    with self.assertRaisesRegex(ValueError,'run refs first'):
+                        m.render(job,'S01',p,s)
+                    with self.assertRaisesRegex(ValueError,'unknown reference generation'):
+                        m.refs(job,'S01',p,s,accept='other',covers=['ground'])
+                    refs=m.refs(job,'S01',p,s,accept=image['generation_id'],covers=['ground'])
                     self.assertTrue(refs)
                     if i==0:
                         with patch.object(m.lumos,'wait',side_effect=TimeoutError('interrupted')):
@@ -433,9 +406,9 @@ class MediaTests(unittest.TestCase):
                         self.assertEqual(submit.call_count,1)
                     m.render(job,'S01',p,s)
                     self.assertEqual(submit.call_count,i+1)
-                    m.check(job,'S01',p,s)
+                    review=m.check(job,'S01',p,s)
+                    self.assertEqual(review['sample_count'],(s['frames'][1]-s['frames'][0])//4)
                     m.approve(job,'S01',p,s)
-                self.assertEqual(reviews,['segment','segment'])
                 self.assertEqual(len(image_calls),2)
                 # The first conversion takes the style's example picture, if it has one; later ones the earlier result.
                 example=m.ROOT/'assets/styles'/f'{style}.jpg'

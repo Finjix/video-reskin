@@ -12,7 +12,7 @@ from fractions import Fraction
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 
-from reskin import element_seedance, elements_review as review, lumos, runtime
+from reskin import element_seedance, elements_review as review, runtime
 from reskin.common import FFMPEG, FFPROBE, digest, probe, read, run, sha, video_info, write
 
 
@@ -159,14 +159,14 @@ def variants_from_order(order, sources, delivery, job=None):
                 raise ValueError(f"{vid}: each motion_review entry needs a name and a nonempty [start, end) frame interval")
         if motion:
             row["motion_review"] = motion
-        if variant.get("candidate") or variant.get("overlay") or "seedance" not in variant:
-            raise ValueError(f"{vid}: new element edits require Seedance original-video generation")
+        if "seedance" not in variant:
+            raise ValueError(f"{vid}: describe the Seedance edit in seedance.stages")
         if sid not in clocks:
             path = next(s["path"] for s in sources if s["id"] == sid)
             clocks[sid] = [*packet_times(path), video_info(path)["duration"]]
         source = next(s for s in sources if s["id"] == sid)
         row["seedance"] = element_seedance.plan(variant["seedance"], row["ranges"], vid, clocks[sid], surveys.get(sid),
-                                               job=job, source=source, design=row["replacement"])
+                                               job=job, source=source, targets=row.get("targets", [row]))
         protected.update(Path(p) for segment in row["seedance"]["segments"] for p in segment["references"])
         rows.append(row)
     if any((delivery / (row["name"] + ".mp4")).resolve() in protected for row in rows):
@@ -218,7 +218,7 @@ def check_clock(times, path):
         raise ValueError(f"frame count or presentation timing differs from source: {path}")
 
 
-def render(job, source, variant, key, output):
+def render(job, source, variant, key, output, *, submit_only=False):
     original = Path(source["path"])
     info = video_info(original)
     streams = probe(original)
@@ -227,7 +227,10 @@ def render(job, source, variant, key, output):
     if variant["ranges"][-1][1] > len(times) or any(i >= len(times) for i in variant["review_frames"]):
         raise ValueError("range or review frame exceeds source frame count")
     start = float(video.get("start_time", 0)) - float(streams["format"].get("start_time", 0))
-    generations = element_seedance.obtain(output.parent, source, variant, times, info, budget_job=job)
+    generations = element_seedance.obtain(output.parent, source, variant, times, info, budget_job=job,
+                                          submit_only=submit_only)
+    if submit_only:
+        return None
     inputs = ["-threads:v", "3", "-i", original]
     graph_parts = []
     previous = "0:v:0"
@@ -372,7 +375,10 @@ def publish(output, delivery, checksum, prior):
                 os.link(partial, delivery)
 
 
-def command(action, job, state, variant, at=None):
+def command(action, job, state, variant, at=None, *, submit_only=False):
+    """Run one element command for one variant. submit_only (refs and render) only submits the generations."""
+    if "seedance" not in variant:
+        raise ValueError("this variant has no Seedance plan: submit it again with plan --input")
     source = next(s for s in state["sources"] if s["id"] == variant["source"])
     folder = job / "elements" / variant["id"]
     output = folder / "render.mp4"
@@ -381,57 +387,48 @@ def command(action, job, state, variant, at=None):
     checks = read(checks_path) if checks_path.exists() else {}
     selection = {k: variant[k] for k in ("targets", "target_selection", "motion_review", "replacement_key")
                  if k in variant}
-    historical = "seedance" not in variant
-    if historical:
-        if action not in ("status", "check"):
-            raise ValueError("historical local element edits are read-only; submit a Seedance plan before production")
-        key = receipt.get("key", "")
-    else:
-        if action in ("refs", "render", "approve", "assemble"):
-            distinct_replacements(state["variants"])
-        if action == "refs":
-            if sha(Path(source["path"])) != source["sha256"]:
-                raise ValueError("source changed; initialize the new source in its own job")
-            return element_seedance.reference_images(source, variant["seedance"])
-        missing = [p for segment in variant["seedance"]["segments"] for p in segment["references"]
-                   if not Path(p).is_file()]
-        if missing and action == "status":
-            return {"status": "awaiting reference images", "missing": missing}
-        if missing:
-            raise ValueError("missing reference images: run refs for planned Lumos images or restore the supplied references")
-        for name in variant["seedance"].get("image_tasks", {}):
-            path = Path(name)
-            task = path.with_name("request.json")
-            if not task.is_file() or read(task).get("sha256") != sha(path):
-                if action == "status":
-                    return {"status": "reference image needs verification", "path": name}
-                raise ValueError(f"run refs to verify the Lumos reference: {path}")
-        key = render_key(source, variant)
-    current = bool(key and receipt.get("key") == key and output.is_file() and receipt["sha256"] == sha(output))
-    if current and not historical:
-        rows = receipt.get("generations", [])
-        current = (len(rows) == len(variant["seedance"]["segments"]) and
-                   all(r.get("status") == "succeeded" and r.get("model") == element_seedance.MODEL
+    if action in ("refs", "render", "approve", "assemble"):
+        distinct_replacements(state["variants"])
+    if action == "refs":
+        if sha(Path(source["path"])) != source["sha256"]:
+            raise ValueError("source changed; initialize the new source in its own job")
+        return element_seedance.reference_images(source, variant["seedance"], wait=not submit_only)
+    missing = [p for segment in variant["seedance"]["segments"] for p in segment["references"]
+               if not Path(p).is_file()]
+    if missing and action == "status":
+        return {"status": "awaiting reference images", "missing": missing}
+    if missing:
+        raise ValueError("missing reference images: run refs for planned Lumos images or restore the supplied references")
+    for name in variant["seedance"].get("image_tasks", {}):
+        path = Path(name)
+        task = path.with_name("request.json")
+        if not task.is_file() or read(task).get("sha256") != sha(path):
+            if action == "status":
+                return {"status": "reference image needs verification", "path": name}
+            raise ValueError(f"run refs to verify the Lumos reference: {path}")
+    key = render_key(source, variant)
+    rows = receipt.get("generations", [])
+    current = (receipt.get("key") == key and output.is_file() and receipt["sha256"] == sha(output)
+               and len(rows) == len(variant["seedance"]["segments"])
+               and all(r.get("status") == "succeeded" and r.get("model") == element_seedance.MODEL
                        and r.get("generation_mode") == "video_edit" and r.get("generation_id")
                        and r.get("raw_sha256") and r.get("range") == seg["range"]
                        and r.get("key") == element_seedance.signature(source, seg)
                        for r, seg in zip(rows, variant["seedance"]["segments"])))
     if action == "render":
-        return receipt if current else render(job, source, variant, key, output)
-    review_key = digest([key, variant["review_frames"], selection, lumos.CASH_GUIDANCE])
-    previous_key = digest([key, selection]) if selection else key
+        return receipt if current else render(job, source, variant, key, output, submit_only=submit_only)
+    review_key = digest([key, variant["review_frames"], selection, element_seedance.CASH_GUIDANCE])
     review_folder = folder / "review" / (review_key[:12] + "-" + str(receipt.get("sha256", ""))[:12])
     motion = motion_ranges(variant)
     prior_clips = checks.get("motion_clips", {})
-    checked = (current and checks.get("render_sha256") == receipt["sha256"]
-               and (checks.get("key") == review_key or (historical and checks.get("key") == previous_key))
+    checked = (current and checks.get("render_sha256") == receipt["sha256"] and checks.get("key") == review_key
                and checks.get("sheets") and all(Path(p).is_file() for p in checks["sheets"])
                and all(motion_valid(prior_clips.get(name, {}), span, motion_path(review_folder, span))
                        for name, span in motion.items()))
     approved = bool(checked and checks.get("approved"))
     if action == "status":
         requests = []
-        for index, segment in enumerate(variant.get("seedance", {}).get("segments", []), 1):
+        for index, segment in enumerate(variant["seedance"]["segments"], 1):
             identity = element_seedance.signature(source, segment)
             state_file = element_seedance.segment_folder(folder, index, identity) / "request.json"
             request = read(state_file) if state_file.is_file() else {}
@@ -439,7 +436,6 @@ def command(action, job, state, variant, at=None):
                              "generation_id": request.get("generation_id")})
         return {"element": variant["element"], "replacement": variant["replacement"],
                 **selection, "rendered": current, "checked": bool(checked), "approved": approved,
-                "production": "historical" if historical else "Seedance",
                 "segments": requests, "generation_ids": [r["generation_id"] for r in requests if r["generation_id"]]}
     if not current:
         raise ValueError("run render for the current source and replacement asset first")
@@ -462,9 +458,8 @@ def command(action, job, state, variant, at=None):
             evidence["motion_clips"] = motion_evidence(source["path"], output, motion, times, info, review_folder,
                                                       prior_clips)
         report = {**evidence, **selection, "key": review_key, "render_sha256": receipt["sha256"], "approved": approved,
-                  "element": variant["element"], "replacement": variant["replacement"], "video": str(output)}
-        if not historical:
-            report["generation_ids"] = [r["generation_id"] for r in receipt["generations"]]
+                  "element": variant["element"], "replacement": variant["replacement"], "video": str(output),
+                  "generation_ids": [r["generation_id"] for r in receipt["generations"]]}
         write(checks_path, report)
         return report
     if action == "approve":
@@ -512,7 +507,7 @@ def dispatch(args, job, state):
         return
     survey = args.command in ("analyze", "survey")
     if not survey and args.command not in ("refs", "render", "check", "approve", "assemble", "status"):
-        raise ValueError("elements uses analyze/survey, then render, check, approve and assemble")
+        raise ValueError("elements uses analyze/survey, plan, refs, render, check, approve and assemble")
     if style_options or args.input:
         raise ValueError("elements accepts --only to select variant IDs, or source IDs for analyze/survey")
     if args.at is not None and args.command not in ("survey", "check"):
@@ -527,11 +522,18 @@ def dispatch(args, job, state):
             print(json.dumps({"status": "awaiting variant plan", "sources": [s["id"] for s in state["sources"]]}))
             return
         raise ValueError("survey the source, then run plan --input with its element variants")
+    chosen = [item for item in items if not selected or item["id"] in selected]
+    if args.command in ("refs", "render") and len(chosen) > 1:
+        # Submit every variant's generations before waiting on any, so the variants generate at the same time.
+        for item in chosen:
+            try:
+                with runtime.locked(str(job / "elements" / item["id"])):
+                    command(args.command, job, state, item, submit_only=True)
+            except (ValueError, RuntimeError, OSError, KeyError):
+                pass  # the pass below reports it
     errors = []
-    for item in items:
+    for item in chosen:
         key = item["id"]
-        if selected and key not in selected:
-            continue
         try:
             if survey:
                 info = video_info(item["path"])

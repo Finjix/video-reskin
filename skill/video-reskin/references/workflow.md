@@ -2,45 +2,62 @@
 
 For Seedance edits that replace one or more objects per output, use the [element work order and commands](elements.md). The following commands describe full-frame style changes.
 
-Entry: `scripts/video_reskin.cmd`. Job creation:
+Use `scripts/video_reskin.cmd init --work-order order.json` with a work order such as this one.
 
 ```json
 {"sources":["D:/footage/source.mp4"],"output_root":"D:/delivery","style":"dark"}
 ```
 
-`style` is required: `realistic` or `dark` (a key of `styles` in `assets/prompts.json`), chosen from the user's request as SKILL.md describes. A style may have an example picture, `assets/styles/<style>.jpg`, which the first converted frame of each source uses as its look; image-tasks/ records it as style_picture. The delivery is `<source name>_S01_<style>.mp4`.
+Use the printed `job_dir` as `--job-dir` for subsequent commands. With `init --job-dir`, name the folder `temp` inside the intended delivery folder. The delivery is `<source name>_S01_<style>.mp4`.
 
-`init --work-order order.json` prints job_dir. Subsequent commands require `--job-dir <job_dir>`.
+Use `--only S01` to select a source or `--segment S01:K02` to select a segment. `refs`, `render` and `check` default to the first unapproved segment of each selected source. Specify `--segment` for `approve`, `redo` and `select-best`.
 
-Sequence: analyze → survey → plan → refs → render → check → approve, repeating refs/render/check/approve per segment, finally assemble.
-refs/render/check default to the first unapproved segment of each selected source.
-Use `--only S01` to select sources and `--segment S01:K02` for a segment; approve, redo and select-best require it. redo and select-best need an English `--reason`.
-`init --job-dir` must name a folder called temp: its parent becomes the delivery folder.
-auth/login/runtime take their own account/runtime options.
+## Survey and plan
 
-Job data:
-- job.json: source identity, output root, style, fixed 24 fps timeline.
-- catalog/: normalized media information.
-- survey/: non-game intervals, end-card boundary, semantic cut candidates and English content inventory.
-- plans/: half-open source-frame ranges, passthrough ranges and continuity.
-- references/: full-frame images, coverage verdicts per image file, generated-image dependencies, segment reference lists and predecessor generation identity.
-- reference-history/: images replaced by `refs --redo`.
-- image-tasks/: image generation IDs and chosen look references for resuming.
-- state/: video generation ID, the references and predecessor it was rendered from, retry count/history and version-bound approval.
-- service-failures/: failed image and video generations; they are resubmitted and never count as retries.
-- checks/: segment verdicts, issue times and current-generation token.
-- review/: Gemini comparison clips and tail verdicts; for segment issues, working-copy-size PNG frames (frames entries with at/original/result); for failed reference images, paths to the original and generated files (images entries).
-- segments/: working-copy cuts uploaded for video edits.
-- raw/: original model outputs; ai/: outputs normalized to segment duration.
-- work/: the working copy, survey copy, join clips and other local media.
+Run `analyze` to create the silent 24 fps working copy. Open the sheets from `survey` in order. Their labels follow the source clock. Use `survey --only S01 --at 3.25` for a full-size source frame. Favor cuts at motion starts, camera changes and hard cuts. Record each distinct scene, character, prop and ground surface that needs coverage with a stable ID and the time of its first clear view.
 
-A changed predecessor revokes the following approval and requires refs and render again. Approved results stay pinned when references change.
-A gameplay stretch that needs several segments is split into pieces of at least four seconds; a stretch shorter than four seconds on its own is padded with its boundary frame and trimmed back. Gameplay under half a second between or beside original stretches stays original.
+Save the findings as JSON and run `plan --only S01 --input survey.json`. Times are in source seconds. Use the source duration as `end_card_start` when there is no end card. Cut kinds are `motion`, `camera` and `hard_cut`.
 
-## Joins
+```json
+{
+  "non_game": [{"start": 0, "end": 1.5}],
+  "end_card_start": 34.5,
+  "cuts": [{"time": 27.5, "kind": "camera"}],
+  "inventory": [{"id": "cart", "name": "Supply cart", "kind": "prop", "start": 4, "end": 22, "first_clear": 4.5}]
+}
+```
 
-Gameplay joins use a fixed 4-frame transition (1/6 second) over the outgoing last two and incoming first two frames. Outgoing weights are 3/4, 1/2, 1/2, 1/4 over the frozen incoming first frame; incoming weights are 1/4, 1/2, 1/2, 3/4 over the frozen outgoing last frame; the third incoming frame is fully incoming. The joined clips are encoded once more into the delivery. Boundaries with original/non-game footage and end cards are hard cuts. Total frame count and audio alignment are preserved.
+The plan uses the fewest segments of at most 30 seconds. When a continuous gameplay stretch needs several segments, each is at least 4 seconds. A shorter standalone stretch is padded with its last frame and trimmed after generation. Gameplay slivers under half a second beside non-game stretches stay original.
 
-## Media inputs
+## References
 
-Intermediate encodes are H.264 CRF 16, yuv420p. Delivery uses MP4 with faststart, H.264 High, 8-bit yuv420p, CRF 16, preset medium, and 24 fps. The short side is 1080 pixels and the source aspect ratio determines the other side. Source audio, when present, is encoded as 48 kHz stereo AAC-LC at 128 kbps. The working copy (preset slow, no audio) has even source dimensions, scaled down to 1080 on the short side when larger. The survey reads it at 6 frames/s, or a bitrate-capped copy when it exceeds the inline upload size. Segment comparison clips use preset slow with each panel at working-copy size, capped to the inline upload size. Gemini receives reference images as the original files. Issue frames are extracted locally by FFmpeg at the times Gemini reports; no reduced or stitched comparison images are made.
+Run `refs --segment S01:K02` to get the source range, relevant inventory, accepted images and any continuity images. When the command returns continuity images, compare the previous result's last frame with the current source first frame. Set `use_tail` to true when the scene and camera show consecutive views of the same shot. With `use_tail` set to false, the source first frame is converted automatically.
+
+Choose additional frames on the source clock. List accepted reference IDs for content already covered. Submit with `refs --segment S01:K02 --input refs.json`.
+
+```json
+{"use_tail":true,"frames":[29.5],"references":["S01-K01-f108"]}
+```
+
+Open both files under `images` whenever the command returns a reference for inspection. After inspecting them, pass the returned `generation_id` to `refs --segment S01:K02 --accept <generation_id> --covers <id> <id>`, using the IDs visibly covered. Omit `--covers` when the image covers none of the listed items. This records acceptance and prepares the next reference. Add frames or accepted IDs with `--input` if coverage is incomplete. Use `refs --redo --segment S01:K02` to replace the segment's conversions, provided other segments do not use them.
+
+The first conversion uses its source frame and `assets/styles/<style>.jpg` when available. Later conversions reuse accepted images that cover the relevant content. Prefer a smaller set of clear references. The renderer accepts up to 30 images.
+
+## Segment review and delivery
+
+When `refs` returns the reference list, run `render` and `check` for that segment. Check times start at zero for the segment. For example, `check --segment S01:K02 --at 1.5` extracts the source and result at 1.5 seconds into that segment. Inspect and record the result as described in [Review](review.md).
+
+A new predecessor requires updated references and a new render for a continuing segment. Approved renders remain pinned to their generations when references change. Generation service failures are recorded separately from quality retries.
+
+Gameplay joins blend four frames across the boundary. On the last two outgoing frames, the frozen incoming first frame contributes one quarter and one half. On the first two incoming frames, the frozen outgoing last frame contributes one half and one quarter. Original footage and end cards join with hard cuts. The source clock keeps picture and audio aligned.
+
+The working copy uses H.264 CRF 16, slow, yuv420p and even source dimensions, with the short side capped at 1080 pixels. Delivery uses faststart MP4 with H.264 High, 8-bit yuv420p, CRF 16, medium, a 1080-pixel short side and 24 fps. Original audio, when present, is encoded as 48 kHz stereo AAC-LC at 128 kbps.
+
+## Job files
+
+- `job.json` and `catalog/` store the work order and normalized media information.
+- `survey/` and `plans/` store source findings, half-open frame ranges and continuity.
+- `references/` stores full-frame images, selections and accepted coverage. `reference-history/` stores replaced images.
+- `image-tasks/` and `state/` store generation IDs, dependencies, retry history and approvals. `service-failures/` records failed service requests.
+- `review/` contains survey and comparison sheets, full-size inspection frames and selections after retries. `checks/` links each current inspection to its generation.
+- `segments/`, `raw/`, `ai/` and `work/` hold the upload clips, original renders, normalized renders and working media.

@@ -1,29 +1,15 @@
 # Review
 
-Reference-image and segment checks judge the result against the job style's target description (`styles` in `assets/prompts.json`). Changes the style calls for are not content changes.
+## Video segments
 
-## Segments
+Open each sheet returned by `check` and scan the complete segment in time order. Each pair shows the source and the result at the same moment, sampled six times per second. Use `check --at <seconds>` for an independent full-size image from each video. When stills leave motion unclear, play the reported source range and the result at normal speed.
 
-Gemini compares each complete generated segment with the source at 6 frames/s on the same clock. Seams and transitions are not reviewed separately.
+Judge style against the task's target and quality by what a viewer sees during normal playback. Flag visible style gaps, unexpected changes in content or movement, and noticeable artifacts. Tolerate subtle texture differences, brief minor clipping and small shape inconsistencies. Treat defects present in the source as part of the baseline.
 
-Judge the impression at normal playback speed, not paused or magnified frames. Subtle defects, brief minor clipping and small shape or texture inconsistencies that viewers are unlikely to notice in motion are tolerated. Report missed materials, content or motion changes and artifacts only when they are readily noticeable or change the main content or action.
+For UI, HUD and text, tolerate mild blur, ghosting and deformation during changes if placement stays stable and the elements look normal when static. Flag obvious drift, severe distortion, persistent defects or major missing or added elements.
 
-UI, HUD and text are relaxed: mild blur, ghosting or jelly-like deformation while they change is fine if they look normal when static and stay in place. Report only obvious drift, severe distortion, persistent static defects or major missing or added elements.
-
-Tolerated imperfections are not issues: a segment with nothing else wrong passes with an empty issues list. Gemini and the main agent apply the same standard.
+Run `approve --segment S01:K01` once the current result passes inspection. For a noticeable defect, run `redo --segment S01:K01 --reason "<English description and time range>"`, then render and inspect again. Each segment allows two quality retries. If all three versions fall short, inspect earlier versions with `check --segment S01:K01 --generation-id <id>`. Use `select-best --segment S01:K01 --generation-id <id> --reason "<comparison and remaining defects>"` to record the choice and proceed.
 
 ## Reference images
 
-Converted reference images are strict: every source logo and all text (numbers, brand marks, warnings, HUD labels) stays unchanged in content, lettering, font, color, shape, size, placement and appearance, even when material coverage is complete. Blur, occlusion and overlap already in the source stay as they are; hidden lettering is not reconstructed. Replace noncompliant images with `refs --redo` before rendering; a rejected image stays rejected on reruns. This rule applies only to reference images, never to video prompts, tail checks or segment review.
-
-## Main-agent verification
-
-For every reported issue, open the full-size source/result frames (segments) or the original and generated files (reference images) listed in the report and scan each whole picture. Judge segment issues by their effect in motion, replaying the comparison clip when stills are not enough. Correct defects above the threshold; for false positives, including tolerated defects reported as failures, request a fresh review. Normal approval requires a passed current check.
-
-## Retries
-
-Quality retries happen only through an explicit `redo`, and corrective prompts never accumulate. After the initial generation, at most two retries (three versions). If none passes, compare all three, inspect the reported evidence and run `select-best --segment S01:K02 --generation-id <id> --reason "<comparison findings and remaining defects>"`. The failed checks are kept, acceptance is labelled best_available and the workflow continues. Service failures are recorded under service-failures/ and do not count as retries. A review that passes but lists issues is stored as a fail, so the agent looks at them.
-
-## Tail continuity
-
-When a segment continues the previous shot, Gemini compares the predecessor's last generated frame with the next source first frame and decides only whether they are the same continuous shot, ignoring materials and rendering quality. A suitable tail is used as the start frame with the continuation prompt; otherwise the next segment's first frame is converted. Each verdict is saved for the predecessor generation it was made for. This is reference selection, not a quality verdict: it never rejects the predecessor, revokes approval or counts as a retry, and needs no main-agent review.
+Open the source and converted image files reported by `refs` at full size. Record inventory items visibly rendered in the target style. Each logo and piece of text, including numbers, warnings and HUD labels, must keep its original content, lettering, font, color, shape, size and position. Preserve any existing blur, occlusion or overlap. Accept a conforming result with `refs --accept`. Replace a defective image with `refs --redo` before rendering.

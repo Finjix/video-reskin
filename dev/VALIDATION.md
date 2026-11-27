@@ -23,21 +23,13 @@ segments of one shot render one after the other.
 **Prompt wording** (Seedance, 2026-11-03). Naming text that is not on screen made the model draw garbled text there;
 materials present only late in the video appeared from the opening; `salmon` in a material list turned whole tuna and
 cash stacks into salmon steaks. Hence no material lists in video prompts: the look comes from the reference pictures.
+For the same reason the banknote guidance is added only to element edits, not to style prompts.
 
 **Uploads.** A 20 MB 4K PNG timed out when Lumos fetched it as a reference (2026-11-09), so pictures over 8 MB are
 uploaded as JPEG.
 
-**Review.** Gemini (`gemini-3.8-flash`) found every defect later confirmed on stills except one garbled caption it
-described as a ground change (2026-11-03). On a small crf-30 proxy it passed a visible 0.5 s dissolve and cartoon
-trees, hence high-quality comparison clips up to the 256,000,000-byte inline limit (a 60 s 2160x1920 side-by-side
-clip of about 200 MB was accepted, 2026-11-06). Gemini samples an inline video at `videoMetadata.fps`, not the
-clip's frame rate. Every frame (24/s) cost about 256 tokens per frame at media resolution HIGH (2026-11-11);
-6 frames/s for every clip is the user's ceiling, about 1,540 tokens per second of video.
-
-**Per-segment gate, no whole-video review** (user rule, 2026-11-11). On GOFCN64128 every flaw the whole-video rounds
-found had already appeared in a segment check, and each round cost a 207 MB, 86-340k-token clip. Approval therefore
-needs a passed check of the current result, and there is no whole-film review. Without the gate one run chained a
-whole shot from a flawed redo and re-rendered two clean segments (2026-11-10).
+**Per-segment approval.** When a run chained a shot from a flawed redo, it had to re-render two clean segments
+(2026-11-10). Approve each current result before continuing the shot.
 
 **Dark style** (user's example deliveries, 2026-11-18: GOFCN69238 and GOFCN69240 小兵数字门, GOFCN69241
 大炮出兵数字门, all 1080x1920). Only the environment changes: road, railings, terrain, sky and distant buildings
@@ -55,10 +47,11 @@ dropped banners and lanterns; the example picture plus the descriptive prompt ma
 picture is the first conversion's look and the prompt names the traits. Snow and ice are left out of the prompt
 because not every game is set in snow: without them a log-sawing conveyor frame (`D:/temporary/v.mp4`) became a dark
 night with lanterns and skull banners and gained no snow, while the 射冰取鱼 frame at 7.5 s kept its pale snow and
-glowing ice from the picture. Not yet checked through a full video.
+glowing ice from the picture. The banners were later changed from skulls to pale ice-blue snowflakes, in
+both the prompt and the example picture. Not yet checked through a full video.
 
 **Known limitations.** Items riding a running conveyor stood still in every Seedance result, with or without motion
-sentences in the prompt, and no check catches it (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
+sentences in the prompt (GOFCN64128 K03, 2026-11-11). Fast-changing HUD counters are redrawn
 by the video model and may show other digits for a few frames.
 
 **Encoding.** Working copies are at most 1080 on the short side and intermediate encodes use CRF 16. Delivery uses
@@ -68,5 +61,5 @@ Source audio is encoded as 48 kHz stereo AAC-LC at 128 kbps when present.
 ## Offline checks
 
 `dev/test_bootstrap.py` (cold start in a Unicode temp path, JSON stdin, offline reuse) and `dev/run_tests.py` pass.
-The tests mock all Lumos/Winky calls and use real FFmpeg media for chaining, padding, transitions and source-clock
-assembly. No paid model calls are made; visual quality and live service acceptance are not verified by them.
+The tests mock Lumos calls and use real FFmpeg media for sampling, chaining, padding, transitions and source-clock
+assembly.

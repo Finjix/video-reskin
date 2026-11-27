@@ -22,7 +22,6 @@ def main():
     before = snapshot(skill)
     environment = {**os.environ, "VIDEO_RESKIN_CACHE_DIR": str(folder / "cache"), "VIDEO_RESKIN_HOME": str(folder / "home"),
                    "VIDEO_RESKIN_OFFLINE": "0", "PATH": str(Path(os.environ["SystemRoot"]) / "System32")}
-    environment.pop("VIDEO_RESKIN_WINKY_KEY", None)
     cmd = Path(os.environ["SystemRoot"]) / "System32/cmd.exe"
 
     def invoke(args, text=None, expected=0):
@@ -42,12 +41,12 @@ def main():
     job = Path(out.splitlines()[0].split(": ", 1)[1])
     saved = json.loads((job / "job.json").read_text(encoding="utf-8"))
     assert saved["request"] == order["request"]
-    assert "missing" in invoke(["auth"])[0]
+    assert "not logged in to Lumos" in invoke(["auth"])[0]
     _, err = invoke(["render", "--job-dir", str(job)], expected=2)
-    assert "no plan yet" in err, err
+    assert "run plan first" in err, err
     environment["VIDEO_RESKIN_OFFLINE"] = "1"
     invoke(["runtime"])
-    invoke(["status", "--job-dir", str(job)])
+    invoke(["status", "--job-dir", str(job)], expected=2)
     python = folder / "cache/environment/Scripts/python.exe"
     result = subprocess.run([str(python), "-B", "-c", "import importlib.util; assert importlib.util.find_spec('numpy') is None"], env=environment)
     assert result.returncode == 0

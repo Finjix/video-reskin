@@ -1,20 +1,16 @@
-"""The skill entry point: a small, sequential frame-reference workflow and its job commands."""
+"""Command-line entry point and the style workflow: survey, plan, references, render, review, assembly."""
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import os
 import shutil
 import sys
-import unicodedata
-from copy import deepcopy
 from pathlib import Path
 
-from reskin import job as JOB, lumos, net, runtime, winky
-from reskin.common import FFMPEG, ROOT, digest, log, read, run, sha, video_info, write
+from reskin import job as JOB, lumos, net, review, runtime
+from reskin.common import FFMPEG, FPS, ROOT, digest, read, run, sha, video_info, write
 
-FPS = 24
 MAX_FRAMES = 720               # Seedance's 30 s input maximum
 MIN_FRAMES = lumos.VIDEO_MIN_SECONDS * FPS
 SLIVER = 12                    # frames: gameplay this short between original stretches is survey timing noise
@@ -23,49 +19,10 @@ TRANSITION_FRAMES = 4          # Gameplay joins only; original/non-game/end-card
 SHORT_SIDE = 1080              # working copies at most, deliveries exactly (Seedance 2.5's largest render size)
 CRF = 16                       # every intermediate x264 encode
 DELIVERY = ["-c:v", "libx264", "-profile:v", "high", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
-REVIEW_FPS = 6                 # frames per second Gemini samples from every video
 IMAGE_MODEL = "gpt-image-2.6-sunburst"     # on Lumos
 ASPECTS = {"9:16": 9 / 16, "16:9": 16 / 9, "3:4": 3 / 4, "4:3": 4 / 3, "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2,
            "4:5": 4 / 5, "5:4": 5 / 4}
 UPLOAD_LIMIT = 8_000_000       # bytes: a larger PNG is uploaded as a JPEG
-INLINE_LIMIT = 256_000_000     # bytes: Winky's Gemini rejects a larger inline video part (measured)
-BUDGET = .93                   # share of INLINE_LIMIT the video bitrate is capped to (container and VBV headroom)
-ISSUE_SPAN = .3                # an issue shorter than two spans gets frames at its middle and that far either side
-LABEL_FONT = Path(os.environ.get("SystemRoot", "C:/Windows")) / "Fonts/arial.ttf"
-PLAIN = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-",
-                       "\u2212": "-", "\u2026": "...", "\u00d7": "x", "\u00a0": " ", "\u00b0": " deg"})
-
-
-def obj(**fields):
-    return {"type": "OBJECT", "properties": deepcopy(fields), "required": list(fields)}
-
-
-def arr(item):
-    return {"type": "ARRAY", "items": item}
-
-
-NUM = {"type": "NUMBER"}
-STR = {"type": "STRING"}
-BOOL = {"type": "BOOLEAN"}
-SPAN = obj(start=NUM, end=NUM)
-SURVEY = obj(non_game=arr(SPAN), end_card_start=NUM,
-             cuts=arr(obj(time=NUM, kind={"type": "STRING", "enum": ["motion", "camera", "hard_cut"]})),
-             inventory=arr(obj(id=STR, name=STR, kind=STR, start=NUM, end=NUM, first_clear=NUM)))
-FRAMES = obj(frames=arr(obj(at=NUM, covers=arr(STR))), references=arr(STR))
-SELECT = obj(references=arr(STR))
-COVER = obj(ok=BOOL, covers=arr(STR), note=STR)
-TAIL = obj(ok=BOOL, note=STR)
-REVIEW = obj(verdict={"type": "STRING", "enum": ["pass", "fail"]}, summary=STR,
-             issues=arr(obj(start=NUM, end=NUM, description=STR)))
-SURVEY["properties"]["end_card_start"]["description"] = "Seconds; use the full video duration if there is no end card."
-SURVEY["properties"]["inventory"]["description"] = "English content entries with unique IDs; all times are source seconds."
-FRAMES["properties"]["references"]["description"] = ("IDs of existing generated pictures needed by this segment; "
-                                                     "reuse rather than convert duplicates.")
-COVER["properties"]["covers"]["description"] = ("Inventory IDs visibly shown in the target style in the result, "
-                                                "not merely present in the source.")
-TAIL["properties"]["ok"]["description"] = "True only when Image 1 and Image 2 are consecutive views of the same continuous shot."
-REVIEW["properties"]["issues"]["description"] = ("Unresolved defects relative to source, in seconds from the comparison "
-                                                 "clip start; empty on pass.")
 
 
 def prompt(kind):
@@ -116,14 +73,6 @@ def upload_copy(path):
     return out
 
 
-def drawtext(text):
-    if not LABEL_FONT.is_file():
-        return ""
-    path = str(LABEL_FONT).replace("\\", "/").replace(":", "\\:")
-    return (f",drawtext=fontfile='{path}':text='{text}':x=12:y=12:fontsize=28:fontcolor=white:"
-            "box=1:boxcolor=black@0.55:boxborderw=6")
-
-
 def ff(args, output):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -141,77 +90,8 @@ def encode(filters, *, preset="fast"):
     return ["-vf", filters, "-an", *codec(preset)]
 
 
-def fit_inline(args, output, duration):
-    """Encode `args` (inputs, filters and mapping) at CRF with the bitrate capped so the clip fits INLINE_LIMIT; a clip
-    that still overshoots is encoded again with a lower cap."""
-    cap = INLINE_LIMIT * BUDGET * 8 / max(duration, 1 / FPS)       # bits per second
-    while True:
-        ff([*args, *codec("slow"), "-maxrate", f"{cap:.0f}", "-bufsize", f"{cap:.0f}", "-r", str(FPS)], output)
-        size = output.stat().st_size
-        if size <= INLINE_LIMIT or cap < 2e6:
-            return output
-        cap *= INLINE_LIMIT * BUDGET / size
-
-
-def grid_clip(panels, size, output):
-    """Two labelled panels on one clip at `size` each, side by side for portrait, stacked for landscape. A panel is
-    {"path", "start", "end", "label"}; both share one clock from their starts."""
-    width, height = round(size[0] / 2) * 2, round(size[1] / 2) * 2
-    inputs, chains, lengths = [], [], []
-    for panel in panels:
-        start, end = max(0.0, float(panel["start"])), float(panel["end"])
-        inputs += ["-ss", f"{start:.6f}", "-t", f"{max(1 / FPS, end - start):.6f}", "-i", str(panel["path"])]
-        lengths.append(max(1 / FPS, end - start))
-    longest = max(lengths)
-    for index, (panel, length) in enumerate(zip(panels, lengths)):
-        chains.append(f"[{index}:v]setpts=PTS-STARTPTS,fps={FPS},scale={width}:{height}:flags=lanczos,setsar=1,"
-                      f"tpad=stop_mode=clone:stop_duration={longest - length + .2:.3f},trim=duration={longest:.6f}"
-                      f"{drawtext(panel['label'])}[p{index}]")
-    stack = "hstack" if height >= width else "vstack"
-    graph = ";".join(chains) + f";[p0][p1]{stack}=inputs=2,format=yuv420p[v]"
-    return fit_inline([*inputs, "-filter_complex", graph, "-map", "[v]", "-an"], output, longest)
-
-
-def issue_moments(start, end, last):
-    """Three moments that show an issue: its start, middle and end, or for a short one its middle and ISSUE_SPAN
-    either side; inside [0, last]."""
-    a, b = min(start, end), max(start, end)
-    middle = (a + b) / 2
-    moments = [a, middle, b] if b - a >= 2 * ISSUE_SPAN else [middle - ISSUE_SPAN, middle, middle + ISSUE_SPAN]
-    return [round(min(max(0.0, m), last), 3) for m in moments]
-
-
-def plain(value):
-    """Model text folded to ASCII where a plain form exists: typographic punctuation, symbols and accents."""
-    if isinstance(value, str):
-        text = unicodedata.normalize("NFKD", value.translate(PLAIN))
-        return "".join(c for c in text if not unicodedata.combining(c))
-    if isinstance(value, dict):
-        return {k: plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [plain(v) for v in value]
-    return value
-
-
 def ascii_only(value):
     return all(ord(c) < 128 for c in json.dumps(value, ensure_ascii=False))
-
-
-def ask(kind, schema, context, media=()):
-    # All model-facing context must be English; user requests are never copied into prompts.
-    if not ascii_only(context):
-        raise ValueError("model context must be English ASCII; correct the saved model response")
-    parts = [*media, {"text": prompt(kind)}, {"text": json.dumps(context)}]
-    for attempt in range(2):
-        answer = winky.gemini(parts, schema=schema)
-        if not isinstance(answer, dict):
-            raise ValueError("expected a structured model response")
-        answer = plain(answer)
-        if ascii_only(answer):
-            return answer
-        if not attempt:
-            log("gemini answered with non-English text; asking again")
-    raise ValueError("model response must use English")
 
 
 def still(source, frame, out):
@@ -263,24 +143,21 @@ def analyze(job, state, sid):
     return put(job, f"catalog/{sid}", video_info(out))
 
 
-def survey_clip(job, sid, info):
-    """The working copy itself, or a bitrate-capped copy when it is over the inline limit."""
-    path = working(job, sid)
-    if path.stat().st_size <= INLINE_LIMIT:
-        return path
-    out = job / "work" / f"{sid}-survey.mp4"
-    if not out.is_file():
-        fit_inline(["-i", path, "-an"], out, info["frames"] / FPS)
-    return out
+def frame_at(seconds, count):
+    if not math.isfinite(seconds) or not 0 <= seconds < count / FPS:
+        raise ValueError(f"time must be within the clip (0 to {count / FPS:g} seconds)")
+    return min(count - 1, round(seconds * FPS))
 
 
-def survey(job, state, sid):
+def survey(job, state, sid, at=None):
     info = saved(job, f"catalog/{sid}") or analyze(job, state, sid)
-    if saved(job, f"survey/{sid}"):
-        return saved(job, f"survey/{sid}")
-    answer = ask("survey", SURVEY, {"duration": info["frames"] / FPS},
-                 [winky.inline(survey_clip(job, sid, info), fps=REVIEW_FPS)])
-    return put(job, f"survey/{sid}", answer)
+    source = working(job, sid)
+    folder = job / "review" / f"{sid}-survey"
+    if at is not None:
+        frame = frame_at(at, info["frames"])
+        return {"at": frame / FPS, "image": str(still(source, frame, folder / f"frame-{frame}.png"))}
+    return {"source_video": str(source), "duration": info["frames"] / FPS,
+            **review.sheets(source, 0, info["frames"], (info["width"], info["height"]), folder)}
 
 
 def split_run(a, b, candidates):
@@ -333,6 +210,31 @@ def build_plan(info, survey):
     return {"total": total, "segments": segments, "originals": merged}
 
 
+def save_plan(job, sid, survey=None):
+    info = saved(job, f"catalog/{sid}")
+    if not info:
+        raise ValueError("run analyze first")
+    key = f"survey/{sid}"
+    previous = saved(job, key)
+    if survey is None:
+        if not previous:
+            raise ValueError("run survey and submit its findings with plan --input")
+        survey = previous
+    if not isinstance(survey, dict) or not all(k in survey for k in ("non_game", "end_card_start", "cuts", "inventory")):
+        raise ValueError("survey needs non_game, end_card_start, cuts and inventory")
+    ids = [item["id"] for item in survey["inventory"]]
+    if len(ids) != len(set(ids)):
+        raise ValueError("survey inventory IDs must be unique")
+    plan = build_plan(info, survey)
+    if previous and previous != survey and any(
+        next((job / folder).glob(f"{sid}-K*.json"), None)
+        for folder in ("state", "image-tasks", "references")
+    ):
+        raise ValueError("this source already has segment data; use a new job to change its survey")
+    put(job, key, survey)
+    return put(job, f"plans/{sid}", plan)
+
+
 def record(job, sid, seg):
     return saved(job, f"state/{sid}-{seg['id']}")
 
@@ -343,10 +245,10 @@ def predecessor(job, sid, plan, seg):
     return record(job, sid, plan["segments"][i - 1]).get("generation_id") if seg["continuous"] and i else None
 
 
-def check_token(job, sid, plan, seg):
+def check_token(job, sid, plan, seg, generation_id=None):
     i = plan["segments"].index(seg)
     previous = record(job, sid, plan["segments"][i - 1]).get("generation_id") if i else None
-    return digest([record(job, sid, seg).get("generation_id"), previous, seg["frames"]])
+    return digest([generation_id or record(job, sid, seg).get("generation_id"), previous, seg["frames"]])
 
 
 def approved(job, sid, plan, seg):
@@ -360,61 +262,43 @@ def ready(job, sid, plan, seg):
             raise ValueError(f"waiting for {sid}:{prev['id']}: check and approve first")
 
 
-def picture_issue(job, key, original, result, report):
-    """Point the agent to the untouched source and generated reference, without a comparison sheet."""
-    put(job, f"review/{key}", {**report, "images": {"original": str(Path(original).resolve()),
-                                                    "result": str(Path(result).resolve())}})
-    return job / "review" / f"{key}.json"
-
-
-def public(entry):
-    return {k: v for k, v in entry.items() if k != "path"}
-
-
-def tail_check(job, sid, plan, seg, previous):
-    """Gemini's same-shot verdict on the predecessor's last frame and this segment's first source frame, kept for
-    the predecessor generation it was made for."""
-    key = f"{sid}-{seg['id']}"
-    image = job / "references" / f"{key}-tail.png"
-    tail = saved(job, f"review/{key}-tail")
-    if tail.get("previous") == previous and image.is_file():
-        return tail
+def tail_images(job, sid, plan, seg, previous):
     prev = plan["segments"][plan["segments"].index(seg) - 1]
-    result = job / "ai" / f"{sid}-{prev['id']}.mp4"
-    still(result, video_info(result)["frames"] - 1, image)
-    first = still(working(job, sid), seg["frames"][0], job / "references" / f"{key}-first-source.png")
-    # Only shot continuity decides tail use; material quality is reviewed elsewhere.
-    tail = ask("tail", TAIL, {"operation": "same_shot_continuity"}, [winky.inline(image), winky.inline(first)])
-    return put(job, f"review/{key}-tail", {**tail, "previous": previous})
+    key = f"{sid}-{seg['id']}"
+    folder = job / "review" / f"{key}-tail-{previous}"
+    tail = folder / f"{key}-tail.png"
+    first = folder / "first-source.png"
+    if not tail.is_file():
+        still(job / "ai" / f"{sid}-{prev['id']}.mp4", prev["frames"][1] - prev["frames"][0] - 1, tail)
+    if not first.is_file():
+        still(working(job, sid), seg["frames"][0], first)
+    return {"tail": str(tail), "first": str(first)}
 
 
-def select_looks(job, at, full, available):
-    """IDs of the earlier generated pictures Gemini picks as the look for converting the frame at `at`."""
-    if not available:
-        return []
-    schema = deepcopy(SELECT)
-    schema["properties"]["references"].update(minItems=1, maxItems=min(15, len(available)))
-    schema["properties"]["references"]["items"]["enum"] = [r["id"] for r in available]
-    ids = ask("frames", schema, {"operation": "select_references", "at": at / FPS,
-                                 "available": [public(r) for r in available]},
-              [winky.inline(full), *[winky.inline(Path(r["path"])) for r in available]])["references"]
-    known = {r["id"] for r in available}
-    if not ids or len(ids) > 15 or len(set(ids)) != len(ids) or any(x not in known for x in ids):
-        raise ValueError(f"invalid image reference selection (1-15 existing IDs required): {ids!r}; "
-                         f"available: {sorted(known)!r}")
-    return ids
+def image_paths(job, rid):
+    folder = job / "references"
+    return {"original": str(folder / f"{rid}-source.png"), "result": str(folder / f"{rid}.png")}
 
 
 def convert(job, sid, rid, at, inventory, available):
-    """One converted full frame: the image task with its looks, then the strict coverage, logo and text inspection."""
-    full = still(working(job, sid), at, job / "references" / f"{rid}-source.png")
-    out = job / "references" / f"{rid}.png"
+    """Generate one full-frame reference and return its inspection images or accepted coverage."""
+    images = image_paths(job, rid)
+    full, out = Path(images["original"]), Path(images["result"])
+    if not full.is_file():
+        still(working(job, sid), at, full)
     task = saved(job, f"image-tasks/{rid}")
     if not task:
         needed = {x["id"] for x in inventory}
-        available = [r for r in available if needed.intersection(r["covers"])] or available[-1:]
-        ids = select_looks(job, at, full, available)
-        looks = [Path(next(r for r in available if r["id"] == x)["path"]) for x in ids]
+        selected = []
+        for ref in reversed(available):
+            if needed.intersection(ref["covers"]):
+                selected.append(ref)
+                needed.difference_update(ref["covers"])
+            if not needed or len(selected) == 15:
+                break
+        selected = selected or available[-1:]
+        ids = [ref["id"] for ref in selected]
+        looks = [Path(ref["path"]) for ref in selected]
         example = None if available else style_picture(job)
         looks += [example] if example else []
         uploaded = [lumos.upload(upload_copy(p), "image-to-image") for p in [full, *looks]]
@@ -433,75 +317,121 @@ def convert(job, sid, rid, at, inventory, available):
             raise RuntimeError(f"{error}; recorded as a service failure: rerun refs to submit again") from None
         net.download(lumos.result_urls(result)[0], out)
     coverage = saved(job, f"references/{rid}-coverage")
+    entry = {"id": rid, "path": str(out), "at": at / FPS, "dependencies": task.get("dependencies", []),
+             "generation_id": task["generation_id"]}
     if coverage.get("sha256") != sha(out):
-        answer = ask("frames", COVER, {"operation": "inspect_style_coverage", "target_style": look(job)["target"],
-                                     "inventory": inventory},
-                     [winky.inline(full), winky.inline(out)])
-        coverage = put(job, f"references/{rid}-coverage", {**answer, "sha256": sha(out)})
+        return {**entry, "status": "inspect_reference", "target_style": look(job)["target"],
+                "images": images, "inventory": inventory}
     if not coverage["ok"]:
-        evidence = picture_issue(job, rid, full, out, coverage)
-        raise ValueError(f"reference {rid} failed: {coverage['note']}; open the original images listed in "
-                         f"{evidence}; run refs --redo --segment {sid}:{rid.split('-')[1]}")
-    return {"id": rid, "path": str(out), "at": at / FPS, "covers": coverage["covers"],
-            "dependencies": task.get("dependencies", []), "generation_id": task["generation_id"]}
+        raise ValueError(f"reference {rid} failed: {coverage['note']}; run refs --redo")
+    return {**entry, "covers": coverage["covers"]}
 
 
-def refs(job, sid, plan, seg):
+def accept_reference(job, frame_ids, generation_id, covers, inventory):
+    for rid in frame_ids:
+        if saved(job, f"image-tasks/{rid}").get("generation_id") != generation_id:
+            continue
+        images = image_paths(job, rid)
+        if not all(Path(p).is_file() for p in images.values()):
+            raise ValueError("run refs to prepare the reference images first")
+        if not set(covers) <= {item["id"] for item in inventory}:
+            raise ValueError("--covers must list inventory IDs for this segment")
+        key = f"references/{rid}-coverage"
+        old = saved(job, key)
+        checksum = sha(Path(images["result"]))
+        if old.get("sha256") == checksum:
+            if not old["ok"]:
+                raise ValueError(f"reference {rid} failed: run refs --redo")
+            if set(old["covers"]) != set(covers):
+                raise ValueError(f"reference {rid} already has recorded coverage")
+            return
+        put(job, key, {"ok": True, "covers": list(dict.fromkeys(covers)), "sha256": checksum})
+        return
+    raise ValueError("unknown reference generation; use the generation_id printed by refs")
+
+
+def refs(job, sid, plan, seg, selection=None, accept=None, covers=()):
     ready(job, sid, plan, seg)
     key = f"{sid}-{seg['id']}"
     previous = predecessor(job, sid, plan, seg)
     existing = saved(job, f"references/{key}")
-    if existing and saved(job, f"references/{key}-dependency").get("previous") == previous:
+    if (selection is None and not accept and existing
+            and saved(job, f"references/{key}-dependency").get("previous") == previous
+            and all(Path(r["path"]).is_file() for r in existing)):
         return existing
     survey = saved(job, f"survey/{sid}")
     a, b = seg["frames"]
     inventory = [x for x in survey["inventory"] if x["start"] < b / FPS and x["end"] > a / FPS]
-    registry = saved(job, f"references/{sid}-registry", [])
-    chosen = []
-    if previous and tail_check(job, sid, plan, seg, previous)["ok"]:
-        chosen.append({"id": key + "-tail", "path": str(job / "references" / f"{key}-tail.png"), "covers": [],
-                       "at": a / FPS})
-    selection = saved(job, f"references/{key}-frames")
-    if not selection:
-        selection = put(job, f"references/{key}-frames",
-                        ask("frames", FRAMES, {"segment": [a / FPS, b / FPS], "inventory": inventory,
-                                               "existing": [public(r) for r in registry]}))
-    frames = list(selection["frames"])
-    if not chosen:
-        frames.insert(0, {"at": a / FPS, "covers": []})
-    seen = set()
-    for spec in frames:
-        at = min(b - 1, max(a, round(spec["at"] * FPS)))
-        if at in seen:
-            continue
-        seen.add(at)
-        rid = f"{key}-f{at}"
-        entry = next((r for r in registry if r["id"] == rid and Path(r["path"]).is_file()), None)
-        if entry is None:
-            known = {r["id"] for r in registry}
-            entry = convert(job, sid, rid, at, inventory, registry + [x for x in chosen if x["id"] not in known])
-            registry = [r for r in registry if r["id"] != rid] + [entry]
-            put(job, f"references/{sid}-registry", registry)
-        chosen.append(entry)
+    registry_key = f"references/{sid}-registry"
+    registry = {r["id"]: r for r in saved(job, registry_key, []) if Path(r["path"]).is_file()}
+    selection_key = f"references/{key}-frames"
+    supplied = selection is not None
+    if supplied:
+        if not isinstance(selection, dict):
+            raise ValueError("reference selection must be a JSON object")
+        selection = {**selection, "previous": previous}
+    else:
+        selection = saved(job, selection_key)
+    if not selection or selection.get("previous") != previous:
+        if accept:
+            raise ValueError("select reference frames first")
+        return {"status": "select_frames", "source_range": [a / FPS, b / FPS], "inventory": inventory,
+                "references": list(registry.values()),
+                "continuity_images": tail_images(job, sid, plan, seg, previous) if previous else None}
+
+    use_tail = selection.get("use_tail", False)
+    if not isinstance(use_tail, bool) or use_tail and not previous:
+        raise ValueError("use_tail requires a continuous predecessor")
+    frames = selection.get("frames", [])
     ids = selection.get("references", [])
-    if len(set(ids)) != len(ids) or any(x not in {r["id"] for r in registry} for x in ids):
+    if not isinstance(frames, list) or not isinstance(ids, list):
+        raise ValueError("frames and references must be lists")
+    if any(not isinstance(rid, str) or rid not in registry for rid in ids) or len(set(ids)) != len(ids):
         raise ValueError("invalid existing video reference IDs")
-    chosen += [next(r for r in registry if r["id"] == rid) for rid in ids if rid not in {r["id"] for r in chosen}]
+    times = [round(float(spec["at"] if isinstance(spec, dict) else spec) * FPS) for spec in frames]
+    if any(not a <= at < b for at in times):
+        raise ValueError("reference times must be within the segment on the source timeline")
+    if not use_tail:
+        times.insert(0, a)
+    frame_ids = {f"{key}-f{at}": at for at in times}
+    if len(set(ids) | frame_ids.keys()) + use_tail > 30:
+        raise ValueError("a segment supports at most 30 reference images")
+    if supplied:
+        (job / f"references/{key}.json").unlink(missing_ok=True)
+        put(job, selection_key, selection)
+    if accept:
+        accept_reference(job, frame_ids, accept, covers, inventory)
+
+    chosen = []
+    if use_tail:
+        tail = tail_images(job, sid, plan, seg, previous)["tail"]
+        chosen.append({"id": key + "-tail", "path": tail, "covers": [],
+                       "at": a / FPS})
+    for rid, at in frame_ids.items():
+        entry = registry.get(rid)
+        if entry is None:
+            available = [*registry.values(), *(ref for ref in chosen if ref["id"] not in registry)]
+            entry = convert(job, sid, rid, at, inventory, available)
+            if entry.get("status") == "inspect_reference":
+                return entry
+            registry[rid] = entry
+            put(job, registry_key, list(registry.values()))
+        chosen.append(entry)
+    chosen += [registry[rid] for rid in ids if rid not in frame_ids]
     missing = {x["id"] for x in inventory} - {x for r in chosen for x in r["covers"]}
-    if missing or not chosen or len(chosen) > 30:
-        raise ValueError(f"reference coverage incomplete or over 30 images: {sorted(missing)}")
+    if missing:
+        raise ValueError(f"reference coverage incomplete: {sorted(missing)}; update the selection with refs --input")
     put(job, f"references/{key}-dependency", {"previous": previous})
     return put(job, f"references/{key}", chosen)
 
 
-def normalize(job, sid, seg, raw, *, input_frames=None):
+def normalize(job, sid, seg, raw, *, input_frames=None, output=None):
     """The generated clip at the segment's frame count: one constant retime without motion warping; short-clip
     padding trimmed."""
     a, b = seg["frames"]
-    # Historical generations used a two-second input minimum and have no input frame count.
-    speed = (input_frames or max(2 * FPS, b - a)) / FPS / video_info(raw)["duration"]
-    ff(["-i", raw, *encode(f"setpts=PTS*{speed:.10f},fps={FPS},tpad=stop_mode=clone:stop_duration=1"),
-        "-frames:v", str(b - a)], job / "ai" / f"{sid}-{seg['id']}.mp4")
+    speed = (input_frames or max(MIN_FRAMES, b - a)) / FPS / video_info(raw)["duration"]
+    return ff(["-i", raw, *encode(f"setpts=PTS*{speed:.10f},fps={FPS},tpad=stop_mode=clone:stop_duration=1"),
+               "-frames:v", str(b - a)], output or job / "ai" / f"{sid}-{seg['id']}.mp4")
 
 
 def render(job, sid, plan, seg):
@@ -517,11 +447,9 @@ def render(job, sid, plan, seg):
     if not references or saved(job, f"references/{key}-dependency").get("previous") != previous:
         raise ValueError("run refs first")
     basis = digest([previous, [[x["id"], x.get("generation_id")] for x in references]])
-    if r.get("status") == "done":
-        if r.get("references") == basis:
-            return r
-        # Rendered from other references or after another predecessor: a fresh render whose quality retries start
-        # again; the earlier attempts stay in the history.
+    if r.get("status") == "done" and r.get("references") == basis:
+        return r
+    if r.get("generation_id") and r.get("references") != basis:
         attempt = {**{k: v for k, v in r.items() if k != "history"}, "superseded": "references changed"}
         r = put(job, f"state/{key}", {"history": [*r.get("history", []), attempt]})
     a, b = seg["frames"]
@@ -535,7 +463,7 @@ def render(job, sid, plan, seg):
         raise ValueError("reference clip exceeds upload limit")
     if not r.get("generation_id"):
         uses_tail = references[0]["id"] == f"{key}-tail"
-        text = look(job)["video"] + (" " + prompt("continuation") if uses_tail else "") + " " + lumos.CASH_GUIDANCE
+        text = look(job)["video"] + (" " + prompt("continuation") if uses_tail else "")
         started = lumos.submit_video_edit(lumos.upload(clip, "video-to-video"),
                                           [lumos.upload(upload_copy(Path(x["path"])), "video-to-video")
                                            for x in references], text)
@@ -556,11 +484,10 @@ def render(job, sid, plan, seg):
     return put(job, f"state/{key}", r)
 
 
-def pieces(plan, upto=None):
+def pieces(plan):
     rows = [{"frames": x, "original": True} for x in plan["originals"]]
     rows += [{**s, "original": False} for s in plan["segments"]]
-    end = next(s["frames"][1] for s in plan["segments"] if s["id"] == upto) if upto else plan["total"]
-    return [r for r in sorted(rows, key=lambda r: r["frames"][0]) if r["frames"][0] < end]
+    return sorted(rows, key=lambda r: r["frames"][0])
 
 
 def join_transition_frames(previous, current):
@@ -615,59 +542,50 @@ def assemble(job, state, sid, plan):
     return output
 
 
-def review_clip(job, sid, start, end, result, result_start, kind, folder, context):
-    info = saved(job, f"catalog/{sid}")
-    compare = grid_clip([{"path": working(job, sid), "start": start, "end": end, "label": "ORIGINAL"},
-                         {"path": result, "start": result_start, "end": result_start + end - start,
-                          "label": "RESULT"}],
-                        (info["width"], info["height"]), folder / f"{kind}.mp4")
-    answer = ask(kind, REVIEW, context, [winky.inline(compare, fps=REVIEW_FPS)])
-    last = max(0.0, end - start - 1 / FPS)
-    for issue in answer["issues"]:
-        issue["start"], issue["end"] = sorted(min(max(0.0, float(issue[k])), end - start) for k in ("start", "end"))
-    if answer["issues"]:
-        answer["verdict"] = "fail"      # a pass that lists issues still needs the agent's look
-    for index, issue in enumerate(answer["issues"], 1):
-        issue["frames"] = []
-        for number, moment in enumerate(issue_moments(issue["start"], issue["end"], last), 1):
-            original = still(working(job, sid), round((start + moment) * FPS),
-                             folder / f"{kind}-issue-{index}-{number}-original.png")
-            generated = still(result, round((result_start + moment) * FPS),
-                              folder / f"{kind}-issue-{index}-{number}-result.png")
-            issue["frames"].append({"at": moment, "original": str(original.resolve()),
-                                    "result": str(generated.resolve())})
-    return answer
-
-
-def check(job, sid, plan, seg):
+def check(job, sid, plan, seg, generation_id=None, at=None):
     ready(job, sid, plan, seg)
     r = record(job, sid, seg)
     if r.get("status") != "done":
         raise ValueError("render first")
     if r.get("after") != predecessor(job, sid, plan, seg):
         raise ValueError("the previous segment changed after this render: run refs and render again")
-    folder = job / "review" / f"{sid}-{seg['id']}-{r['generation_id']}"
-    folder.mkdir(parents=True, exist_ok=True)
+    key = f"{sid}-{seg['id']}"
+    current = r["generation_id"]
+    generation_id = generation_id or current
+    token = check_token(job, sid, plan, seg, generation_id)
+    folder = job / "review" / f"{key}-{generation_id}-{token[:12]}"
+    source = working(job, sid)
+    result = job / "ai" / f"{key}.mp4"
+    if generation_id != current:
+        prior = next((item for item in r.get("history", []) if item.get("generation_id") == generation_id), {})
+        if prior.get("status") != "done" or prior.get("superseded"):
+            raise ValueError("select a completed generation of this segment")
+        result = folder / "result.mp4"
+        if not result.is_file():
+            normalize(job, sid, seg, job / "raw" / f"{key}-{generation_id}.mp4", input_frames=prior.get("input_frames"), output=result)
     a, b = seg["frames"]
-    rows = pieces(plan, seg["id"])
-    transition = join_transition_frames(rows[-2] if len(rows) > 1 else None, rows[-1])
-    segment = review_clip(job, sid, a / FPS, b / FPS, job / "ai" / f"{sid}-{seg['id']}.mp4", 0, "segment", folder,
-                          {"target_style": look(job)["target"]})
-    answer = {"token": check_token(job, sid, plan, seg), "seam": None, "segment": segment,
-              "verdict": segment["verdict"], "status": "complete",
-              "decision": {"transition_frames": transition,
-                           "reason": "Four-frame gameplay join; hard cuts at original footage boundaries; "
-                                     "no seam review."}}
-    return put(job, f"checks/{sid}-{seg['id']}", answer)
+    if at is not None:
+        frame = frame_at(at, b - a)
+        original = still(source, a + frame, folder / f"frame-{frame}-source.png")
+        generated = still(result, frame, folder / f"frame-{frame}-result.png")
+        return {"at": frame / FPS, "images": {"original": str(original), "result": str(generated)}}
+    info = saved(job, f"catalog/{sid}")
+    evidence = review.sheets(source, a, b, (info["width"], info["height"]), folder, result)
+    data = {"token": token, "generation_id": generation_id, "source_video": str(source),
+            "source_range": [a / FPS, b / FPS], "result_video": str(result), "target_style": look(job)["target"], **evidence}
+    if generation_id == current:
+        put(job, f"checks/{key}", data)
+    return data
 
 
 def approve(job, sid, plan, seg):
     ready(job, sid, plan, seg)
     c = saved(job, f"checks/{sid}-{seg['id']}")
     token = check_token(job, sid, plan, seg)
-    if c.get("token") != token or c.get("verdict") != "pass":
-        raise ValueError("approval requires a passed check of the current generation")
     r = record(job, sid, seg)
+    sheets = c.get("sheets")
+    if r.get("status") != "done" or c.get("token") != token or not sheets or not all(Path(p).is_file() for p in sheets):
+        raise ValueError("run check and review the current generation before approving")
     r["approved"] = token
     return put(job, f"state/{sid}-{seg['id']}", r)
 
@@ -679,7 +597,7 @@ def redo(job, sid, plan, seg, reason):
         raise ValueError("no generation to redo")
     if r.get("retries", 0) >= MAX_RETRIES:
         raise ValueError("two retries exhausted: compare the three versions and use select-best")
-    history = r.get("history", []) + [{k: v for k, v in r.items() if k != "history"}]
+    history = [*r.get("history", []), {**{k: v for k, v in r.items() if k != "history"}, "review_note": reason}]
     return put(job, f"state/{sid}-{seg['id']}", {"retries": r.get("retries", 0) + 1, "history": history,
                                                  "reason": reason})
 
@@ -725,7 +643,7 @@ def reset_refs(job, sid, plan, seg):
         task.unlink()
     for path in (job / "references").glob(key + "-f*-coverage.json"):
         path.unlink()
-    for suffix in ("", "-frames", "-dependency"):
+    for suffix in ("", "-dependency"):
         (job / "references" / (key + suffix + ".json")).unlink(missing_ok=True)
     registry = saved(job, f"references/{sid}-registry", [])
     put(job, f"references/{sid}-registry", [r for r in registry if not r["id"].startswith(key + "-f")])
@@ -737,22 +655,27 @@ def segment_command(command, job, sid, plan, seg, args):
             raise ValueError("--redo is only for refs")
         ready(job, sid, plan, seg)
         reset_refs(job, sid, plan, seg)
+    if command == "refs":
+        selection = read(args.input) if args.input else None
+        return refs(job, sid, plan, seg, selection, args.accept, args.covers)
+    if command == "check":
+        return check(job, sid, plan, seg, args.generation_id, args.at)
     if command == "redo":
         return redo(job, sid, plan, seg, args.reason)
     if command == "select-best":
         if not args.generation_id:
             raise ValueError("select-best requires --generation-id and --reason")
         return select_best(job, sid, plan, seg, args.generation_id, args.reason)
-    return {"refs": refs, "render": render, "check": check, "approve": approve}[command](job, sid, plan, seg)
+    return {"render": render, "approve": approve}[command](job, sid, plan, seg)
 
 
 def source_command(command, job, state, sid, args, selected):
     if command == "analyze":
         return analyze(job, state, sid)
     if command == "survey":
-        return survey(job, state, sid)
+        return survey(job, state, sid, args.at)
     if command == "plan":
-        return put(job, f"plans/{sid}", build_plan(saved(job, f"catalog/{sid}"), saved(job, f"survey/{sid}")))
+        return save_plan(job, sid, read(args.input) if args.input else None)
     plan = saved(job, f"plans/{sid}")
     if not plan:
         raise ValueError("run plan first")
@@ -761,7 +684,7 @@ def source_command(command, job, state, sid, args, selected):
             raise ValueError("all segments must be approved before delivery")
         return str(assemble(job, state, sid, plan))
     if command == "status":
-        return [{"segment": s["id"], "approved": approved(job, sid, plan, s), **record(job, sid, s)}
+        return [{**record(job, sid, s), "segment": s["id"], "approved": approved(job, sid, plan, s)}
                 for s in plan["segments"]]
     wanted = args.segment or next((x for x in selected if x.startswith(sid + ":")), None)
     if wanted:
@@ -783,11 +706,13 @@ def main():
                                        "render", "check", "approve", "redo", "select-best", "assemble", "status"])
     p.add_argument("--job-dir", type=Path)
     p.add_argument("--work-order", type=Path)
+    p.add_argument("--input", type=Path, help="survey findings for plan, or frame selection for refs")
     p.add_argument("--segment")
     p.add_argument("--generation-id")
+    p.add_argument("--at", type=float, help="full-size frame at seconds from the start of the source (survey) or segment (check)")
     p.add_argument("--only", nargs="*", help="source/segment IDs, or V01 V02 ... for element variants")
-    p.add_argument("--input", type=Path, help="elements variant plan JSON")
-    p.add_argument("--at", type=float, help="source playback time in seconds for element survey or check")
+    p.add_argument("--accept", help="record the inspected reference's generation ID (refs)")
+    p.add_argument("--covers", nargs="*", default=[], help="inventory IDs visible in the accepted reference")
     p.add_argument("--reason", help="English explanation (redo, select-best)")
     p.add_argument("--redo", action="store_true", help="explicitly redo this segment's reference images")
     args, extra = p.parse_known_args()
@@ -813,10 +738,19 @@ def main():
             from reskin import elements
             runtime.ensure("media")
             return elements.dispatch(args, job, state)
-        if args.input or args.at is not None:
-            raise ValueError("--input and --at require an elements job")
         if args.command in ("approve", "redo", "select-best") and not args.segment:
             raise ValueError("--segment is required for approve, redo and select-best")
+        if args.input and not (
+            (args.command == "plan" and len(args.only or []) == 1 and ":" not in args.only[0])
+            or (args.command == "refs" and args.segment)
+        ):
+            raise ValueError("--input requires plan --only <source> or refs --segment <segment>")
+        if args.accept and (args.command != "refs" or not args.segment or args.input or args.redo):
+            raise ValueError("--accept requires refs --segment <segment> after inspecting the images")
+        if args.covers and not args.accept:
+            raise ValueError("--covers requires --accept")
+        if args.at is not None and args.command not in ("survey", "check"):
+            raise ValueError("--at applies to survey or check")
         runtime.ensure("media")
         errors = []
         selected = args.only or []

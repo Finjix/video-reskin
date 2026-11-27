@@ -61,7 +61,7 @@ class NetTests(unittest.TestCase):
         self.assertIn(b"\x89PNG", body)
 
     def test_double_encoded_error(self):
-        inner = {"type": "error", "error": {"type": "winky_permission_error", "message": "no"}}
+        inner = {"type": "error", "error": {"type": "permission_error", "message": "no"}}
         self.assertEqual(net.decode_json(json.dumps(json.dumps(inner)).encode()), inner)
 
 
@@ -71,16 +71,14 @@ class CredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             old = os.environ.get("VIDEO_RESKIN_HOME")
             os.environ["VIDEO_RESKIN_HOME"] = folder
-            saved_env = os.environ.pop(credentials.ENV_KEY, None)
             try:
                 with self.assertRaises(credentials.MissingCredential):
-                    credentials.winky_key()
-                credentials.save_winky_key("  lumos-test-key  ")
-                self.assertEqual(credentials.winky_key(), "lumos-test-key")
-                self.assertNotIn("lumos-test-key", Path(folder, "credentials.json").read_text(encoding="utf-8"))
+                    credentials.lumos_refresh_token()
                 credentials.save_lumos_login("token-1", {"user_id": "u", "name": "名字"})
                 self.assertEqual(credentials.lumos_refresh_token(), "token-1")
-                self.assertEqual(credentials.summary()["lumos_user"]["name"], "名字")
+                text = Path(folder, "credentials.json").read_text(encoding="utf-8")
+                self.assertNotIn("token-1", text)
+                self.assertEqual(json.loads(text)["lumos_refresh_token"]["user"]["name"], "名字")
                 credentials.forget_lumos_login()
                 with self.assertRaises(credentials.MissingCredential):
                     credentials.lumos_refresh_token()
@@ -89,8 +87,6 @@ class CredentialTests(unittest.TestCase):
                     os.environ.pop("VIDEO_RESKIN_HOME", None)
                 else:
                     os.environ["VIDEO_RESKIN_HOME"] = old
-                if saved_env is not None:
-                    os.environ[credentials.ENV_KEY] = saved_env
 
 
 if __name__ == "__main__":

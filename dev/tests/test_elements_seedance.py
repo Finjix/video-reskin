@@ -37,7 +37,7 @@ class SeedanceSegmentTests(unittest.TestCase):
 
     def start(self, video, images, prompt, *, resolution, model):
         self.assertTrue(images)
-        self.assertIn(lumos.CASH_GUIDANCE, prompt)
+        self.assertIn(seedance.CASH_GUIDANCE, prompt)
         self.assertEqual((resolution, model), (seedance.RESOLUTION, seedance.MODEL))
         generation_id = f"g{len(self.inputs) + 1}"
         self.inputs[generation_id] = Path(video["path"])
@@ -60,9 +60,8 @@ class SeedanceSegmentTests(unittest.TestCase):
     def request(self, sequence=1):
         return next((self.folder / "seedance").glob(f"{sequence:02}-*/request.json"))
 
-    def test_new_and_legacy_orders_submit_and_reuse_without_a_job_limit(self):
-        for index, order in enumerate(({}, {"generation_limit": 0}), 1):
-            write(self.folder / "job.json", order)
+    def test_completed_interval_is_reused_without_another_submission(self):
+        for index in (1, 2):
             segment = {**self.segment, "prompt": f"design {index}"}
             self.assertEqual(self.obtain(segment)[0]["generation_id"], f"g{index}")
             self.assertEqual(self.obtain(segment)[0]["generation_id"], f"g{index}")
@@ -133,19 +132,15 @@ class SeedanceSegmentTests(unittest.TestCase):
         seedance.reserve_submission(self.folder, "other-source", "other-source", "V02", [0, 30])
         seedance.reserve_submission(self.folder, "next", "source", "V02", [30, 60])
 
-    def test_legacy_receipts_and_ambiguous_key_only_reservations_do_not_reset_limits(self):
-        seedance_dir = self.folder / "elements" / "V01" / "seedance" / "old"
-        original = {"key": "old-key", "source_sha256": "source", "range": [0, 30],
-                    "generation_id": "rejected-2", "failed_generation_ids": ["rejected-1"]}
-        write(seedance_dir / "request.json", original)
-        ledger = self.folder / "elements" / "submissions.json"
-        write(ledger, ["old-key"] * 3)  # The third POST timed out without an ID.
+    def test_missing_ledger_is_rebuilt_from_receipts(self):
+        receipt = {"key": "old-key", "source_sha256": "source", "range": [0, 30],
+                   "generation_id": "rejected-2", "failed_generation_ids": ["rejected-1"]}
+        write(self.folder / "elements" / "V01" / "seedance" / "old" / "request.json", receipt)
+        seedance.reserve_submission(self.folder, "third", "source", "V01", [0, 29])
         with self.assertRaisesRegex(ValueError, "3-submission"):
-            seedance.reserve_submission(self.folder, "new-key", "source", "V01", [0, 29])
+            seedance.reserve_submission(self.folder, "fourth", "source", "V01", [0, 29])
         seedance.reserve_submission(self.folder, "adjacent", "source", "V01", [30, 60])
-        history = read(ledger)
-        self.assertEqual(len(history), 4)
-        self.assertTrue(all(row["range"] == [0, 30] for row in history[:3]))
+        self.assertEqual(len(read(self.folder / "elements" / "submissions.json")), 4)
 
     def test_merging_adjacent_segments_counts_coverage_per_frame(self):
         def reserve(key, span):
@@ -160,7 +155,7 @@ class SeedanceSegmentTests(unittest.TestCase):
     def test_one_high_rate_source_picture_survives_padding_and_recovers_bad_old_cache(self):
         path = self.folder / "one" / "original.mp4"
         path.parent.mkdir()
-        # This is the video-less MP4 the old filter chain cached when the sole frame was shorter than 1/24 s.
+        # A cached clip without pictures, as fps-before-padding produces for a frame shorter than 1/24 s.
         pipeline.ff(["-i", self.source["path"], "-an", "-vf",
                      "trim=start_frame=10:end_frame=11,setpts=PTS-STARTPTS,fps=24", "-c:v", "libx264"], path)
         with self.assertRaisesRegex(ValueError, "no video stream"):
