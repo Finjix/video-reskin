@@ -7,7 +7,7 @@ description: Use Seedance video editing to restyle gameplay in realistic or dark
 
 Use the bundled Windows launcher `scripts/video_reskin.cmd`; it prepares the private runtime. Run `auth` to check the Lumos login. If needed, run `login --no-open --timeout 1800` and show each new QR image for a Feishu scan.
 
-For 换元素 or any object substitution, follow the [element workflow](references/elements.md). The steps below cover full-frame style changes.
+For 换元素 or any object substitution, follow the [element workflow](references/elements.md). Seedance must generate the replacement itself. Rework defects mainly by regenerating with Seedance. Use local texture overlays, tracking or per-frame masks only for localized defects that regeneration cannot fix, as the element workflow describes. The steps below cover full-frame style changes.
 
 ## Realistic and dark styles
 
@@ -19,4 +19,4 @@ For 换元素 or any object substitution, follow the [element workflow](referenc
 
 Use `status` to resume. Commands reuse submitted generation IDs. If the service reports a failed generation, rerun the command to resubmit it.
 
-Place work files in the job's `temp` folder. Report the delivery location, review and retry outcomes, and any remaining defects in the user's language.
+Place work files in the job's `temp` folder. Report the delivery location, review and retry outcomes, any local post-production fixes with their frame ranges and methods, and any remaining defects in the user's language.
